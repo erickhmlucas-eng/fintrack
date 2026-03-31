@@ -47,6 +47,14 @@ const DEFAULT_SETTINGS = {
   banks:DEFAULT_BANKS,catBudgets:{},
 };
 
+// ─── localStorage helpers ─────────────────────────────────────────────────────
+function lsGet(key) {
+  try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : null; } catch(_) { return null; }
+}
+function lsSet(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch(_) {}
+}
+
 const NAV = [
   {id:"dashboard",icon:"📊",label:"Início"},
   {id:"incomes",  icon:"📥",label:"Entradas"},
@@ -183,7 +191,6 @@ function Modal({onClose,children,tall=false}){
   );
 }
 
-// ─── BULK PANEL ───────────────────────────────────────────────────────────────
 function BulkPanel({type,banks,vy,vm,onConfirm,onClose}){
   const [text,setText]=useState("");
   const [preview,setPreview]=useState([]);
@@ -222,14 +229,10 @@ function BulkPanel({type,banks,vy,vm,onConfirm,onClose}){
                   <div key={i} style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:10,padding:"9px 11px",display:"flex",alignItems:"center",gap:9}}>
                     {cat&&<span style={{fontSize:16}}>{cat.icon}</span>}
                     <div style={{flex:1,minWidth:0}}>
-                      <div style={{fontSize:12,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
-                        {p.name||p.description||p.type}
-                      </div>
+                      <div style={{fontSize:12,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.name||p.description||p.type}</div>
                       <div style={{fontSize:9,color:"var(--muted)",marginTop:1}}>
                         {p.date&&p.date.slice(5).split("-").reverse().join("/")}
-                        {p.category&&` · ${p.category}`}
-                        {p.bank&&` · ${p.bank}`}
-                        {p.method&&` · ${p.method}`}
+                        {p.category&&` · ${p.category}`}{p.bank&&` · ${p.bank}`}{p.method&&` · ${p.method}`}
                       </div>
                     </div>
                     <div style={{fontWeight:700,fontSize:13,flexShrink:0,color:type==="income"?"var(--green)":type==="investment"?"var(--gold)":"var(--wine)"}}>
@@ -255,56 +258,38 @@ function BulkPanel({type,banks,vy,vm,onConfirm,onClose}){
   );
 }
 
-// ─── CARTÕES PAGE ─────────────────────────────────────────────────────────────
 function CartoesPage({expenses,banks,vm,vy}){
-  const creditBanks=banks.filter(b=>
-    expenses.some(e=>e.bank===b.name&&e.method==="Crédito")
-  );
-  const allCreditBanks=banks; // show all for selector
   const [selected,setSelected]=useState(()=>{
     const first=banks.find(b=>expenses.some(e=>e.bank===b.name&&e.method==="Crédito"));
     return first?.name||banks[0]?.name||"";
   });
-
   const bank=banks.find(b=>b.name===selected)||banks[0];
-  const items=expenses.filter(e=>e.bank===selected&&e.method==="Crédito")
-    .sort((a,b)=>new Date(b.date)-new Date(a.date));
+  const items=expenses.filter(e=>e.bank===selected&&e.method==="Crédito").sort((a,b)=>new Date(b.date)-new Date(a.date));
   const total=items.reduce((s,e)=>s+e.value,0);
   const limit=bank?.limit||0;
   const pct=limit>0?Math.min((total/limit)*100,100):0;
   const available=limit>0?Math.max(limit-total,0):null;
-
-  // Category breakdown for this card
-  const catBreak=EXPENSE_CATS.map(c=>{
-    const v=items.filter(e=>e.category===c.name).reduce((s,e)=>s+e.value,0);
-    return {...c,value:v};
-  }).filter(c=>c.value>0).sort((a,b)=>b.value-a.value);
+  const catBreak=EXPENSE_CATS.map(c=>({...c,value:items.filter(e=>e.category===c.name).reduce((s,e)=>s+e.value,0)})).filter(c=>c.value>0).sort((a,b)=>b.value-a.value);
   const maxCat=catBreak[0]?.value||1;
-
   return (
     <div className="pg">
       <div className="st">Cartões — {MONTHS_FULL[vm]} {vy}</div>
-
-      {/* Card selector */}
       <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-        {allCreditBanks.map(b=>{
+        {banks.map(b=>{
           const hasData=expenses.some(e=>e.bank===b.name&&e.method==="Crédito");
+          const tot=expenses.filter(e=>e.bank===b.name&&e.method==="Crédito").reduce((s,e)=>s+e.value,0);
           return (
             <button key={b.id} onClick={()=>setSelected(b.name)}
               style={{padding:"7px 14px",borderRadius:20,border:`2px solid ${selected===b.name?b.color:"var(--border)"}`,
                       background:selected===b.name?b.color+"22":"var(--surface)",
                       color:selected===b.name?b.color:"var(--muted)",
-                      fontFamily:"'Sora',sans-serif",fontSize:12,fontWeight:700,cursor:"pointer",
-                      opacity:hasData?1:0.5}}>
+                      fontFamily:"'Sora',sans-serif",fontSize:12,fontWeight:700,cursor:"pointer",opacity:hasData?1:0.5}}>
               {b.name}
-              {hasData&&<span style={{marginLeft:5,fontSize:9,background:b.color,color:"#fff",
-                padding:"1px 5px",borderRadius:10}}>{fmt(expenses.filter(e=>e.bank===b.name&&e.method==="Crédito").reduce((s,e)=>s+e.value,0))}</span>}
+              {hasData&&<span style={{marginLeft:5,fontSize:9,background:b.color,color:"#fff",padding:"1px 5px",borderRadius:10}}>{fmt(tot)}</span>}
             </button>
           );
         })}
       </div>
-
-      {/* Summary card */}
       <div className="card">
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
           <div>
@@ -319,39 +304,22 @@ function CartoesPage({expenses,banks,vm,vy}){
             {limit>0&&<div style={{fontSize:10,color:"var(--muted)"}}>de {fmt(limit)} de limite</div>}
           </div>
         </div>
-
-        {limit>0&&(
-          <>
-            <div style={{height:8,background:"var(--border)",borderRadius:4,overflow:"hidden",marginBottom:6}}>
-              <div style={{height:"100%",width:`${pct}%`,borderRadius:4,transition:"width .6s",
-                background:pct>90?"var(--wine)":pct>70?"var(--gold)":bank?.color}}/>
-            </div>
-            <div style={{display:"flex",justifyContent:"space-between",fontSize:11}}>
-              <span style={{color:pct>90?"var(--wine)":pct>70?"var(--gold)":"var(--muted)"}}>
-                {pct.toFixed(0)}% usado
-              </span>
-              <span style={{color:"var(--green)",fontWeight:600}}>
-                {fmt(available)} disponível
-              </span>
-            </div>
-          </>
-        )}
-
-        {items.length===0&&(
-          <div style={{textAlign:"center",color:"var(--muted)",fontSize:12,padding:"16px 0"}}>
-            Nenhum gasto no crédito para este cartão em {MONTHS_FULL[vm]}.
+        {limit>0&&<>
+          <div style={{height:8,background:"var(--border)",borderRadius:4,overflow:"hidden",marginBottom:6}}>
+            <div style={{height:"100%",width:`${pct}%`,borderRadius:4,transition:"width .6s",background:pct>90?"var(--wine)":pct>70?"var(--gold)":bank?.color}}/>
           </div>
-        )}
+          <div style={{display:"flex",justifyContent:"space-between",fontSize:11}}>
+            <span style={{color:pct>90?"var(--wine)":pct>70?"var(--gold)":"var(--muted)"}}>{pct.toFixed(0)}% usado</span>
+            <span style={{color:"var(--green)",fontWeight:600}}>{fmt(available)} disponível</span>
+          </div>
+        </>}
+        {items.length===0&&<div style={{textAlign:"center",color:"var(--muted)",fontSize:12,padding:"16px 0"}}>Nenhum gasto no crédito para este cartão em {MONTHS_FULL[vm]}.</div>}
       </div>
-
-      {/* Category breakdown */}
       {catBreak.length>0&&(
         <div className="card">
           <div className="st" style={{marginBottom:10}}>Por categoria</div>
           <div style={{display:"flex",justifyContent:"center",marginBottom:14}}>
-            <Donut size={130} thick={22}
-              data={catBreak.map(c=>({color:c.color,value:c.value}))}
-              label={fmt(total)} sublabel={selected}/>
+            <Donut size={130} thick={22} data={catBreak.map(c=>({color:c.color,value:c.value}))} label={fmt(total)} sublabel={selected}/>
           </div>
           {catBreak.map(c=>(
             <div key={c.name} style={{marginBottom:9}}>
@@ -363,14 +331,12 @@ function CartoesPage({expenses,banks,vm,vy}){
                 </span>
               </div>
               <div style={{height:5,background:"var(--border)",borderRadius:3,overflow:"hidden"}}>
-                <div style={{height:"100%",width:`${(c.value/maxCat)*100}%`,background:c.color,borderRadius:3,transition:"width .6s"}}/>
+                <div style={{height:"100%",width:`${(c.value/maxCat)*100}%`,background:c.color,borderRadius:3}}/>
               </div>
             </div>
           ))}
         </div>
       )}
-
-      {/* Items list */}
       {items.length>0&&(
         <div>
           <div className="st" style={{marginBottom:8}}>Lançamentos ({items.length})</div>
@@ -379,21 +345,13 @@ function CartoesPage({expenses,banks,vm,vy}){
               const cat=CAT_MAP[e.category]||{icon:"📌",color:"#888"};
               const d=e.date?e.date.slice(5).split("-").reverse().join("/"):"";
               return (
-                <div key={e.id} style={{display:"flex",alignItems:"center",gap:8,padding:"10px",
-                     background:"var(--surface)",border:"1px solid var(--border)",borderRadius:11}}>
-                  <div style={{width:32,height:32,borderRadius:9,display:"flex",alignItems:"center",
-                               justifyContent:"center",fontSize:14,flexShrink:0,background:cat.color+"33"}}>
-                    {cat.icon}
-                  </div>
+                <div key={e.id} style={{display:"flex",alignItems:"center",gap:8,padding:"10px",background:"var(--surface)",border:"1px solid var(--border)",borderRadius:11}}>
+                  <div style={{width:32,height:32,borderRadius:9,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,flexShrink:0,background:cat.color+"33"}}>{cat.icon}</div>
                   <div style={{flex:1,minWidth:0}}>
-                    <div style={{fontSize:12,fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
-                      {e.description||e.category}
-                    </div>
+                    <div style={{fontSize:12,fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{e.description||e.category}</div>
                     <div style={{fontSize:9,color:"var(--muted)",marginTop:2}}>{d} · {e.category}</div>
                   </div>
-                  <div style={{fontSize:12,fontWeight:700,color:"var(--wine)",flexShrink:0}}>
-                    -{fmt(e.value)}
-                  </div>
+                  <div style={{fontSize:12,fontWeight:700,color:"var(--wine)",flexShrink:0}}>-{fmt(e.value)}</div>
                 </div>
               );
             })}
@@ -418,64 +376,62 @@ export default function FinTrack(){
   const [toast,setToast]=useState(null);
   const [prevBalance,setPrevBalance]=useState(0);
 
+  // Load settings & debts
   useEffect(()=>{
-    (async()=>{
-      try{const s=await window.storage.get(SETTINGS_KEY);if(s)setSettings(p=>({...DEFAULT_SETTINGS,...JSON.parse(s.value),banks:JSON.parse(s.value).banks||DEFAULT_BANKS,catBudgets:JSON.parse(s.value).catBudgets||{}}));}catch(_){}
-      try{const d=await window.storage.get(DEBTS_KEY);if(d)setDebts(JSON.parse(d.value));}catch(_){}
-      setLoaded(true);
-    })();
+    const s=lsGet(SETTINGS_KEY);
+    if(s) setSettings(p=>({...DEFAULT_SETTINGS,...s,banks:s.banks||DEFAULT_BANKS,catBudgets:s.catBudgets||{}}));
+    const d=lsGet(DEBTS_KEY);
+    if(d) setDebts(d);
+    setLoaded(true);
   },[]);
 
+  // Load month + carry-over fixed
   useEffect(()=>{
     if(!loaded)return;
-    (async()=>{
-      try{
-        const r=await window.storage.get(monthKey(vy,vm));
-        if(r){setData(JSON.parse(r.value));}
-        else{
-          const pm=vm===0?11:vm-1,py=vm===0?vy-1:vy;
-          let carried=[];
-          try{const pr=await window.storage.get(monthKey(py,pm));if(pr){const prev=JSON.parse(pr.value);carried=(prev.fixed||[]).filter(f=>!f.isDebt).map(f=>({...f,id:uid(),paid:false}));}}catch(_){}
-          setData({...EMPTY_MONTH(),fixed:carried,initialized:true});
-        }
-      }catch(_){setData(EMPTY_MONTH());}
-    })();
-  },[vm,vy,loaded]);
-
-  useEffect(()=>{
-    if(!loaded)return;
-    (async()=>{
+    const r=lsGet(monthKey(vy,vm));
+    if(r){ setData(r); }
+    else{
       const pm=vm===0?11:vm-1,py=vm===0?vy-1:vy;
-      try{
-        const r=await window.storage.get(monthKey(py,pm));
-        if(!r){setPrevBalance(0);return;}
-        const d=JSON.parse(r.value);
-        const inc=d.incomes.reduce((s,t)=>s+t.value,0);
-        const exp=d.expenses.reduce((s,t)=>s+t.value,0);
-        const fix=d.fixed.reduce((s,t)=>s+(t.value||0),0);
-        const inv=d.investments.reduce((s,t)=>s+t.value,0);
-        setPrevBalance(Math.max(inc-exp-fix-inv,0));
-      }catch(_){setPrevBalance(0);}
-    })();
+      const pr=lsGet(monthKey(py,pm));
+      const carried=pr?(pr.fixed||[]).filter(f=>!f.isDebt).map(f=>({...f,id:uid(),paid:false})):[];
+      setData({...EMPTY_MONTH(),fixed:carried,initialized:true});
+    }
   },[vm,vy,loaded]);
 
-  const loadYearCache=useCallback(async()=>{
+  // Load prev month balance
+  useEffect(()=>{
+    if(!loaded)return;
+    const pm=vm===0?11:vm-1,py=vm===0?vy-1:vy;
+    const r=lsGet(monthKey(py,pm));
+    if(!r){setPrevBalance(0);return;}
+    const inc=r.incomes.reduce((s,t)=>s+t.value,0);
+    const exp=r.expenses.reduce((s,t)=>s+t.value,0);
+    const fix=r.fixed.reduce((s,t)=>s+(t.value||0),0);
+    const inv=r.investments.reduce((s,t)=>s+t.value,0);
+    setPrevBalance(Math.max(inc-exp-fix-inv,0));
+  },[vm,vy,loaded]);
+
+  // Load year cache
+  const loadYearCache=useCallback(()=>{
     const cache={};
     for(let m=0;m<12;m++){
-      try{const r=await window.storage.get(monthKey(vy,m));cache[m]=r?JSON.parse(r.value):EMPTY_MONTH();}
-      catch(_){cache[m]=EMPTY_MONTH();}
+      const r=lsGet(monthKey(vy,m));
+      cache[m]=r||EMPTY_MONTH();
     }
     setYearCache(cache);
   },[vy]);
 
+  // Persist month then reload cache
   useEffect(()=>{
     if(!loaded)return;
-    window.storage.set(monthKey(vy,vm),JSON.stringify(data)).then(()=>loadYearCache()).catch(()=>{});
+    lsSet(monthKey(vy,vm),data);
+    loadYearCache();
   },[data,vm,vy,loaded,loadYearCache]);
 
-  useEffect(()=>{if(loaded)window.storage.set(SETTINGS_KEY,JSON.stringify(settings)).catch(()=>{});},[settings,loaded]);
-  useEffect(()=>{if(loaded)window.storage.set(DEBTS_KEY,JSON.stringify(debts)).catch(()=>{});},[debts,loaded]);
+  useEffect(()=>{ if(loaded) lsSet(SETTINGS_KEY,settings); },[settings,loaded]);
+  useEffect(()=>{ if(loaded) lsSet(DEBTS_KEY,debts); },[debts,loaded]);
 
+  // ── Computed ──
   const banks=settings.banks||DEFAULT_BANKS;
   const rawIncome   =data.incomes.reduce((s,t)=>s+t.value,0);
   const totalIncome =rawIncome+prevBalance;
@@ -557,16 +513,11 @@ export default function FinTrack(){
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700&display=swap');
         *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
-        :root{
-          --bg:#07070f;--surface:#0d0d1a;--card:#111120;--border:#1a1a2e;--border2:#22223a;
-          --text:#eeeeff;--muted:#6060a0;
-          --green:#00d68f;--wine:#c0392b;--accent:#9b8cff;--gold:#ffd166;--blue:#4d9fff;
-        }
+        :root{--bg:#07070f;--surface:#0d0d1a;--card:#111120;--border:#1a1a2e;--border2:#22223a;--text:#eeeeff;--muted:#6060a0;--green:#00d68f;--wine:#c0392b;--accent:#9b8cff;--gold:#ffd166;--blue:#4d9fff;}
         html,body{background:var(--bg);color:var(--text);font-family:'Sora',sans-serif;-webkit-font-smoothing:antialiased;}
         .app{min-height:100vh;padding-bottom:70px;max-width:640px;margin:0 auto;}
         .topbar{display:flex;align-items:center;justify-content:space-between;padding:12px 14px 9px;position:sticky;top:0;z-index:90;background:var(--bg);border-bottom:1px solid var(--border);}
-        .logo{font-size:16px;font-weight:700;letter-spacing:-.5px;}
-        .logo em{color:var(--accent);font-style:normal;}
+        .logo{font-size:16px;font-weight:700;letter-spacing:-.5px;}.logo em{color:var(--accent);font-style:normal;}
         .greeting{font-size:10px;color:var(--muted);margin-left:6px;}
         .mnav{display:flex;align-items:center;gap:6px;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:6px 10px;}
         .mnav button{background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;padding:0 3px;-webkit-tap-highlight-color:transparent;}
@@ -578,20 +529,16 @@ export default function FinTrack(){
         .metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;}
         .mc{background:var(--card);border:1px solid var(--border);border-radius:11px;padding:10px;position:relative;overflow:hidden;}
         .mc::after{content:'';position:absolute;inset:0;opacity:.05;pointer-events:none;}
-        .mc.g::after{background:var(--green);}.mc.w::after{background:var(--wine);}
-        .mc.p::after{background:var(--accent);}.mc.b::after{background:var(--blue);}
-        .mc.gold::after{background:var(--gold);}.mc.gr::after{background:#aaa;}
+        .mc.g::after{background:var(--green);}.mc.w::after{background:var(--wine);}.mc.p::after{background:var(--accent);}.mc.b::after{background:var(--blue);}.mc.gold::after{background:var(--gold);}.mc.gr::after{background:#aaa;}
         .ml{font-size:8px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin-bottom:4px;}
         .mv{font-size:13px;font-weight:700;letter-spacing:-.3px;}
-        .mv.g{color:var(--green);}.mv.w{color:var(--wine);}.mv.p{color:var(--accent);}
-        .mv.b{color:var(--blue);}.mv.gold{color:var(--gold);}.mv.gr{color:#aaa;}
+        .mv.g{color:var(--green);}.mv.w{color:var(--wine);}.mv.p{color:var(--accent);}.mv.b{color:var(--blue);}.mv.gold{color:var(--gold);}.mv.gr{color:#aaa;}
         .row2{display:grid;grid-template-columns:1fr 1fr;gap:11px;}
         .txlist{display:flex;flex-direction:column;gap:6px;}
         .txi{display:flex;align-items:center;gap:8px;padding:10px;background:var(--surface);border:1px solid var(--border);border-radius:11px;cursor:pointer;-webkit-tap-highlight-color:transparent;user-select:none;}
         .txi:active{border-color:var(--border2);}
         .txicon{width:32px;height:32px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;}
-        .txinfo{flex:1;min-width:0;}
-        .txd{font-size:12px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+        .txinfo{flex:1;min-width:0;}.txd{font-size:12px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
         .txm{font-size:9px;color:var(--muted);margin-top:2px;display:flex;gap:4px;align-items:center;flex-wrap:wrap;}
         .txa{font-size:12px;font-weight:700;flex-shrink:0;}
         .tdel{background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;padding:5px 4px;-webkit-tap-highlight-color:transparent;flex-shrink:0;}
@@ -605,21 +552,18 @@ export default function FinTrack(){
         .fab:active{transform:scale(.92);}
         .bnav{position:fixed;bottom:0;left:0;right:0;background:var(--card);border-top:1px solid var(--border);display:flex;justify-content:space-around;align-items:center;height:62px;z-index:80;overflow-x:auto;}
         .nb{background:none;border:none;color:var(--muted);cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:2px;font-family:'Sora',sans-serif;font-size:7px;font-weight:600;letter-spacing:.2px;text-transform:uppercase;padding:5px 2px;min-width:32px;flex-shrink:0;-webkit-tap-highlight-color:transparent;transition:color .12s;}
-        .nb.active{color:var(--accent);}
-        .nbi{font-size:15px;line-height:1;}
+        .nb.active{color:var(--accent);}.nbi{font-size:15px;line-height:1;}
         .mhdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;}
         .mtitle{font-size:14px;font-weight:700;}
         .mclose{background:none;border:none;color:var(--muted);font-size:22px;cursor:pointer;padding:2px 6px;}
         .fl{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:var(--muted);margin-bottom:5px;display:block;}
         .fi{width:100%;background:var(--surface);border:1px solid var(--border);color:var(--text);font-family:'Sora',sans-serif;font-size:14px;border-radius:10px;padding:11px 12px;outline:none;transition:border-color .15s;-webkit-appearance:none;}
-        .fi:focus{border-color:var(--accent);}
-        .fg{margin-bottom:10px;}
+        .fi:focus{border-color:var(--accent);}.fg{margin-bottom:10px;}
         .frow{display:grid;grid-template-columns:1fr 1fr;gap:9px;}
         .catgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;}
         .catopt{border:1px solid var(--border);background:var(--surface);color:var(--muted);font-family:'Sora',sans-serif;font-size:9px;font-weight:500;border-radius:8px;padding:7px 4px;cursor:pointer;text-align:center;line-height:1.3;-webkit-tap-highlight-color:transparent;transition:all .12s;}
         .savebtn{width:100%;background:var(--accent);color:#fff;border:none;font-family:'Sora',sans-serif;font-size:14px;font-weight:700;border-radius:11px;padding:13px;cursor:pointer;margin-top:5px;}
-        .savebtn:active{opacity:.85;}
-        .savebtn:disabled{opacity:.4;cursor:not-allowed;}
+        .savebtn:active{opacity:.85;}.savebtn:disabled{opacity:.4;cursor:not-allowed;}
         select.fi{appearance:none;-webkit-appearance:none;}
         .divider{height:1px;background:var(--border);margin:13px 0;}
         .notesarea{width:100%;background:var(--surface);border:1px solid var(--border);color:var(--text);font-family:'Sora',sans-serif;font-size:13px;border-radius:10px;padding:10px;resize:vertical;min-height:70px;outline:none;}
@@ -656,25 +600,13 @@ export default function FinTrack(){
           </div>
         </div>
 
-        {/* ── DASHBOARD ── */}
         {page==="dashboard"&&(
           <div className="pg">
-            {alerts.length>0&&(
-              <div style={{display:"flex",flexDirection:"column",gap:6}}>
-                {alerts.map((a,i)=><div key={i} className={`alert ${a.type}`}><span>{a.type==="ok"?"✅":a.type==="warn"?"⚠️":"🚨"}</span>{a.msg}</div>)}
-              </div>
-            )}
+            {alerts.length>0&&<div style={{display:"flex",flexDirection:"column",gap:6}}>{alerts.map((a,i)=><div key={i} className={`alert ${a.type}`}><span>{a.type==="ok"?"✅":a.type==="warn"?"⚠️":"🚨"}</span>{a.msg}</div>)}</div>}
             <div>
               <div className="st" style={{marginBottom:8}}>Resumo de {MONTHS_FULL[vm]}</div>
               <div className="metrics">
-                {[
-                  {l:"Entradas",v:fmt(rawIncome),c:"g"},
-                  {l:"Gastos",v:fmt(totalExpense),c:"w"},
-                  {l:"Fixas",v:fmt(totalFixed),c:"w"},
-                  {l:"Investido",v:fmt(totalInvest),c:"gold"},
-                  {l:"Saldo ant.",v:fmt(prevBalance),c:"gr"},
-                  {l:"Saldo",v:fmt(balance),c:"p"},
-                ].map(m=>(
+                {[{l:"Entradas",v:fmt(rawIncome),c:"g"},{l:"Gastos",v:fmt(totalExpense),c:"w"},{l:"Fixas",v:fmt(totalFixed),c:"w"},{l:"Investido",v:fmt(totalInvest),c:"gold"},{l:"Saldo ant.",v:fmt(prevBalance),c:"gr"},{l:"Saldo",v:fmt(balance),c:"p"}].map(m=>(
                   <div key={m.l} className={`mc ${m.c}`}><div className="ml">{m.l}</div><div className={`mv ${m.c}`}>{m.v}</div></div>
                 ))}
               </div>
@@ -683,9 +615,7 @@ export default function FinTrack(){
               <div className="st" style={{marginBottom:8}}>Evolução — {vy}</div>
               <div style={{display:"flex",gap:10,marginBottom:6}}>
                 {[["var(--green)","Entradas"],["var(--wine)","Saídas"]].map(([c,l])=>(
-                  <span key={l} style={{display:"flex",alignItems:"center",gap:4,fontSize:10,color:"var(--muted)"}}>
-                    <span style={{width:10,height:10,borderRadius:2,background:c,display:"inline-block"}}/>{l}
-                  </span>
+                  <span key={l} style={{display:"flex",alignItems:"center",gap:4,fontSize:10,color:"var(--muted)"}}><span style={{width:10,height:10,borderRadius:2,background:c,display:"inline-block"}}/>{l}</span>
                 ))}
               </div>
               <div className="chart" style={{height:70}}>
@@ -712,19 +642,13 @@ export default function FinTrack(){
                 <div style={{marginTop:8,display:"flex",flexDirection:"column",gap:5}}>
                   {bankCredit.filter(b=>b.spent>0).map(b=>{
                     const pct=b.limit>0?Math.min((b.spent/b.limit)*100,100):0;
-                    return (
-                      <div key={b.id}>
-                        <div style={{display:"flex",justifyContent:"space-between",fontSize:10,marginBottom:2}}>
-                          <span style={{display:"flex",alignItems:"center",gap:4}}>
-                            <span style={{width:7,height:7,borderRadius:"50%",background:b.color,display:"inline-block"}}/>{b.name}
-                          </span>
-                          <span style={{color:pct>90?"var(--wine)":pct>70?"var(--gold)":"var(--muted)"}}>{fmt(b.spent)}{b.limit?` / ${fmt(b.limit)}`:""}</span>
-                        </div>
-                        {b.limit>0&&<div style={{height:3,background:"var(--border)",borderRadius:2,overflow:"hidden"}}>
-                          <div style={{height:"100%",width:`${pct}%`,borderRadius:2,background:pct>90?"var(--wine)":pct>70?"var(--gold)":b.color}}/>
-                        </div>}
+                    return (<div key={b.id}>
+                      <div style={{display:"flex",justifyContent:"space-between",fontSize:10,marginBottom:2}}>
+                        <span style={{display:"flex",alignItems:"center",gap:4}}><span style={{width:7,height:7,borderRadius:"50%",background:b.color,display:"inline-block"}}/>{b.name}</span>
+                        <span style={{color:pct>90?"var(--wine)":pct>70?"var(--gold)":"var(--muted)"}}>{fmt(b.spent)}{b.limit?` / ${fmt(b.limit)}`:""}</span>
                       </div>
-                    );
+                      {b.limit>0&&<div style={{height:3,background:"var(--border)",borderRadius:2,overflow:"hidden"}}><div style={{height:"100%",width:`${pct}%`,borderRadius:2,background:pct>90?"var(--wine)":pct>70?"var(--gold)":b.color}}/></div>}
+                    </div>);
                   })}
                   {bankCredit.every(b=>!b.spent)&&<div style={{fontSize:9,color:"var(--muted)",textAlign:"center"}}>Sem gastos no crédito</div>}
                 </div>
@@ -741,21 +665,19 @@ export default function FinTrack(){
                 {catData.map(c=>{
                   const hasBudget=c.budget>0,pct=hasBudget?Math.min((c.value/c.budget)*100,100):0;
                   const over=hasBudget&&c.value>c.budget,warn=hasBudget&&pct>=80&&!over;
-                  return (
-                    <div key={c.name} style={{marginBottom:9}}>
-                      <div style={{display:"flex",justifyContent:"space-between",marginBottom:3,alignItems:"center"}}>
-                        <span style={{fontSize:11,fontWeight:500}}>{c.icon} {c.name}</span>
-                        <span style={{fontSize:10,display:"flex",gap:5,alignItems:"center"}}>
-                          {over&&<span style={{color:"var(--wine)",fontSize:9,fontWeight:700}}>⚠ estourou</span>}
-                          {warn&&<span style={{color:"var(--gold)",fontSize:9,fontWeight:700}}>⚡ quase</span>}
-                          <span style={{color:"var(--muted)"}}>{fmt(c.value)}{hasBudget?` / ${fmt(c.budget)}`:""}</span>
-                        </span>
-                      </div>
-                      <div style={{height:5,background:"var(--border)",borderRadius:3,overflow:"hidden"}}>
-                        <div style={{height:"100%",borderRadius:3,transition:"width .6s",width:`${hasBudget?pct:(c.value/maxCat)*100}%`,background:over?"var(--wine)":warn?"var(--gold)":c.color}}/>
-                      </div>
+                  return (<div key={c.name} style={{marginBottom:9}}>
+                    <div style={{display:"flex",justifyContent:"space-between",marginBottom:3,alignItems:"center"}}>
+                      <span style={{fontSize:11,fontWeight:500}}>{c.icon} {c.name}</span>
+                      <span style={{fontSize:10,display:"flex",gap:5,alignItems:"center"}}>
+                        {over&&<span style={{color:"var(--wine)",fontSize:9,fontWeight:700}}>⚠ estourou</span>}
+                        {warn&&<span style={{color:"var(--gold)",fontSize:9,fontWeight:700}}>⚡ quase</span>}
+                        <span style={{color:"var(--muted)"}}>{fmt(c.value)}{hasBudget?` / ${fmt(c.budget)}`:""}</span>
+                      </span>
                     </div>
-                  );
+                    <div style={{height:5,background:"var(--border)",borderRadius:3,overflow:"hidden"}}>
+                      <div style={{height:"100%",borderRadius:3,transition:"width .6s",width:`${hasBudget?pct:(c.value/maxCat)*100}%`,background:over?"var(--wine)":warn?"var(--gold)":c.color}}/>
+                    </div>
+                  </div>);
                 })}
               </div>
             )}
@@ -766,7 +688,6 @@ export default function FinTrack(){
           </div>
         )}
 
-        {/* ── ENTRADAS ── */}
         {page==="incomes"&&(
           <div className="pg">
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
@@ -775,23 +696,19 @@ export default function FinTrack(){
             </div>
             {prevBalance>0&&<div style={{background:"rgba(0,214,143,.08)",border:"1px solid rgba(0,214,143,.2)",borderRadius:10,padding:"9px 12px",fontSize:11,color:"var(--green)",fontWeight:500}}>✅ Saldo do mês anterior: +{fmt(prevBalance)}</div>}
             <button className="bulkbtn" onClick={()=>openModal("bulk_income")}>📋 Colar em lote</button>
-            {data.incomes.length===0
-              ?<div className="empty">Nenhuma entrada.<br/>Toque no <strong style={{color:"var(--accent)"}}>+</strong> ou cole em lote.</div>
-              :<div className="txlist">
-                {data.incomes.map(e=>(
-                  <div key={e.id} className="txi" onClick={()=>openModal("income",e)}>
-                    <div className="txicon" style={{background:"#00d68f22"}}>💰</div>
-                    <div className="txinfo"><div className="txd">{e.name}</div><div className="txm">{e.date?.slice(5).split("-").reverse().join("/")} · {rawIncome>0?((e.value/rawIncome)*100).toFixed(1):0}%</div></div>
-                    <div className="txa" style={{color:"var(--green)"}}>+{fmt(e.value)}</div>
-                    <button className="tdel" onClick={ev=>{ev.stopPropagation();deleteEntry("incomes",e.id);}}>✕</button>
-                  </div>
-                ))}
-              </div>
+            {data.incomes.length===0?<div className="empty">Nenhuma entrada.<br/>Toque no <strong style={{color:"var(--accent)"}}>+</strong> ou cole em lote.</div>
+              :<div className="txlist">{data.incomes.map(e=>(
+                <div key={e.id} className="txi" onClick={()=>openModal("income",e)}>
+                  <div className="txicon" style={{background:"#00d68f22"}}>💰</div>
+                  <div className="txinfo"><div className="txd">{e.name}</div><div className="txm">{e.date?.slice(5).split("-").reverse().join("/")} · {rawIncome>0?((e.value/rawIncome)*100).toFixed(1):0}%</div></div>
+                  <div className="txa" style={{color:"var(--green)"}}>+{fmt(e.value)}</div>
+                  <button className="tdel" onClick={ev=>{ev.stopPropagation();deleteEntry("incomes",e.id);}}>✕</button>
+                </div>
+              ))}</div>
             }
           </div>
         )}
 
-        {/* ── GASTOS ── */}
         {page==="expenses"&&(
           <div className="pg">
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
@@ -799,36 +716,27 @@ export default function FinTrack(){
               <div style={{fontSize:13,fontWeight:700,color:"var(--wine)"}}>{fmt(totalExpense)}</div>
             </div>
             <button className="bulkbtn" onClick={()=>openModal("bulk_expense")}>📋 Colar em lote</button>
-            {data.expenses.length===0
-              ?<div className="empty">Nenhum gasto.<br/>Toque no <strong style={{color:"var(--accent)"}}>+</strong> ou cole em lote.</div>
-              :<div className="txlist">
-                {data.expenses.map(e=>{
-                  const cat=CAT_MAP[e.category]||{icon:"📌",color:"#888"};
-                  const bk=banks.find(b=>b.name===e.bank);
-                  const d=e.date?e.date.slice(5).split("-").reverse().join("/"):"";
-                  return (
-                    <div key={e.id} className="txi" onClick={()=>openModal("expense",e)}>
-                      <div className="txicon" style={{background:cat.color+"33"}}>{cat.icon}</div>
-                      <div className="txinfo">
-                        <div className="txd">{e.description||e.category}</div>
-                        <div className="txm">
-                          <span>{d}</span>
-                          {bk&&<span className="chip" style={{background:bk.color+"33",color:bk.color}}>{bk.name}</span>}
-                          <span>{e.method}</span>
-                          {e.essential&&<span className="badge" style={{background:"#00d68f22",color:"var(--green)"}}>essencial</span>}
-                        </div>
-                      </div>
-                      <div className="txa" style={{color:"var(--wine)"}}>-{fmt(e.value)}</div>
-                      <button className="tdel" onClick={ev=>{ev.stopPropagation();deleteEntry("expenses",e.id);}}>✕</button>
+            {data.expenses.length===0?<div className="empty">Nenhum gasto.<br/>Toque no <strong style={{color:"var(--accent)"}}>+</strong> ou cole em lote.</div>
+              :<div className="txlist">{data.expenses.map(e=>{
+                const cat=CAT_MAP[e.category]||{icon:"📌",color:"#888"};
+                const bk=banks.find(b=>b.name===e.bank);
+                const d=e.date?e.date.slice(5).split("-").reverse().join("/"):"";
+                return (
+                  <div key={e.id} className="txi" onClick={()=>openModal("expense",e)}>
+                    <div className="txicon" style={{background:cat.color+"33"}}>{cat.icon}</div>
+                    <div className="txinfo">
+                      <div className="txd">{e.description||e.category}</div>
+                      <div className="txm"><span>{d}</span>{bk&&<span className="chip" style={{background:bk.color+"33",color:bk.color}}>{bk.name}</span>}<span>{e.method}</span>{e.essential&&<span className="badge" style={{background:"#00d68f22",color:"var(--green)"}}>essencial</span>}</div>
                     </div>
-                  );
-                })}
-              </div>
+                    <div className="txa" style={{color:"var(--wine)"}}>-{fmt(e.value)}</div>
+                    <button className="tdel" onClick={ev=>{ev.stopPropagation();deleteEntry("expenses",e.id);}}>✕</button>
+                  </div>
+                );
+              })}</div>
             }
           </div>
         )}
 
-        {/* ── FIXAS ── */}
         {page==="fixed"&&(
           <div className="pg">
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
@@ -836,52 +744,37 @@ export default function FinTrack(){
               <div style={{fontSize:13,fontWeight:700,color:"var(--wine)"}}>{fmt(totalFixed)}</div>
             </div>
             <button className="bulkbtn" onClick={()=>openModal("bulk_fixed")}>📋 Colar em lote</button>
-            {allFixed.length===0
-              ?<div className="empty">Nenhuma despesa fixa.<br/>Toque no <strong style={{color:"var(--accent)"}}>+</strong> ou cole em lote.</div>
-              :<>
-                {pendingFixed.length>0&&<>
-                  <div className="section-sep">A pagar ({pendingFixed.length})</div>
-                  <div style={{display:"flex",flexDirection:"column",gap:6}}>
-                    {pendingFixed.map(e=>(
-                      <div key={e.id} className="checkrow" onClick={()=>e.isDebt?toggleDebtPaid(e.debtId,e.debtMonthKey):toggleFixed(e.id)}>
-                        <div className="checkbox"/>
-                        <div style={{flex:1,minWidth:0}}>
-                          <div style={{fontSize:12,fontWeight:500}}>{e.name}{e.isDebt&&<span style={{marginLeft:6,fontSize:9,color:"var(--accent)",fontWeight:700}}>parcela</span>}</div>
-                        </div>
-                        <div style={{fontSize:13,fontWeight:700,color:"var(--wine)"}}>{fmt(e.value)}</div>
-                        {!e.isDebt&&<>
-                          <button className="tdel" onClick={ev=>{ev.stopPropagation();openModal("fixed",e);}}>✏️</button>
-                          <button className="tdel" onClick={ev=>{ev.stopPropagation();deleteEntry("fixed",e.id);}}>✕</button>
-                        </>}
-                      </div>
-                    ))}
-                  </div>
-                </>}
-                {paidFixed.length>0&&<>
-                  <div className="section-sep">Pagas ({paidFixed.length})</div>
-                  <div style={{display:"flex",flexDirection:"column",gap:6}}>
-                    {paidFixed.map(e=>(
-                      <div key={e.id} className="checkrow" onClick={()=>e.isDebt?toggleDebtPaid(e.debtId,e.debtMonthKey):toggleFixed(e.id)}>
-                        <div className="checkbox on"><span style={{color:"#fff",fontSize:11,fontWeight:700}}>✓</span></div>
-                        <div style={{flex:1,minWidth:0}}><div style={{fontSize:12,fontWeight:500,textDecoration:"line-through",color:"var(--muted)"}}>{e.name}</div></div>
-                        <div style={{fontSize:13,fontWeight:700,color:"var(--green)"}}>{fmt(e.value)}</div>
-                        {!e.isDebt&&<>
-                          <button className="tdel" onClick={ev=>{ev.stopPropagation();openModal("fixed",e);}}>✏️</button>
-                          <button className="tdel" onClick={ev=>{ev.stopPropagation();deleteEntry("fixed",e.id);}}>✕</button>
-                        </>}
-                      </div>
-                    ))}
-                  </div>
-                </>}
-              </>
-            }
+            {allFixed.length===0?<div className="empty">Nenhuma despesa fixa.<br/>Toque no <strong style={{color:"var(--accent)"}}>+</strong> ou cole em lote.</div>:<>
+              {pendingFixed.length>0&&<><div className="section-sep">A pagar ({pendingFixed.length})</div>
+                <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                  {pendingFixed.map(e=>(
+                    <div key={e.id} className="checkrow" onClick={()=>e.isDebt?toggleDebtPaid(e.debtId,e.debtMonthKey):toggleFixed(e.id)}>
+                      <div className="checkbox"/>
+                      <div style={{flex:1,minWidth:0}}><div style={{fontSize:12,fontWeight:500}}>{e.name}{e.isDebt&&<span style={{marginLeft:6,fontSize:9,color:"var(--accent)",fontWeight:700}}>parcela</span>}</div></div>
+                      <div style={{fontSize:13,fontWeight:700,color:"var(--wine)"}}>{fmt(e.value)}</div>
+                      {!e.isDebt&&<><button className="tdel" onClick={ev=>{ev.stopPropagation();openModal("fixed",e);}}>✏️</button><button className="tdel" onClick={ev=>{ev.stopPropagation();deleteEntry("fixed",e.id);}}>✕</button></>}
+                    </div>
+                  ))}
+                </div>
+              </>}
+              {paidFixed.length>0&&<><div className="section-sep">Pagas ({paidFixed.length})</div>
+                <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                  {paidFixed.map(e=>(
+                    <div key={e.id} className="checkrow" onClick={()=>e.isDebt?toggleDebtPaid(e.debtId,e.debtMonthKey):toggleFixed(e.id)}>
+                      <div className="checkbox on"><span style={{color:"#fff",fontSize:11,fontWeight:700}}>✓</span></div>
+                      <div style={{flex:1,minWidth:0}}><div style={{fontSize:12,fontWeight:500,textDecoration:"line-through",color:"var(--muted)"}}>{e.name}</div></div>
+                      <div style={{fontSize:13,fontWeight:700,color:"var(--green)"}}>{fmt(e.value)}</div>
+                      {!e.isDebt&&<><button className="tdel" onClick={ev=>{ev.stopPropagation();openModal("fixed",e);}}>✏️</button><button className="tdel" onClick={ev=>{ev.stopPropagation();deleteEntry("fixed",e.id);}}>✕</button></>}
+                    </div>
+                  ))}
+                </div>
+              </>}
+            </>}
           </div>
         )}
 
-        {/* ── CARTÕES ── */}
         {page==="cards"&&<CartoesPage expenses={data.expenses} banks={banks} vm={vm} vy={vy}/>}
 
-        {/* ── RESERVAS ── */}
         {page==="investments"&&(
           <div className="pg">
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
@@ -893,28 +786,24 @@ export default function FinTrack(){
               <GoalBar label="Reserva de Emergência" icon="🛡️" current={emergencyTotal} goal={settings.emergencyGoal} color="var(--green)"/>
               <GoalBar label={settings.personalGoalName} icon="🎯" current={personalTotal} goal={settings.personalGoalValue} color="var(--accent)"/>
             </div>
-            {data.investments.length===0
-              ?<div className="empty">Nenhum lançamento.<br/>Toque no <strong style={{color:"var(--accent)"}}>+</strong> ou cole em lote.</div>
-              :<div className="txlist">
-                {data.investments.map(e=>{
-                  const isW=e.type?.includes("Retirada");
-                  return (
-                    <div key={e.id} className="txi" onClick={()=>openModal("investment",e)}>
-                      <div className="txicon" style={{background:isW?"var(--wine)22":"var(--gold)22"}}>{isW?"📤":"💰"}</div>
-                      <div className="txinfo"><div className="txd">{e.name}</div><div className="txm">{e.date?.slice(5).split("-").reverse().join("/")} · {e.type}</div></div>
-                      <div className="txa" style={{color:isW?"var(--wine)":"var(--gold)"}}>{isW?"-":"+"}{fmt(e.value)}</div>
-                      <button className="tdel" onClick={ev=>{ev.stopPropagation();deleteEntry("investments",e.id);}}>✕</button>
-                    </div>
-                  );
-                })}
-              </div>
+            {data.investments.length===0?<div className="empty">Nenhum lançamento.<br/>Toque no <strong style={{color:"var(--accent)"}}>+</strong> ou cole em lote.</div>
+              :<div className="txlist">{data.investments.map(e=>{
+                const isW=e.type?.includes("Retirada");
+                return (
+                  <div key={e.id} className="txi" onClick={()=>openModal("investment",e)}>
+                    <div className="txicon" style={{background:isW?"var(--wine)22":"var(--gold)22"}}>{isW?"📤":"💰"}</div>
+                    <div className="txinfo"><div className="txd">{e.name}</div><div className="txm">{e.date?.slice(5).split("-").reverse().join("/")} · {e.type}</div></div>
+                    <div className="txa" style={{color:isW?"var(--wine)":"var(--gold)"}}>{isW?"-":"+"}{fmt(e.value)}</div>
+                    <button className="tdel" onClick={ev=>{ev.stopPropagation();deleteEntry("investments",e.id);}}>✕</button>
+                  </div>
+                );
+              })}</div>
             }
           </div>
         )}
 
         {page==="debts"&&<DebtsPage debts={debts} setDebts={setDebts} vm={vm} vy={vy}/>}
 
-        {/* ── ANUAL ── */}
         {page==="annual"&&(
           <div className="pg">
             <div className="st">Visão Anual — {vy}</div>
@@ -953,8 +842,7 @@ export default function FinTrack(){
                   ))}
                 </tbody>
                 <tfoot><tr>
-                  <td>Total</td>
-                  <td style={{color:"var(--green)"}}>{fmt(annualInc)}</td>
+                  <td>Total</td><td style={{color:"var(--green)"}}>{fmt(annualInc)}</td>
                   <td style={{color:"var(--wine)"}}>{fmt(annualRows.reduce((s,r)=>s+r.exp,0))}</td>
                   <td style={{color:"var(--blue)"}}>{fmt(annualRows.reduce((s,r)=>s+r.fix,0))}</td>
                   <td style={{color:"var(--gold)"}}>{fmt(annualRows.reduce((s,r)=>s+r.inv,0))}</td>
@@ -994,7 +882,6 @@ export default function FinTrack(){
   );
 }
 
-// ─── DEBTS ────────────────────────────────────────────────────────────────────
 function DebtsPage({debts,setDebts,vm,vy}){
   const [showForm,setShowForm]=useState(false);
   const active=debts.filter(d=>!d.closed),closed=debts.filter(d=>d.closed);
@@ -1002,9 +889,7 @@ function DebtsPage({debts,setDebts,vm,vy}){
     <div className="pg">
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
         <div className="st">Dívidas & Parcelamentos</div>
-        <button onClick={()=>setShowForm(s=>!s)} style={{background:"var(--accent)",border:"none",color:"#fff",fontFamily:"'Sora',sans-serif",fontSize:11,fontWeight:700,borderRadius:8,padding:"5px 10px",cursor:"pointer"}}>
-          {showForm?"Cancelar":"+ Nova"}
-        </button>
+        <button onClick={()=>setShowForm(s=>!s)} style={{background:"var(--accent)",border:"none",color:"#fff",fontFamily:"'Sora',sans-serif",fontSize:11,fontWeight:700,borderRadius:8,padding:"5px 10px",cursor:"pointer"}}>{showForm?"Cancelar":"+ Nova"}</button>
       </div>
       {showForm&&<DebtForm onSave={d=>{setDebts(ds=>[...ds,d]);setShowForm(false);}} vm={vm} vy={vy}/>}
       {active.length===0&&!showForm&&<div className="empty">Nenhuma dívida ativa.</div>}
@@ -1015,18 +900,10 @@ function DebtsPage({debts,setDebts,vm,vy}){
         return (
           <div key={d.id} className="card">
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
-              <div>
-                <div style={{fontSize:13,fontWeight:700}}>{d.name}</div>
-                <div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>{d.installments}x de {fmt(d.monthlyValue)} · Total: {fmt(d.totalValue)}</div>
-              </div>
-              <div style={{textAlign:"right"}}>
-                <div style={{fontSize:12,fontWeight:700,color:"var(--wine)"}}>{fmt(Math.max(remaining,0))}</div>
-                <div style={{fontSize:9,color:"var(--muted)"}}>restando</div>
-              </div>
+              <div><div style={{fontSize:13,fontWeight:700}}>{d.name}</div><div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>{d.installments}x de {fmt(d.monthlyValue)} · Total: {fmt(d.totalValue)}</div></div>
+              <div style={{textAlign:"right"}}><div style={{fontSize:12,fontWeight:700,color:"var(--wine)"}}>{fmt(Math.max(remaining,0))}</div><div style={{fontSize:9,color:"var(--muted)"}}>restando</div></div>
             </div>
-            <div style={{height:6,background:"var(--border)",borderRadius:3,overflow:"hidden",marginBottom:4}}>
-              <div style={{height:"100%",width:`${pct}%`,background:"var(--green)",borderRadius:3}}/>
-            </div>
+            <div style={{height:6,background:"var(--border)",borderRadius:3,overflow:"hidden",marginBottom:4}}><div style={{height:"100%",width:`${pct}%`,background:"var(--green)",borderRadius:3}}/></div>
             <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:"var(--muted)",marginBottom:10}}>
               <span>{d.paidCount||0}/{d.installments} pagas</span>
               {dueThisMonth&&<span style={{color:"var(--gold)",fontWeight:600}}>⚡ parcela deste mês</span>}
@@ -1038,18 +915,12 @@ function DebtsPage({debts,setDebts,vm,vy}){
           </div>
         );
       })}
-      {closed.length>0&&<>
-        <div className="section-sep">Quitadas</div>
-        {closed.map(d=>(
-          <div key={d.id} style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:11,padding:"10px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-            <div>
-              <div style={{fontSize:12,fontWeight:600,color:"var(--muted)",textDecoration:"line-through"}}>{d.name}</div>
-              <div style={{fontSize:10,color:"var(--muted)"}}>{d.installments}x de {fmt(d.monthlyValue)}</div>
-            </div>
-            <button onClick={()=>setDebts(ds=>ds.filter(x=>x.id!==d.id))} style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:14}}>✕</button>
-          </div>
-        ))}
-      </>}
+      {closed.length>0&&<>{closed.map(d=>(
+        <div key={d.id} style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:11,padding:"10px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div><div style={{fontSize:12,fontWeight:600,color:"var(--muted)",textDecoration:"line-through"}}>{d.name}</div><div style={{fontSize:10,color:"var(--muted)"}}>{d.installments}x de {fmt(d.monthlyValue)}</div></div>
+          <button onClick={()=>setDebts(ds=>ds.filter(x=>x.id!==d.id))} style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:14}}>✕</button>
+        </div>
+      ))}</>}
     </div>
   );
 }
@@ -1062,58 +933,42 @@ function DebtForm({onSave,vm,vy}){
   const monthly=inst>0?tv/inst:0;
   return (
     <div className="card">
-      <div className="fg"><label className="fl">Nome da dívida</label>
-        <input className="fi" placeholder="Ex: Carro, Funileiro…" value={f.name} onChange={e=>upd("name",e.target.value)}/></div>
+      <div className="fg"><label className="fl">Nome da dívida</label><input className="fi" placeholder="Ex: Carro, Funileiro…" value={f.name} onChange={e=>upd("name",e.target.value)}/></div>
       <div className="frow">
-        <div className="fg"><label className="fl">Valor total (R$)</label>
-          <input className="fi" type="number" inputMode="decimal" value={f.totalValue} onChange={e=>upd("totalValue",e.target.value)}/></div>
-        <div className="fg"><label className="fl">Nº de parcelas</label>
-          <input className="fi" type="number" inputMode="numeric" value={f.installments} onChange={e=>upd("installments",e.target.value)}/></div>
+        <div className="fg"><label className="fl">Valor total (R$)</label><input className="fi" type="number" inputMode="decimal" value={f.totalValue} onChange={e=>upd("totalValue",e.target.value)}/></div>
+        <div className="fg"><label className="fl">Nº de parcelas</label><input className="fi" type="number" inputMode="numeric" value={f.installments} onChange={e=>upd("installments",e.target.value)}/></div>
       </div>
       {monthly>0&&<div style={{background:"rgba(155,140,255,.1)",border:"1px solid rgba(155,140,255,.25)",borderRadius:9,padding:"8px 11px",marginBottom:10,fontSize:12,color:"var(--accent)",fontWeight:600}}>Parcela mensal: {fmt(monthly)}</div>}
       <div className="frow">
-        <div className="fg"><label className="fl">Mês início</label>
-          <select className="fi" value={f.startMonth} onChange={e=>upd("startMonth",e.target.value)}>
-            {MONTHS_FULL.map((m,i)=><option key={i} value={i}>{m}</option>)}
-          </select></div>
-        <div className="fg"><label className="fl">Ano</label>
-          <input className="fi" type="number" value={f.startYear} onChange={e=>upd("startYear",e.target.value)}/></div>
+        <div className="fg"><label className="fl">Mês início</label><select className="fi" value={f.startMonth} onChange={e=>upd("startMonth",e.target.value)}>{MONTHS_FULL.map((m,i)=><option key={i} value={i}>{m}</option>)}</select></div>
+        <div className="fg"><label className="fl">Ano</label><input className="fi" type="number" value={f.startYear} onChange={e=>upd("startYear",e.target.value)}/></div>
       </div>
       <button className="savebtn" onClick={()=>{if(!f.name||!tv||!inst)return;onSave({id:uid(),name:f.name,totalValue:tv,installments:inst,monthlyValue:parseFloat(monthly.toFixed(2)),startMonth:parseInt(f.startMonth),startYear:parseInt(f.startYear),paidMonths:[],paidCount:0,closed:false});}} disabled={!f.name||!tv||!inst}>Adicionar dívida</button>
     </div>
   );
 }
 
-// ─── SETTINGS ─────────────────────────────────────────────────────────────────
 function SettingsPage({settings,setSettings,data,setData}){
   const banks=settings.banks||DEFAULT_BANKS;
   return (
     <div className="pg">
       <div className="st">Personalização</div>
-      <div className="card">
-        <div className="fg"><label className="fl">Como quer ser chamado</label>
-          <input className="fi" value={settings.name} onChange={e=>setSettings(s=>({...s,name:e.target.value}))}/></div>
-      </div>
+      <div className="card"><div className="fg"><label className="fl">Como quer ser chamado</label><input className="fi" value={settings.name} onChange={e=>setSettings(s=>({...s,name:e.target.value}))}/></div></div>
       <div className="divider"/>
       <div className="st">Reserva de Emergência 🛡️</div>
       <div className="card">
         <div className="frow">
-          <div className="fg"><label className="fl">Meta (R$)</label>
-            <input className="fi" type="number" value={settings.emergencyGoal} onChange={e=>setSettings(s=>({...s,emergencyGoal:parseFloat(e.target.value)||0}))}/></div>
-          <div className="fg"><label className="fl">Saldo inicial (R$)</label>
-            <input className="fi" type="number" value={settings.emergencyBase||0} onChange={e=>setSettings(s=>({...s,emergencyBase:parseFloat(e.target.value)||0}))}/></div>
+          <div className="fg"><label className="fl">Meta (R$)</label><input className="fi" type="number" value={settings.emergencyGoal} onChange={e=>setSettings(s=>({...s,emergencyGoal:parseFloat(e.target.value)||0}))}/></div>
+          <div className="fg"><label className="fl">Saldo inicial (R$)</label><input className="fi" type="number" value={settings.emergencyBase||0} onChange={e=>setSettings(s=>({...s,emergencyBase:parseFloat(e.target.value)||0}))}/></div>
         </div>
         <div style={{fontSize:10,color:"var(--muted)"}}>Saldo inicial = o que você já tinha antes de usar o app.</div>
       </div>
       <div className="st">Meta Pessoal 🎯</div>
       <div className="card">
-        <div className="fg"><label className="fl">Nome da meta</label>
-          <input className="fi" value={settings.personalGoalName} onChange={e=>setSettings(s=>({...s,personalGoalName:e.target.value}))}/></div>
+        <div className="fg"><label className="fl">Nome da meta</label><input className="fi" value={settings.personalGoalName} onChange={e=>setSettings(s=>({...s,personalGoalName:e.target.value}))}/></div>
         <div className="frow">
-          <div className="fg"><label className="fl">Valor da meta (R$)</label>
-            <input className="fi" type="number" value={settings.personalGoalValue} onChange={e=>setSettings(s=>({...s,personalGoalValue:parseFloat(e.target.value)||0}))}/></div>
-          <div className="fg"><label className="fl">Saldo inicial (R$)</label>
-            <input className="fi" type="number" value={settings.personalBase||0} onChange={e=>setSettings(s=>({...s,personalBase:parseFloat(e.target.value)||0}))}/></div>
+          <div className="fg"><label className="fl">Valor da meta (R$)</label><input className="fi" type="number" value={settings.personalGoalValue} onChange={e=>setSettings(s=>({...s,personalGoalValue:parseFloat(e.target.value)||0}))}/></div>
+          <div className="fg"><label className="fl">Saldo inicial (R$)</label><input className="fi" type="number" value={settings.personalBase||0} onChange={e=>setSettings(s=>({...s,personalBase:parseFloat(e.target.value)||0}))}/></div>
         </div>
       </div>
       <div className="divider"/>
@@ -1132,11 +987,8 @@ function SettingsPage({settings,setSettings,data,setData}){
               <button onClick={()=>setSettings(s=>({...s,banks:s.banks.filter(x=>x.id!==b.id)}))} style={{background:"none",border:"1px solid var(--wine)",color:"var(--wine)",fontFamily:"'Sora',sans-serif",fontSize:10,borderRadius:6,padding:"3px 8px",cursor:"pointer",marginLeft:"auto"}}>Apagar</button>
             </div>
             <div className="frow">
-              <div className="fg" style={{margin:0}}><label className="fl">Nome</label>
-                <input className="fi" value={b.name} onChange={e=>setSettings(s=>({...s,banks:s.banks.map(x=>x.id===b.id?{...x,name:e.target.value}:x)}))}/></div>
-              <div className="fg" style={{margin:0}}><label className="fl">Limite (R$)</label>
-                <input className="fi" type="number" placeholder="0 = sem limite" value={b.limit||""}
-                  onChange={e=>setSettings(s=>({...s,banks:s.banks.map(x=>x.id===b.id?{...x,limit:parseFloat(e.target.value)||0}:x)}))}/></div>
+              <div className="fg" style={{margin:0}}><label className="fl">Nome</label><input className="fi" value={b.name} onChange={e=>setSettings(s=>({...s,banks:s.banks.map(x=>x.id===b.id?{...x,name:e.target.value}:x)}))}/></div>
+              <div className="fg" style={{margin:0}}><label className="fl">Limite (R$)</label><input className="fi" type="number" placeholder="0 = sem limite" value={b.limit||""} onChange={e=>setSettings(s=>({...s,banks:s.banks.map(x=>x.id===b.id?{...x,limit:parseFloat(e.target.value)||0}:x)}))}/></div>
             </div>
           </div>
         ))}
@@ -1147,30 +999,26 @@ function SettingsPage({settings,setSettings,data,setData}){
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
           {EXPENSE_CATS.map(c=>(
             <div key={c.name} className="fg" style={{margin:0}}><label className="fl">{c.icon} {c.name}</label>
-              <input className="fi" type="number" placeholder="sem limite" value={settings.catBudgets?.[c.name]||""}
-                onChange={e=>setSettings(s=>({...s,catBudgets:{...s.catBudgets,[c.name]:parseFloat(e.target.value)||0}}))}/></div>
+              <input className="fi" type="number" placeholder="sem limite" value={settings.catBudgets?.[c.name]||""} onChange={e=>setSettings(s=>({...s,catBudgets:{...s.catBudgets,[c.name]:parseFloat(e.target.value)||0}}))}/></div>
           ))}
         </div>
       </div>
       <div className="divider"/>
       <div className="st">Observações do mês</div>
-      <div className="card">
-        <textarea className="notesarea" placeholder="Ajustes feitos, decisões pro próximo mês…" value={data.notes||""} onChange={e=>setData(d=>({...d,notes:e.target.value}))}/>
-      </div>
+      <div className="card"><textarea className="notesarea" placeholder="Ajustes feitos, decisões pro próximo mês…" value={data.notes||""} onChange={e=>setData(d=>({...d,notes:e.target.value}))}/></div>
     </div>
   );
 }
 
-// ─── ENTRY MODAL ──────────────────────────────────────────────────────────────
 function EntryModal({type,entry,banks,onClose,onSave,vm,vy}){
   const isEdit=!!entry;
   const dd=`${vy}-${String(vm+1).padStart(2,"0")}-${String(today.getDate()).padStart(2,"0")}`;
   const [form,setForm]=useState(()=>{
     if(isEdit)return{...entry};
-    if(type==="income")     return{id:uid(),name:"",value:"",date:dd};
-    if(type==="expense")    return{id:uid(),category:"Alimentação",date:dd,description:"",value:"",bank:banks[0]?.name||"",method:"PIX",essential:false};
-    if(type==="fixed")      return{id:uid(),name:"",value:"",paid:false};
-    if(type==="investment") return{id:uid(),name:"",type:"Reserva de Emergência",value:"",date:dd};
+    if(type==="income")return{id:uid(),name:"",value:"",date:dd};
+    if(type==="expense")return{id:uid(),category:"Alimentação",date:dd,description:"",value:"",bank:banks[0]?.name||"",method:"PIX",essential:false};
+    if(type==="fixed")return{id:uid(),name:"",value:"",paid:false};
+    if(type==="investment")return{id:uid(),name:"",type:"Reserva de Emergência",value:"",date:dd};
     return{};
   });
   const upd=(k,v)=>setForm(f=>({...f,[k]:v}));
@@ -1183,81 +1031,44 @@ function EntryModal({type,entry,banks,onClose,onSave,vm,vy}){
   const titles={income:"Entrada",expense:"Gasto",fixed:"Despesa Fixa",investment:"Reserva / Investimento"};
   return (
     <>
-      <div className="mhdr">
-        <div className="mtitle">{isEdit?"Editar":"Nova"} — {titles[type]}</div>
-        <button className="mclose" onClick={onClose}>✕</button>
-      </div>
+      <div className="mhdr"><div className="mtitle">{isEdit?"Editar":"Nova"} — {titles[type]}</div><button className="mclose" onClick={onClose}>✕</button></div>
       {type==="income"&&<>
-        <div className="fg"><label className="fl">Nome / fonte</label>
-          <input className="fi" placeholder="Ex: Salário, Freela…" value={form.name} onChange={e=>upd("name",e.target.value)}/></div>
+        <div className="fg"><label className="fl">Nome / fonte</label><input className="fi" placeholder="Ex: Salário, Freela…" value={form.name} onChange={e=>upd("name",e.target.value)}/></div>
         <div className="frow">
-          <div className="fg"><label className="fl">Valor (R$)</label>
-            <input className="fi" type="number" inputMode="decimal" placeholder="0,00" value={form.value} onChange={e=>upd("value",e.target.value)}/></div>
-          <div className="fg"><label className="fl">Data</label>
-            <input className="fi" type="date" value={form.date} onChange={e=>upd("date",e.target.value)}/></div>
+          <div className="fg"><label className="fl">Valor (R$)</label><input className="fi" type="number" inputMode="decimal" placeholder="0,00" value={form.value} onChange={e=>upd("value",e.target.value)}/></div>
+          <div className="fg"><label className="fl">Data</label><input className="fi" type="date" value={form.date} onChange={e=>upd("date",e.target.value)}/></div>
         </div>
       </>}
       {type==="expense"&&<>
         <div className="fg"><label className="fl">Categoria</label>
-          <div className="catgrid">
-            {EXPENSE_CATS.map(c=>(
-              <button key={c.name} className={`catopt${form.category===c.name?" selected":""}`}
-                style={form.category===c.name?{borderColor:c.color,background:c.color+"33",color:"#fff"}:{}}
-                onClick={()=>upd("category",c.name)}>
-                {c.icon} {c.name}
-              </button>
-            ))}
-          </div>
+          <div className="catgrid">{EXPENSE_CATS.map(c=>(
+            <button key={c.name} className={`catopt${form.category===c.name?" selected":""}`}
+              style={form.category===c.name?{borderColor:c.color,background:c.color+"33",color:"#fff"}:{}}
+              onClick={()=>upd("category",c.name)}>{c.icon} {c.name}</button>
+          ))}</div>
         </div>
-        <div className="fg"><label className="fl">Descrição</label>
-          <input className="fi" placeholder="Ex: iFood, Uber…" value={form.description} onChange={e=>upd("description",e.target.value)}/></div>
+        <div className="fg"><label className="fl">Descrição</label><input className="fi" placeholder="Ex: iFood, Uber…" value={form.description} onChange={e=>upd("description",e.target.value)}/></div>
         <div className="frow">
-          <div className="fg"><label className="fl">Valor (R$)</label>
-            <input className="fi" type="number" inputMode="decimal" placeholder="0,00" value={form.value} onChange={e=>upd("value",e.target.value)}/></div>
-          <div className="fg"><label className="fl">Data</label>
-            <input className="fi" type="date" value={form.date} onChange={e=>upd("date",e.target.value)}/></div>
+          <div className="fg"><label className="fl">Valor (R$)</label><input className="fi" type="number" inputMode="decimal" placeholder="0,00" value={form.value} onChange={e=>upd("value",e.target.value)}/></div>
+          <div className="fg"><label className="fl">Data</label><input className="fi" type="date" value={form.date} onChange={e=>upd("date",e.target.value)}/></div>
         </div>
         <div className="frow">
-          <div className="fg"><label className="fl">Banco</label>
-            <select className="fi" value={form.bank} onChange={e=>upd("bank",e.target.value)}>
-              {banks.map(b=><option key={b.id} value={b.name}>{b.name}</option>)}
-            </select></div>
-          <div className="fg"><label className="fl">Forma de pagto</label>
-            <select className="fi" value={form.method} onChange={e=>upd("method",e.target.value)}>
-              {METHODS.map(m=><option key={m}>{m}</option>)}
-            </select></div>
+          <div className="fg"><label className="fl">Banco</label><select className="fi" value={form.bank} onChange={e=>upd("bank",e.target.value)}>{banks.map(b=><option key={b.id} value={b.name}>{b.name}</option>)}</select></div>
+          <div className="fg"><label className="fl">Forma de pagto</label><select className="fi" value={form.method} onChange={e=>upd("method",e.target.value)}>{METHODS.map(m=><option key={m}>{m}</option>)}</select></div>
         </div>
-        <div className="fg">
-          <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:13}}>
-            <input type="checkbox" checked={!!form.essential} onChange={e=>upd("essential",e.target.checked)} style={{width:16,height:16,accentColor:"var(--green)"}}/>
-            Gasto essencial
-          </label>
-        </div>
+        <div className="fg"><label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:13}}><input type="checkbox" checked={!!form.essential} onChange={e=>upd("essential",e.target.checked)} style={{width:16,height:16,accentColor:"var(--green)"}}/>Gasto essencial</label></div>
       </>}
       {type==="fixed"&&<>
-        <div className="fg"><label className="fl">Nome</label>
-          <input className="fi" placeholder="Ex: Parcela carro, Seguro…" value={form.name} onChange={e=>upd("name",e.target.value)}/></div>
-        <div className="fg"><label className="fl">Valor (R$)</label>
-          <input className="fi" type="number" inputMode="decimal" placeholder="0,00" value={form.value} onChange={e=>upd("value",e.target.value)}/></div>
-        <div className="fg">
-          <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:13}}>
-            <input type="checkbox" checked={!!form.paid} onChange={e=>upd("paid",e.target.checked)} style={{width:16,height:16,accentColor:"var(--green)"}}/>
-            Já paga
-          </label>
-        </div>
+        <div className="fg"><label className="fl">Nome</label><input className="fi" placeholder="Ex: Parcela carro, Seguro…" value={form.name} onChange={e=>upd("name",e.target.value)}/></div>
+        <div className="fg"><label className="fl">Valor (R$)</label><input className="fi" type="number" inputMode="decimal" placeholder="0,00" value={form.value} onChange={e=>upd("value",e.target.value)}/></div>
+        <div className="fg"><label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:13}}><input type="checkbox" checked={!!form.paid} onChange={e=>upd("paid",e.target.checked)} style={{width:16,height:16,accentColor:"var(--green)"}}/>Já paga</label></div>
       </>}
       {type==="investment"&&<>
-        <div className="fg"><label className="fl">Tipo</label>
-          <select className="fi" value={form.type} onChange={e=>upd("type",e.target.value)}>
-            {INVEST_TYPES.map(t=><option key={t}>{t}</option>)}
-          </select></div>
-        <div className="fg"><label className="fl">Nome / descrição</label>
-          <input className="fi" placeholder="Ex: CDB Nubank, Retirada emergência…" value={form.name} onChange={e=>upd("name",e.target.value)}/></div>
+        <div className="fg"><label className="fl">Tipo</label><select className="fi" value={form.type} onChange={e=>upd("type",e.target.value)}>{INVEST_TYPES.map(t=><option key={t}>{t}</option>)}</select></div>
+        <div className="fg"><label className="fl">Nome / descrição</label><input className="fi" placeholder="Ex: CDB Nubank, Retirada emergência…" value={form.name} onChange={e=>upd("name",e.target.value)}/></div>
         <div className="frow">
-          <div className="fg"><label className="fl">Valor (R$)</label>
-            <input className="fi" type="number" inputMode="decimal" placeholder="0,00" value={form.value} onChange={e=>upd("value",e.target.value)}/></div>
-          <div className="fg"><label className="fl">Data</label>
-            <input className="fi" type="date" value={form.date} onChange={e=>upd("date",e.target.value)}/></div>
+          <div className="fg"><label className="fl">Valor (R$)</label><input className="fi" type="number" inputMode="decimal" placeholder="0,00" value={form.value} onChange={e=>upd("value",e.target.value)}/></div>
+          <div className="fg"><label className="fl">Data</label><input className="fi" type="date" value={form.date} onChange={e=>upd("date",e.target.value)}/></div>
         </div>
       </>}
       <button className="savebtn" onClick={save}>{isEdit?"Salvar alterações":"Adicionar"}</button>
