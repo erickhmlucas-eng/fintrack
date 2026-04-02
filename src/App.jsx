@@ -1,5 +1,24 @@
 import { useState, useEffect, useCallback } from "react";
+import { createClient } from "@supabase/supabase-js";
 
+const SUPABASE_URL = "https://rjcgvlstriiepixogqnl.supabase.co";
+const SUPABASE_KEY = "sb_publishable_qmzTdrWgLlNUiihld4Q3nw_iz_ED6aS";
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+// ─── STORAGE (Supabase cloud) ─────────────────────────────────────────────────
+async function dbGet(key) {
+  try {
+    const { data } = await supabase.from("user_data").select("value").eq("key", key).single();
+    return data?.value ?? null;
+  } catch(_) { return null; }
+}
+async function dbSet(key, value) {
+  try {
+    await supabase.from("user_data").upsert({ key, value, updated_at: new Date().toISOString() }, { onConflict: "user_id,key" });
+  } catch(_) {}
+}
+
+// ─── CONSTANTS ────────────────────────────────────────────────────────────────
 const MONTHS_FULL = ["Janeiro","Fevereiro","Março","Abril","Maio","Junho","Julho","Agosto","Setembro","Outubro","Novembro","Dezembro"];
 const MONTHS = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"];
 
@@ -46,14 +65,6 @@ const DEFAULT_SETTINGS = {
   personalGoalName:"Meta X",personalGoalValue:100000,personalBase:0,personalDelta:0,
   banks:DEFAULT_BANKS,catBudgets:{},
 };
-
-// ─── localStorage helpers ─────────────────────────────────────────────────────
-function lsGet(key) {
-  try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : null; } catch(_) { return null; }
-}
-function lsSet(key, value) {
-  try { localStorage.setItem(key, JSON.stringify(value)); } catch(_) {}
-}
 
 const NAV = [
   {id:"dashboard",icon:"📊",label:"Início"},
@@ -191,6 +202,86 @@ function Modal({onClose,children,tall=false}){
   );
 }
 
+// ─── AUTH SCREEN ──────────────────────────────────────────────────────────────
+function AuthScreen({onAuth}){
+  const [mode,setMode]=useState("login");
+  const [email,setEmail]=useState("");
+  const [password,setPassword]=useState("");
+  const [loading,setLoading]=useState(false);
+  const [error,setError]=useState("");
+  const [msg,setMsg]=useState("");
+
+  async function handle(){
+    setLoading(true);setError("");setMsg("");
+    try{
+      if(mode==="login"){
+        const {error}=await supabase.auth.signInWithPassword({email,password});
+        if(error) setError(error.message);
+      } else if(mode==="signup"){
+        const {error}=await supabase.auth.signUp({email,password});
+        if(error) setError(error.message);
+        else setMsg("Conta criada! Verifique seu e-mail para confirmar.");
+      } else {
+        const {error}=await supabase.auth.resetPasswordForEmail(email);
+        if(error) setError(error.message);
+        else setMsg("E-mail de recuperação enviado!");
+      }
+    }catch(_){}
+    setLoading(false);
+  }
+
+  return (
+    <div style={{minHeight:"100vh",background:"var(--bg)",display:"flex",alignItems:"center",justifyContent:"center",padding:"20px"}}>
+      <div style={{width:"100%",maxWidth:380}}>
+        <div style={{textAlign:"center",marginBottom:32}}>
+          <div style={{fontSize:28,fontWeight:700,letterSpacing:"-1px"}}>Fin<span style={{color:"var(--accent)"}}>Track</span></div>
+          <div style={{fontSize:13,color:"var(--muted)",marginTop:6}}>Controle financeiro pessoal</div>
+        </div>
+        <div style={{background:"var(--card)",border:"1px solid var(--border)",borderRadius:20,padding:24}}>
+          <div style={{display:"flex",gap:8,marginBottom:20}}>
+            {[["login","Entrar"],["signup","Criar conta"]].map(([m,l])=>(
+              <button key={m} onClick={()=>{setMode(m);setError("");setMsg("");}}
+                style={{flex:1,padding:"9px 0",borderRadius:10,border:"none",cursor:"pointer",
+                        fontFamily:"'Sora',sans-serif",fontSize:13,fontWeight:700,
+                        background:mode===m?"var(--accent)":"var(--surface)",
+                        color:mode===m?"#fff":"var(--muted)"}}>
+                {l}
+              </button>
+            ))}
+          </div>
+          <div style={{marginBottom:12}}>
+            <label style={{display:"block",fontSize:9,fontWeight:700,textTransform:"uppercase",letterSpacing:".7px",color:"var(--muted)",marginBottom:5}}>E-mail</label>
+            <input value={email} onChange={e=>setEmail(e.target.value)}
+              style={{width:"100%",background:"var(--surface)",border:"1px solid var(--border)",color:"var(--text)",fontFamily:"'Sora',sans-serif",fontSize:14,borderRadius:10,padding:"11px 12px",outline:"none",boxSizing:"border-box"}}
+              placeholder="seu@email.com" type="email"/>
+          </div>
+          {mode!=="reset"&&(
+            <div style={{marginBottom:16}}>
+              <label style={{display:"block",fontSize:9,fontWeight:700,textTransform:"uppercase",letterSpacing:".7px",color:"var(--muted)",marginBottom:5}}>Senha</label>
+              <input value={password} onChange={e=>setPassword(e.target.value)}
+                style={{width:"100%",background:"var(--surface)",border:"1px solid var(--border)",color:"var(--text)",fontFamily:"'Sora',sans-serif",fontSize:14,borderRadius:10,padding:"11px 12px",outline:"none",boxSizing:"border-box"}}
+                placeholder="••••••••" type="password"
+                onKeyDown={e=>e.key==="Enter"&&handle()}/>
+            </div>
+          )}
+          {error&&<div style={{background:"rgba(192,57,43,.15)",border:"1px solid rgba(192,57,43,.3)",borderRadius:9,padding:"9px 12px",fontSize:12,color:"var(--wine)",marginBottom:12}}>{error}</div>}
+          {msg&&<div style={{background:"rgba(0,214,143,.1)",border:"1px solid rgba(0,214,143,.2)",borderRadius:9,padding:"9px 12px",fontSize:12,color:"var(--green)",marginBottom:12}}>{msg}</div>}
+          <button onClick={handle} disabled={loading}
+            style={{width:"100%",background:"var(--accent)",color:"#fff",border:"none",fontFamily:"'Sora',sans-serif",fontSize:14,fontWeight:700,borderRadius:11,padding:13,cursor:"pointer",opacity:loading?.6:1}}>
+            {loading?"Aguarde...":{login:"Entrar",signup:"Criar conta",reset:"Enviar e-mail"}[mode]}
+          </button>
+          {mode==="login"&&(
+            <button onClick={()=>{setMode("reset");setError("");setMsg("");}}
+              style={{width:"100%",background:"none",border:"none",color:"var(--muted)",fontFamily:"'Sora',sans-serif",fontSize:12,cursor:"pointer",marginTop:12,padding:4}}>
+              Esqueci minha senha
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function BulkPanel({type,banks,vy,vm,onConfirm,onClose}){
   const [text,setText]=useState("");
   const [preview,setPreview]=useState([]);
@@ -205,52 +296,38 @@ function BulkPanel({type,banks,vy,vm,onConfirm,onClose}){
   function process(){setPreview(parseBulk(text,type,banks,vy,vm));setProcessed(true);}
   return (
     <>
-      <div className="mhdr">
-        <div className="mtitle">📋 Colar em lote — {labels[type]}</div>
-        <button className="mclose" onClick={onClose}>✕</button>
-      </div>
+      <div className="mhdr"><div className="mtitle">📋 Colar em lote — {labels[type]}</div><button className="mclose" onClick={onClose}>✕</button></div>
       {!processed?(
         <>
           <div style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:9,padding:10,marginBottom:10,fontSize:10,color:"var(--muted)",lineHeight:1.8,fontFamily:"monospace"}}>{examples[type]}</div>
           <textarea style={{width:"100%",background:"var(--surface)",border:"1px solid var(--border)",color:"var(--text)",fontFamily:"'Sora',sans-serif",fontSize:13,borderRadius:10,padding:11,resize:"vertical",minHeight:130,outline:"none"}}
-            placeholder={`Cole aqui...\n\nEx:\n${examples[type]}`}
-            value={text} onChange={e=>setText(e.target.value)} autoFocus/>
+            placeholder={`Cole aqui...\n\nEx:\n${examples[type]}`} value={text} onChange={e=>setText(e.target.value)} autoFocus/>
           <button className="savebtn" style={{marginTop:10}} onClick={process} disabled={!text.trim()}>Processar →</button>
         </>
       ):(
         <>
           <div style={{fontSize:11,color:"var(--muted)",marginBottom:10}}>{preview.length} lançamento(s) identificado(s):</div>
           {preview.length===0
-            ?<div style={{textAlign:"center",color:"var(--wine)",padding:"20px 0",fontSize:13}}>Nenhum reconhecido. Verifique o formato.</div>
+            ?<div style={{textAlign:"center",color:"var(--wine)",padding:"20px 0",fontSize:13}}>Nenhum reconhecido.</div>
             :<div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:14}}>
               {preview.map((p,i)=>{
-                const cat=type==="expense"?(CAT_MAP[p.category]||{icon:"📌",color:"#888"}):null;
+                const cat=type==="expense"?(CAT_MAP[p.category]||{icon:"📌"}):null;
                 return (
                   <div key={i} style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:10,padding:"9px 11px",display:"flex",alignItems:"center",gap:9}}>
                     {cat&&<span style={{fontSize:16}}>{cat.icon}</span>}
                     <div style={{flex:1,minWidth:0}}>
                       <div style={{fontSize:12,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.name||p.description||p.type}</div>
-                      <div style={{fontSize:9,color:"var(--muted)",marginTop:1}}>
-                        {p.date&&p.date.slice(5).split("-").reverse().join("/")}
-                        {p.category&&` · ${p.category}`}{p.bank&&` · ${p.bank}`}{p.method&&` · ${p.method}`}
-                      </div>
+                      <div style={{fontSize:9,color:"var(--muted)",marginTop:1}}>{p.date&&p.date.slice(5).split("-").reverse().join("/")}{p.category&&` · ${p.category}`}{p.bank&&` · ${p.bank}`}</div>
                     </div>
-                    <div style={{fontWeight:700,fontSize:13,flexShrink:0,color:type==="income"?"var(--green)":type==="investment"?"var(--gold)":"var(--wine)"}}>
-                      {fmt(p.value)}
-                    </div>
+                    <div style={{fontWeight:700,fontSize:13,flexShrink:0,color:type==="income"?"var(--green)":type==="investment"?"var(--gold)":"var(--wine)"}}>{fmt(p.value)}</div>
                   </div>
                 );
               })}
             </div>
           }
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:9}}>
-            <button onClick={()=>setProcessed(false)}
-              style={{background:"var(--surface)",border:"1px solid var(--border)",color:"var(--muted)",fontFamily:"'Sora',sans-serif",fontSize:13,fontWeight:600,borderRadius:10,padding:12,cursor:"pointer"}}>
-              ← Corrigir
-            </button>
-            <button className="savebtn" style={{margin:0}} onClick={()=>onConfirm(preview)} disabled={preview.length===0}>
-              Confirmar {preview.length}
-            </button>
+            <button onClick={()=>setProcessed(false)} style={{background:"var(--surface)",border:"1px solid var(--border)",color:"var(--muted)",fontFamily:"'Sora',sans-serif",fontSize:13,fontWeight:600,borderRadius:10,padding:12,cursor:"pointer"}}>← Corrigir</button>
+            <button className="savebtn" style={{margin:0}} onClick={()=>onConfirm(preview)} disabled={preview.length===0}>Confirmar {preview.length}</button>
           </div>
         </>
       )}
@@ -268,7 +345,6 @@ function CartoesPage({expenses,banks,vm,vy}){
   const total=items.reduce((s,e)=>s+e.value,0);
   const limit=bank?.limit||0;
   const pct=limit>0?Math.min((total/limit)*100,100):0;
-  const available=limit>0?Math.max(limit-total,0):null;
   const catBreak=EXPENSE_CATS.map(c=>({...c,value:items.filter(e=>e.category===c.name).reduce((s,e)=>s+e.value,0)})).filter(c=>c.value>0).sort((a,b)=>b.value-a.value);
   const maxCat=catBreak[0]?.value||1;
   return (
@@ -276,16 +352,14 @@ function CartoesPage({expenses,banks,vm,vy}){
       <div className="st">Cartões — {MONTHS_FULL[vm]} {vy}</div>
       <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
         {banks.map(b=>{
-          const hasData=expenses.some(e=>e.bank===b.name&&e.method==="Crédito");
           const tot=expenses.filter(e=>e.bank===b.name&&e.method==="Crédito").reduce((s,e)=>s+e.value,0);
+          const hasData=tot>0;
           return (
             <button key={b.id} onClick={()=>setSelected(b.name)}
               style={{padding:"7px 14px",borderRadius:20,border:`2px solid ${selected===b.name?b.color:"var(--border)"}`,
-                      background:selected===b.name?b.color+"22":"var(--surface)",
-                      color:selected===b.name?b.color:"var(--muted)",
+                      background:selected===b.name?b.color+"22":"var(--surface)",color:selected===b.name?b.color:"var(--muted)",
                       fontFamily:"'Sora',sans-serif",fontSize:12,fontWeight:700,cursor:"pointer",opacity:hasData?1:0.5}}>
-              {b.name}
-              {hasData&&<span style={{marginLeft:5,fontSize:9,background:b.color,color:"#fff",padding:"1px 5px",borderRadius:10}}>{fmt(tot)}</span>}
+              {b.name}{hasData&&<span style={{marginLeft:5,fontSize:9,background:b.color,color:"#fff",padding:"1px 5px",borderRadius:10}}>{fmt(tot)}</span>}
             </button>
           );
         })}
@@ -297,23 +371,21 @@ function CartoesPage({expenses,banks,vm,vy}){
               <span style={{width:12,height:12,borderRadius:"50%",background:bank?.color,display:"inline-block"}}/>
               <span style={{fontSize:14,fontWeight:700}}>{selected}</span>
             </div>
-            <div style={{fontSize:11,color:"var(--muted)"}}>Gasto no crédito em {MONTHS_FULL[vm]}</div>
+            <div style={{fontSize:11,color:"var(--muted)"}}>Crédito em {MONTHS_FULL[vm]}</div>
           </div>
           <div style={{textAlign:"right"}}>
-            <div style={{fontSize:20,fontWeight:700,color:"var(--wine)",letterSpacing:"-.5px"}}>{fmt(total)}</div>
+            <div style={{fontSize:20,fontWeight:700,color:"var(--wine)"}}>{fmt(total)}</div>
             {limit>0&&<div style={{fontSize:10,color:"var(--muted)"}}>de {fmt(limit)} de limite</div>}
           </div>
         </div>
         {limit>0&&<>
-          <div style={{height:8,background:"var(--border)",borderRadius:4,overflow:"hidden",marginBottom:6}}>
-            <div style={{height:"100%",width:`${pct}%`,borderRadius:4,transition:"width .6s",background:pct>90?"var(--wine)":pct>70?"var(--gold)":bank?.color}}/>
-          </div>
+          <div style={{height:8,background:"var(--border)",borderRadius:4,overflow:"hidden",marginBottom:6}}><div style={{height:"100%",width:`${pct}%`,borderRadius:4,background:pct>90?"var(--wine)":pct>70?"var(--gold)":bank?.color}}/></div>
           <div style={{display:"flex",justifyContent:"space-between",fontSize:11}}>
             <span style={{color:pct>90?"var(--wine)":pct>70?"var(--gold)":"var(--muted)"}}>{pct.toFixed(0)}% usado</span>
-            <span style={{color:"var(--green)",fontWeight:600}}>{fmt(available)} disponível</span>
+            <span style={{color:"var(--green)",fontWeight:600}}>{fmt(Math.max(limit-total,0))} disponível</span>
           </div>
         </>}
-        {items.length===0&&<div style={{textAlign:"center",color:"var(--muted)",fontSize:12,padding:"16px 0"}}>Nenhum gasto no crédito para este cartão em {MONTHS_FULL[vm]}.</div>}
+        {items.length===0&&<div style={{textAlign:"center",color:"var(--muted)",fontSize:12,padding:"16px 0"}}>Nenhum gasto no crédito em {MONTHS_FULL[vm]}.</div>}
       </div>
       {catBreak.length>0&&(
         <div className="card">
@@ -362,8 +434,35 @@ function CartoesPage({expenses,banks,vm,vy}){
   );
 }
 
-// ─── MAIN ─────────────────────────────────────────────────────────────────────
+// ─── MAIN APP ─────────────────────────────────────────────────────────────────
 export default function FinTrack(){
+  const [session,setSession]=useState(null);
+  const [authLoading,setAuthLoading]=useState(true);
+
+  useEffect(()=>{
+    supabase.auth.getSession().then(({data:{session}})=>{setSession(session);setAuthLoading(false);});
+    const {data:{subscription}}=supabase.auth.onAuthStateChange((_,session)=>setSession(session));
+    return ()=>subscription.unsubscribe();
+  },[]);
+
+  if(authLoading) return (
+    <div style={{minHeight:"100vh",background:"var(--bg)",display:"flex",alignItems:"center",justifyContent:"center",color:"var(--muted)",fontFamily:"'Sora',sans-serif"}}>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;700&display=swap');:root{--bg:#07070f;--muted:#6060a0;}`}</style>
+      Carregando...
+    </div>
+  );
+
+  if(!session) return (
+    <>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700&display=swap');*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}:root{--bg:#07070f;--surface:#0d0d1a;--card:#111120;--border:#1a1a2e;--border2:#22223a;--text:#eeeeff;--muted:#6060a0;--green:#00d68f;--wine:#c0392b;--accent:#9b8cff;--gold:#ffd166;--blue:#4d9fff;}html,body{background:var(--bg);color:var(--text);font-family:'Sora',sans-serif;}`}</style>
+      <AuthScreen onAuth={setSession}/>
+    </>
+  );
+
+  return <AppInner session={session}/>;
+}
+
+function AppInner({session}){
   const [page,setPage]=useState("dashboard");
   const [vm,setVm]=useState(today.getMonth());
   const [vy,setVy]=useState(today.getFullYear());
@@ -375,63 +474,65 @@ export default function FinTrack(){
   const [yearCache,setYearCache]=useState({});
   const [toast,setToast]=useState(null);
   const [prevBalance,setPrevBalance]=useState(0);
+  const [syncing,setSyncing]=useState(false);
 
   // Load settings & debts
   useEffect(()=>{
-    const s=lsGet(SETTINGS_KEY);
-    if(s) setSettings(p=>({...DEFAULT_SETTINGS,...s,banks:s.banks||DEFAULT_BANKS,catBudgets:s.catBudgets||{}}));
-    const d=lsGet(DEBTS_KEY);
-    if(d) setDebts(d);
-    setLoaded(true);
+    (async()=>{
+      const s=await dbGet(SETTINGS_KEY);
+      if(s) setSettings(p=>({...DEFAULT_SETTINGS,...s,banks:s.banks||DEFAULT_BANKS,catBudgets:s.catBudgets||{}}));
+      const d=await dbGet(DEBTS_KEY);
+      if(d) setDebts(d);
+      setLoaded(true);
+    })();
   },[]);
 
-  // Load month + carry-over fixed
+  // Load month
   useEffect(()=>{
     if(!loaded)return;
-    const r=lsGet(monthKey(vy,vm));
-    if(r){ setData(r); }
-    else{
+    (async()=>{
+      const r=await dbGet(monthKey(vy,vm));
+      if(r){ setData(r); }
+      else{
+        const pm=vm===0?11:vm-1,py=vm===0?vy-1:vy;
+        const pr=await dbGet(monthKey(py,pm));
+        const carried=pr?(pr.fixed||[]).filter(f=>!f.isDebt).map(f=>({...f,id:uid(),paid:false})):[];
+        setData({...EMPTY_MONTH(),fixed:carried,initialized:true});
+      }
+    })();
+  },[vm,vy,loaded]);
+
+  // Load prev balance
+  useEffect(()=>{
+    if(!loaded)return;
+    (async()=>{
       const pm=vm===0?11:vm-1,py=vm===0?vy-1:vy;
-      const pr=lsGet(monthKey(py,pm));
-      const carried=pr?(pr.fixed||[]).filter(f=>!f.isDebt).map(f=>({...f,id:uid(),paid:false})):[];
-      setData({...EMPTY_MONTH(),fixed:carried,initialized:true});
-    }
+      const r=await dbGet(monthKey(py,pm));
+      if(!r){setPrevBalance(0);return;}
+      const inc=r.incomes.reduce((s,t)=>s+t.value,0);
+      const exp=r.expenses.reduce((s,t)=>s+t.value,0);
+      const fix=r.fixed.reduce((s,t)=>s+(t.value||0),0);
+      const inv=r.investments.reduce((s,t)=>s+t.value,0);
+      setPrevBalance(Math.max(inc-exp-fix-inv,0));
+    })();
   },[vm,vy,loaded]);
 
-  // Load prev month balance
-  useEffect(()=>{
-    if(!loaded)return;
-    const pm=vm===0?11:vm-1,py=vm===0?vy-1:vy;
-    const r=lsGet(monthKey(py,pm));
-    if(!r){setPrevBalance(0);return;}
-    const inc=r.incomes.reduce((s,t)=>s+t.value,0);
-    const exp=r.expenses.reduce((s,t)=>s+t.value,0);
-    const fix=r.fixed.reduce((s,t)=>s+(t.value||0),0);
-    const inv=r.investments.reduce((s,t)=>s+t.value,0);
-    setPrevBalance(Math.max(inc-exp-fix-inv,0));
-  },[vm,vy,loaded]);
-
-  // Load year cache
-  const loadYearCache=useCallback(()=>{
+  const loadYearCache=useCallback(async()=>{
     const cache={};
-    for(let m=0;m<12;m++){
-      const r=lsGet(monthKey(vy,m));
-      cache[m]=r||EMPTY_MONTH();
-    }
+    for(let m=0;m<12;m++){const r=await dbGet(monthKey(vy,m));cache[m]=r||EMPTY_MONTH();}
     setYearCache(cache);
   },[vy]);
 
-  // Persist month then reload cache
+  // Persist month
   useEffect(()=>{
     if(!loaded)return;
-    lsSet(monthKey(vy,vm),data);
-    loadYearCache();
+    setSyncing(true);
+    dbSet(monthKey(vy,vm),data).then(()=>loadYearCache()).finally(()=>setSyncing(false));
   },[data,vm,vy,loaded,loadYearCache]);
 
-  useEffect(()=>{ if(loaded) lsSet(SETTINGS_KEY,settings); },[settings,loaded]);
-  useEffect(()=>{ if(loaded) lsSet(DEBTS_KEY,debts); },[debts,loaded]);
+  useEffect(()=>{ if(loaded) dbSet(SETTINGS_KEY,settings); },[settings,loaded]);
+  useEffect(()=>{ if(loaded) dbSet(DEBTS_KEY,debts); },[debts,loaded]);
 
-  // ── Computed ──
   const banks=settings.banks||DEFAULT_BANKS;
   const rawIncome   =data.incomes.reduce((s,t)=>s+t.value,0);
   const totalIncome =rawIncome+prevBalance;
@@ -440,7 +541,6 @@ export default function FinTrack(){
   const totalInvest =data.investments.reduce((s,t)=>s+t.value,0);
   const totalOut    =totalExpense+totalFixed+totalInvest;
   const balance     =totalIncome-totalOut;
-
   const emergencyTotal=(settings.emergencyBase||0)+(settings.emergencyDelta||0);
   const personalTotal =(settings.personalBase||0)+(settings.personalDelta||0);
   const bankCredit    =banks.map(b=>({...b,spent:data.expenses.filter(e=>e.bank===b.name&&e.method==="Crédito").reduce((s,e)=>s+e.value,0)}));
@@ -466,8 +566,8 @@ export default function FinTrack(){
 
   const alerts=[];
   if(rawIncome===0) alerts.push({type:"warn",msg:`Sem entradas em ${MONTHS_FULL[vm]}`});
-  if(balance<0&&rawIncome>0) alerts.push({type:"danger",msg:`Saldo negativo: ${fmt(Math.abs(balance))} a mais do que entrou`});
-  if(balance>0&&rawIncome>0) alerts.push({type:"ok",msg:`Você guardou ${((balance/totalIncome)*100).toFixed(0)}% da renda este mês 👏`});
+  if(balance<0&&rawIncome>0) alerts.push({type:"danger",msg:`Saldo negativo: ${fmt(Math.abs(balance))} a mais`});
+  if(balance>0&&rawIncome>0) alerts.push({type:"ok",msg:`Você guardou ${((balance/totalIncome)*100).toFixed(0)}% da renda 👏`});
   if(prevBalance>0) alerts.push({type:"ok",msg:`Saldo de ${MONTHS_FULL[vm===0?11:vm-1]}: +${fmt(prevBalance)}`});
   if(unpaidFixed>0) alerts.push({type:"warn",msg:`${unpaidFixed} fixa(s) pendente(s)`});
   bankCredit.forEach(b=>{if(b.limit>0&&b.spent>0){const p=(b.spent/b.limit)*100;if(p>=80)alerts.push({type:p>=100?"danger":"warn",msg:`${b.name}: ${p.toFixed(0)}% do limite usado`});}});
@@ -519,9 +619,9 @@ export default function FinTrack(){
         .topbar{display:flex;align-items:center;justify-content:space-between;padding:12px 14px 9px;position:sticky;top:0;z-index:90;background:var(--bg);border-bottom:1px solid var(--border);}
         .logo{font-size:16px;font-weight:700;letter-spacing:-.5px;}.logo em{color:var(--accent);font-style:normal;}
         .greeting{font-size:10px;color:var(--muted);margin-left:6px;}
+        .sync{font-size:9px;color:var(--muted);margin-left:6px;}
         .mnav{display:flex;align-items:center;gap:6px;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:6px 10px;}
-        .mnav button{background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;padding:0 3px;-webkit-tap-highlight-color:transparent;}
-        .mnav button:active{color:var(--text);}
+        .mnav button{background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;padding:0 3px;}
         .mlbl{font-size:11px;font-weight:600;min-width:108px;text-align:center;white-space:nowrap;}
         .pg{padding:12px 13px 6px;display:flex;flex-direction:column;gap:11px;}
         .st{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);}
@@ -535,23 +635,23 @@ export default function FinTrack(){
         .mv.g{color:var(--green);}.mv.w{color:var(--wine);}.mv.p{color:var(--accent);}.mv.b{color:var(--blue);}.mv.gold{color:var(--gold);}.mv.gr{color:#aaa;}
         .row2{display:grid;grid-template-columns:1fr 1fr;gap:11px;}
         .txlist{display:flex;flex-direction:column;gap:6px;}
-        .txi{display:flex;align-items:center;gap:8px;padding:10px;background:var(--surface);border:1px solid var(--border);border-radius:11px;cursor:pointer;-webkit-tap-highlight-color:transparent;user-select:none;}
+        .txi{display:flex;align-items:center;gap:8px;padding:10px;background:var(--surface);border:1px solid var(--border);border-radius:11px;cursor:pointer;user-select:none;}
         .txi:active{border-color:var(--border2);}
         .txicon{width:32px;height:32px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;}
         .txinfo{flex:1;min-width:0;}.txd{font-size:12px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
         .txm{font-size:9px;color:var(--muted);margin-top:2px;display:flex;gap:4px;align-items:center;flex-wrap:wrap;}
         .txa{font-size:12px;font-weight:700;flex-shrink:0;}
-        .tdel{background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;padding:5px 4px;-webkit-tap-highlight-color:transparent;flex-shrink:0;}
+        .tdel{background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;padding:5px 4px;flex-shrink:0;}
         .badge{display:inline-block;font-size:8px;font-weight:700;padding:1px 5px;border-radius:20px;}
         .chip{display:inline-flex;align-items:center;font-size:8px;font-weight:700;padding:1px 5px;border-radius:20px;}
-        .checkrow{display:flex;align-items:center;gap:8px;padding:10px;background:var(--surface);border:1px solid var(--border);border-radius:11px;cursor:pointer;-webkit-tap-highlight-color:transparent;user-select:none;}
+        .checkrow{display:flex;align-items:center;gap:8px;padding:10px;background:var(--surface);border:1px solid var(--border);border-radius:11px;cursor:pointer;user-select:none;}
         .checkrow:active{border-color:var(--border2);}
         .checkbox{width:18px;height:18px;border-radius:5px;border:2px solid var(--border2);display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:all .15s;}
         .checkbox.on{background:var(--green);border-color:var(--green);}
-        .fab{position:fixed;bottom:76px;right:16px;width:50px;height:50px;border-radius:16px;background:var(--accent);border:none;color:#fff;font-size:24px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 6px 20px rgba(155,140,255,.4);z-index:80;-webkit-tap-highlight-color:transparent;}
+        .fab{position:fixed;bottom:76px;right:16px;width:50px;height:50px;border-radius:16px;background:var(--accent);border:none;color:#fff;font-size:24px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 6px 20px rgba(155,140,255,.4);z-index:80;}
         .fab:active{transform:scale(.92);}
         .bnav{position:fixed;bottom:0;left:0;right:0;background:var(--card);border-top:1px solid var(--border);display:flex;justify-content:space-around;align-items:center;height:62px;z-index:80;overflow-x:auto;}
-        .nb{background:none;border:none;color:var(--muted);cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:2px;font-family:'Sora',sans-serif;font-size:7px;font-weight:600;letter-spacing:.2px;text-transform:uppercase;padding:5px 2px;min-width:32px;flex-shrink:0;-webkit-tap-highlight-color:transparent;transition:color .12s;}
+        .nb{background:none;border:none;color:var(--muted);cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:2px;font-family:'Sora',sans-serif;font-size:7px;font-weight:600;letter-spacing:.2px;text-transform:uppercase;padding:5px 2px;min-width:32px;flex-shrink:0;transition:color .12s;}
         .nb.active{color:var(--accent);}.nbi{font-size:15px;line-height:1;}
         .mhdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;}
         .mtitle{font-size:14px;font-weight:700;}
@@ -561,7 +661,7 @@ export default function FinTrack(){
         .fi:focus{border-color:var(--accent);}.fg{margin-bottom:10px;}
         .frow{display:grid;grid-template-columns:1fr 1fr;gap:9px;}
         .catgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;}
-        .catopt{border:1px solid var(--border);background:var(--surface);color:var(--muted);font-family:'Sora',sans-serif;font-size:9px;font-weight:500;border-radius:8px;padding:7px 4px;cursor:pointer;text-align:center;line-height:1.3;-webkit-tap-highlight-color:transparent;transition:all .12s;}
+        .catopt{border:1px solid var(--border);background:var(--surface);color:var(--muted);font-family:'Sora',sans-serif;font-size:9px;font-weight:500;border-radius:8px;padding:7px 4px;cursor:pointer;text-align:center;line-height:1.3;transition:all .12s;}
         .savebtn{width:100%;background:var(--accent);color:#fff;border:none;font-family:'Sora',sans-serif;font-size:14px;font-weight:700;border-radius:11px;padding:13px;cursor:pointer;margin-top:5px;}
         .savebtn:active{opacity:.85;}.savebtn:disabled{opacity:.4;cursor:not-allowed;}
         select.fi{appearance:none;-webkit-appearance:none;}
@@ -573,7 +673,7 @@ export default function FinTrack(){
         .alert.ok{background:rgba(0,214,143,.1);border:1px solid rgba(0,214,143,.2);color:var(--green);}
         .alert.warn{background:rgba(255,209,102,.1);border:1px solid rgba(255,209,102,.2);color:#ffd166;}
         .alert.danger{background:rgba(192,57,43,.12);border:1px solid rgba(192,57,43,.3);color:var(--wine);}
-        .bulkbtn{background:var(--surface);border:1px solid var(--border);color:var(--muted);font-family:'Sora',sans-serif;font-size:11px;font-weight:600;border-radius:9px;padding:7px 12px;cursor:pointer;-webkit-tap-highlight-color:transparent;}
+        .bulkbtn{background:var(--surface);border:1px solid var(--border);color:var(--muted);font-family:'Sora',sans-serif;font-size:11px;font-weight:600;border-radius:9px;padding:7px 12px;cursor:pointer;}
         .bulkbtn:active{border-color:var(--accent);color:var(--accent);}
         .chart{display:flex;align-items:flex-end;gap:4px;}
         .cgrp{display:flex;align-items:flex-end;gap:2px;flex:1;}
@@ -592,11 +692,21 @@ export default function FinTrack(){
 
       <div className="app">
         <div className="topbar">
-          <div className="logo">Fin<em>Track</em><span className="greeting">Olá, {settings.name}!</span></div>
-          <div className="mnav">
-            <button onClick={prevMonth}>‹</button>
-            <span className="mlbl">{MONTHS_FULL[vm]} {vy}</span>
-            <button onClick={nextMonth}>›</button>
+          <div className="logo">
+            Fin<em>Track</em>
+            <span className="greeting">Olá, {settings.name}!</span>
+            {syncing&&<span className="sync">☁️</span>}
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <div className="mnav">
+              <button onClick={prevMonth}>‹</button>
+              <span className="mlbl">{MONTHS_FULL[vm]} {vy}</span>
+              <button onClick={nextMonth}>›</button>
+            </div>
+            <button onClick={()=>supabase.auth.signOut()}
+              style={{background:"none",border:"1px solid var(--border)",color:"var(--muted)",fontFamily:"'Sora',sans-serif",fontSize:10,borderRadius:8,padding:"5px 8px",cursor:"pointer"}}>
+              Sair
+            </button>
           </div>
         </div>
 
@@ -694,7 +804,7 @@ export default function FinTrack(){
               <div className="st">Entradas — {MONTHS_FULL[vm]}</div>
               <div style={{fontSize:13,fontWeight:700,color:"var(--green)"}}>{fmt(rawIncome)}</div>
             </div>
-            {prevBalance>0&&<div style={{background:"rgba(0,214,143,.08)",border:"1px solid rgba(0,214,143,.2)",borderRadius:10,padding:"9px 12px",fontSize:11,color:"var(--green)",fontWeight:500}}>✅ Saldo do mês anterior: +{fmt(prevBalance)}</div>}
+            {prevBalance>0&&<div style={{background:"rgba(0,214,143,.08)",border:"1px solid rgba(0,214,143,.2)",borderRadius:10,padding:"9px 12px",fontSize:11,color:"var(--green)",fontWeight:500}}>✅ Saldo anterior: +{fmt(prevBalance)}</div>}
             <button className="bulkbtn" onClick={()=>openModal("bulk_income")}>📋 Colar em lote</button>
             {data.incomes.length===0?<div className="empty">Nenhuma entrada.<br/>Toque no <strong style={{color:"var(--accent)"}}>+</strong> ou cole em lote.</div>
               :<div className="txlist">{data.incomes.map(e=>(
@@ -704,8 +814,7 @@ export default function FinTrack(){
                   <div className="txa" style={{color:"var(--green)"}}>+{fmt(e.value)}</div>
                   <button className="tdel" onClick={ev=>{ev.stopPropagation();deleteEntry("incomes",e.id);}}>✕</button>
                 </div>
-              ))}</div>
-            }
+              ))}</div>}
           </div>
         )}
 
@@ -732,8 +841,7 @@ export default function FinTrack(){
                     <button className="tdel" onClick={ev=>{ev.stopPropagation();deleteEntry("expenses",e.id);}}>✕</button>
                   </div>
                 );
-              })}</div>
-            }
+              })}</div>}
           </div>
         )}
 
@@ -755,8 +863,7 @@ export default function FinTrack(){
                       {!e.isDebt&&<><button className="tdel" onClick={ev=>{ev.stopPropagation();openModal("fixed",e);}}>✏️</button><button className="tdel" onClick={ev=>{ev.stopPropagation();deleteEntry("fixed",e.id);}}>✕</button></>}
                     </div>
                   ))}
-                </div>
-              </>}
+                </div></>}
               {paidFixed.length>0&&<><div className="section-sep">Pagas ({paidFixed.length})</div>
                 <div style={{display:"flex",flexDirection:"column",gap:6}}>
                   {paidFixed.map(e=>(
@@ -767,8 +874,7 @@ export default function FinTrack(){
                       {!e.isDebt&&<><button className="tdel" onClick={ev=>{ev.stopPropagation();openModal("fixed",e);}}>✏️</button><button className="tdel" onClick={ev=>{ev.stopPropagation();deleteEntry("fixed",e.id);}}>✕</button></>}
                     </div>
                   ))}
-                </div>
-              </>}
+                </div></>}
             </>}
           </div>
         )}
@@ -797,8 +903,7 @@ export default function FinTrack(){
                     <button className="tdel" onClick={ev=>{ev.stopPropagation();deleteEntry("investments",e.id);}}>✕</button>
                   </div>
                 );
-              })}</div>
-            }
+              })}</div>}
           </div>
         )}
 
@@ -829,18 +934,16 @@ export default function FinTrack(){
             <div className="card" style={{overflowX:"auto"}}>
               <table className="atable">
                 <thead><tr><th>Mês</th><th>Entrada</th><th>Gastos</th><th>Fixas</th><th>Invest.</th><th>Saldo</th></tr></thead>
-                <tbody>
-                  {annualRows.map(r=>(
-                    <tr key={r.i} className={r.i===vm?"cur":""}>
-                      <td>{MONTHS[r.i]}</td>
-                      <td style={{color:"var(--green)"}}>{r.inc>0?fmt(r.inc):"—"}</td>
-                      <td style={{color:"var(--wine)"}}>{r.exp>0?fmt(r.exp):"—"}</td>
-                      <td style={{color:"var(--blue)"}}>{r.fix>0?fmt(r.fix):"—"}</td>
-                      <td style={{color:"var(--gold)"}}>{r.inv>0?fmt(r.inv):"—"}</td>
-                      <td style={{color:r.bal>=0?(r.inc>0?"var(--green)":"var(--muted)"):"var(--wine)"}}>{r.inc>0||r.out>0?fmt(r.bal):"—"}</td>
-                    </tr>
-                  ))}
-                </tbody>
+                <tbody>{annualRows.map(r=>(
+                  <tr key={r.i} className={r.i===vm?"cur":""}>
+                    <td>{MONTHS[r.i]}</td>
+                    <td style={{color:"var(--green)"}}>{r.inc>0?fmt(r.inc):"—"}</td>
+                    <td style={{color:"var(--wine)"}}>{r.exp>0?fmt(r.exp):"—"}</td>
+                    <td style={{color:"var(--blue)"}}>{r.fix>0?fmt(r.fix):"—"}</td>
+                    <td style={{color:"var(--gold)"}}>{r.inv>0?fmt(r.inv):"—"}</td>
+                    <td style={{color:r.bal>=0?(r.inc>0?"var(--green)":"var(--muted)"):"var(--wine)"}}>{r.inc>0||r.out>0?fmt(r.bal):"—"}</td>
+                  </tr>
+                ))}</tbody>
                 <tfoot><tr>
                   <td>Total</td><td style={{color:"var(--green)"}}>{fmt(annualInc)}</td>
                   <td style={{color:"var(--wine)"}}>{fmt(annualRows.reduce((s,r)=>s+r.exp,0))}</td>
@@ -853,7 +956,7 @@ export default function FinTrack(){
           </div>
         )}
 
-        {page==="settings"&&<SettingsPage settings={settings} setSettings={setSettings} data={data} setData={setData}/>}
+        {page==="settings"&&<SettingsPage settings={settings} setSettings={setSettings} data={data} setData={setData} userEmail={session?.user?.email}/>}
 
         <div className="bnav">
           {NAV.map(n=>(
@@ -915,12 +1018,12 @@ function DebtsPage({debts,setDebts,vm,vy}){
           </div>
         );
       })}
-      {closed.length>0&&<>{closed.map(d=>(
+      {closed.length>0&&closed.map(d=>(
         <div key={d.id} style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:11,padding:"10px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
           <div><div style={{fontSize:12,fontWeight:600,color:"var(--muted)",textDecoration:"line-through"}}>{d.name}</div><div style={{fontSize:10,color:"var(--muted)"}}>{d.installments}x de {fmt(d.monthlyValue)}</div></div>
           <button onClick={()=>setDebts(ds=>ds.filter(x=>x.id!==d.id))} style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:14}}>✕</button>
         </div>
-      ))}</>}
+      ))}
     </div>
   );
 }
@@ -948,10 +1051,17 @@ function DebtForm({onSave,vm,vy}){
   );
 }
 
-function SettingsPage({settings,setSettings,data,setData}){
+function SettingsPage({settings,setSettings,data,setData,userEmail}){
   const banks=settings.banks||DEFAULT_BANKS;
   return (
     <div className="pg">
+      <div className="st">Conta</div>
+      <div className="card">
+        <div style={{fontSize:12,color:"var(--muted)"}}>Logado como</div>
+        <div style={{fontSize:13,fontWeight:600,marginTop:4}}>{userEmail}</div>
+        <button onClick={()=>supabase.auth.signOut()} style={{marginTop:12,background:"var(--surface)",border:"1px solid var(--wine)",color:"var(--wine)",fontFamily:"'Sora',sans-serif",fontSize:12,fontWeight:600,borderRadius:9,padding:"8px 16px",cursor:"pointer"}}>Sair da conta</button>
+      </div>
+      <div className="divider"/>
       <div className="st">Personalização</div>
       <div className="card"><div className="fg"><label className="fl">Como quer ser chamado</label><input className="fi" value={settings.name} onChange={e=>setSettings(s=>({...s,name:e.target.value}))}/></div></div>
       <div className="divider"/>
