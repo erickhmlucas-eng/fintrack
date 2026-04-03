@@ -5,16 +5,22 @@ const SUPABASE_URL = "https://rjcgvlstriiepixogqnl.supabase.co";
 const SUPABASE_KEY = "sb_publishable_qmzTdrWgLlNUiihld4Q3nw_iz_ED6aS";
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// ─── STORAGE (Supabase cloud) ─────────────────────────────────────────────────
+// ─── STORAGE ──────────────────────────────────────────────────────────────────
 async function dbGet(key) {
   try {
     const { data } = await supabase.from("user_data").select("value").eq("key", key).single();
     return data?.value ?? null;
   } catch(_) { return null; }
 }
+
 async function dbSet(key, value) {
   try {
-    await supabase.from("user_data").upsert({ key, value, updated_at: new Date().toISOString() }, { onConflict: "user_id,key" });
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+    await supabase.from("user_data").upsert(
+      { key, value, user_id: user.id, updated_at: new Date().toISOString() },
+      { onConflict: "user_id,key" }
+    );
   } catch(_) {}
 }
 
@@ -127,6 +133,11 @@ function reserveDelta(entry,sign=1){
   return {ed:0,pd:0};
 }
 
+// ─── Verifica se é retirada (deve virar entrada automática) ───────────────────
+function isWithdrawal(entry){
+  return entry.type==="Retirada — Reserva"||entry.type==="Retirada — Meta";
+}
+
 function getDebtInstallments(debts,year,month){
   return debts.filter(d=>!d.closed).flatMap(d=>{
     const idx=year*12+month-(d.startYear*12+d.startMonth);
@@ -138,7 +149,7 @@ function getDebtInstallments(debts,year,month){
   });
 }
 
-// ─── UI COMPONENTS ────────────────────────────────────────────────────────────
+// ─── UI ───────────────────────────────────────────────────────────────────────
 function Donut({data,size=140,thick=24,label,sublabel}){
   const r=(size-thick)/2,cx=size/2,cy=size/2,circ=2*Math.PI*r;
   const total=data.reduce((s,d)=>s+d.value,0);
@@ -202,8 +213,7 @@ function Modal({onClose,children,tall=false}){
   );
 }
 
-// ─── AUTH SCREEN ──────────────────────────────────────────────────────────────
-function AuthScreen({onAuth}){
+function AuthScreen(){
   const [mode,setMode]=useState("login");
   const [email,setEmail]=useState("");
   const [password,setPassword]=useState("");
@@ -260,8 +270,7 @@ function AuthScreen({onAuth}){
               <label style={{display:"block",fontSize:9,fontWeight:700,textTransform:"uppercase",letterSpacing:".7px",color:"var(--muted)",marginBottom:5}}>Senha</label>
               <input value={password} onChange={e=>setPassword(e.target.value)}
                 style={{width:"100%",background:"var(--surface)",border:"1px solid var(--border)",color:"var(--text)",fontFamily:"'Sora',sans-serif",fontSize:14,borderRadius:10,padding:"11px 12px",outline:"none",boxSizing:"border-box"}}
-                placeholder="••••••••" type="password"
-                onKeyDown={e=>e.key==="Enter"&&handle()}/>
+                placeholder="••••••••" type="password" onKeyDown={e=>e.key==="Enter"&&handle()}/>
             </div>
           )}
           {error&&<div style={{background:"rgba(192,57,43,.15)",border:"1px solid rgba(192,57,43,.3)",borderRadius:9,padding:"9px 12px",fontSize:12,color:"var(--wine)",marginBottom:12}}>{error}</div>}
@@ -353,13 +362,12 @@ function CartoesPage({expenses,banks,vm,vy}){
       <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
         {banks.map(b=>{
           const tot=expenses.filter(e=>e.bank===b.name&&e.method==="Crédito").reduce((s,e)=>s+e.value,0);
-          const hasData=tot>0;
           return (
             <button key={b.id} onClick={()=>setSelected(b.name)}
               style={{padding:"7px 14px",borderRadius:20,border:`2px solid ${selected===b.name?b.color:"var(--border)"}`,
                       background:selected===b.name?b.color+"22":"var(--surface)",color:selected===b.name?b.color:"var(--muted)",
-                      fontFamily:"'Sora',sans-serif",fontSize:12,fontWeight:700,cursor:"pointer",opacity:hasData?1:0.5}}>
-              {b.name}{hasData&&<span style={{marginLeft:5,fontSize:9,background:b.color,color:"#fff",padding:"1px 5px",borderRadius:10}}>{fmt(tot)}</span>}
+                      fontFamily:"'Sora',sans-serif",fontSize:12,fontWeight:700,cursor:"pointer",opacity:tot>0?1:0.5}}>
+              {b.name}{tot>0&&<span style={{marginLeft:5,fontSize:9,background:b.color,color:"#fff",padding:"1px 5px",borderRadius:10}}>{fmt(tot)}</span>}
             </button>
           );
         })}
@@ -434,7 +442,7 @@ function CartoesPage({expenses,banks,vm,vy}){
   );
 }
 
-// ─── MAIN APP ─────────────────────────────────────────────────────────────────
+// ─── MAIN ─────────────────────────────────────────────────────────────────────
 export default function FinTrack(){
   const [session,setSession]=useState(null);
   const [authLoading,setAuthLoading]=useState(true);
@@ -455,7 +463,7 @@ export default function FinTrack(){
   if(!session) return (
     <>
       <style>{`@import url('https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700&display=swap');*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}:root{--bg:#07070f;--surface:#0d0d1a;--card:#111120;--border:#1a1a2e;--border2:#22223a;--text:#eeeeff;--muted:#6060a0;--green:#00d68f;--wine:#c0392b;--accent:#9b8cff;--gold:#ffd166;--blue:#4d9fff;}html,body{background:var(--bg);color:var(--text);font-family:'Sora',sans-serif;}`}</style>
-      <AuthScreen onAuth={setSession}/>
+      <AuthScreen/>
     </>
   );
 
@@ -476,7 +484,6 @@ function AppInner({session}){
   const [prevBalance,setPrevBalance]=useState(0);
   const [syncing,setSyncing]=useState(false);
 
-  // Load settings & debts
   useEffect(()=>{
     (async()=>{
       const s=await dbGet(SETTINGS_KEY);
@@ -487,7 +494,6 @@ function AppInner({session}){
     })();
   },[]);
 
-  // Load month
   useEffect(()=>{
     if(!loaded)return;
     (async()=>{
@@ -502,7 +508,6 @@ function AppInner({session}){
     })();
   },[vm,vy,loaded]);
 
-  // Load prev balance
   useEffect(()=>{
     if(!loaded)return;
     (async()=>{
@@ -523,7 +528,6 @@ function AppInner({session}){
     setYearCache(cache);
   },[vy]);
 
-  // Persist month
   useEffect(()=>{
     if(!loaded)return;
     setSyncing(true);
@@ -538,7 +542,7 @@ function AppInner({session}){
   const totalIncome =rawIncome+prevBalance;
   const totalExpense=data.expenses.reduce((s,t)=>s+t.value,0);
   const totalFixed  =data.fixed.filter(f=>!f.isDebt).reduce((s,t)=>s+(t.value||0),0);
-  const totalInvest =data.investments.reduce((s,t)=>s+t.value,0);
+  const totalInvest =data.investments.filter(e=>!isWithdrawal(e)).reduce((s,t)=>s+t.value,0);
   const totalOut    =totalExpense+totalFixed+totalInvest;
   const balance     =totalIncome-totalOut;
   const emergencyTotal=(settings.emergencyBase||0)+(settings.emergencyDelta||0);
@@ -557,7 +561,7 @@ function AppInner({session}){
     const inc=d.incomes.reduce((s,t)=>s+t.value,0);
     const exp=d.expenses.reduce((s,t)=>s+t.value,0);
     const fix=d.fixed.reduce((s,t)=>s+(t.value||0),0);
-    const inv=d.investments.reduce((s,t)=>s+t.value,0);
+    const inv=d.investments.filter(e=>!isWithdrawal(e)).reduce((s,t)=>s+t.value,0);
     return {i,inc,exp,fix,inv,out:exp+fix+inv,bal:inc-exp-fix-inv};
   });
   const annualInc=annualRows.reduce((s,r)=>s+r.inc,0);
@@ -576,13 +580,48 @@ function AppInner({session}){
   function nextMonth(){if(vm===11){setVm(0);setVy(y=>y+1);}else setVm(m=>m+1);}
 
   function saveEntry(st,entry,oldEntry=null){
+    // Atualiza reserva/meta
     if(st==="investments"){
       const od=oldEntry?reserveDelta(oldEntry,-1):{ed:0,pd:0};
       const nd=reserveDelta(entry,1);
       const ed=od.ed+nd.ed,pd=od.pd+nd.pd;
       if(ed!==0||pd!==0)setSettings(s=>({...s,emergencyDelta:(s.emergencyDelta||0)+ed,personalDelta:(s.personalDelta||0)+pd}));
     }
-    setData(d=>{const list=[...d[st]];const idx=list.findIndex(i=>i.id===entry.id);if(idx>=0)list[idx]=entry;else list.unshift(entry);return{...d,[st]:list};});
+
+    setData(d=>{
+      let newData={...d};
+
+      // Salva o investimento/retirada
+      const invList=[...d.investments];
+      const invIdx=invList.findIndex(i=>i.id===entry.id);
+      if(invIdx>=0) invList[invIdx]=entry; else invList.unshift(entry);
+      newData={...newData,investments:invList};
+
+      // ← NOVO: se for retirada, cria entrada automática
+      if(st==="investments"&&isWithdrawal(entry)&&!oldEntry){
+        const autoIncome={
+          id:uid(),
+          name:`Retirada — ${entry.type.includes("Reserva")?"Reserva de Emergência":"Meta pessoal"}`,
+          value:entry.value,
+          date:entry.date,
+          autoFromWithdrawal:true,
+          linkedInvestmentId:entry.id,
+        };
+        newData={...newData,incomes:[autoIncome,...newData.incomes]};
+      }
+
+      // Se estava editando e era retirada, atualiza a entrada automática vinculada
+      if(st==="investments"&&isWithdrawal(entry)&&oldEntry){
+        const incomes=newData.incomes.map(inc=>
+          inc.linkedInvestmentId===entry.id
+            ?{...inc,value:entry.value,date:entry.date}
+            :inc
+        );
+        newData={...newData,incomes};
+      }
+
+      return newData;
+    });
     setModal(null);
   }
 
@@ -592,12 +631,38 @@ function AppInner({session}){
       let ed=0,pd=0;entries.forEach(e=>{const d=reserveDelta(e,1);ed+=d.ed;pd+=d.pd;});
       if(ed!==0||pd!==0)setSettings(s=>({...s,emergencyDelta:(s.emergencyDelta||0)+ed,personalDelta:(s.personalDelta||0)+pd}));
     }
-    setData(d=>({...d,[st]:[...entries,...d[st]]}));
+    setData(d=>{
+      let newData={...d,[st]:[...entries,...d[st]]};
+      // Auto-entradas para retiradas em lote
+      if(st==="investments"){
+        const autoIncomes=entries.filter(e=>isWithdrawal(e)).map(e=>({
+          id:uid(),
+          name:`Retirada — ${e.type.includes("Reserva")?"Reserva de Emergência":"Meta pessoal"}`,
+          value:e.value,date:e.date,autoFromWithdrawal:true,linkedInvestmentId:e.id,
+        }));
+        if(autoIncomes.length) newData={...newData,incomes:[...autoIncomes,...newData.incomes]};
+      }
+      return newData;
+    });
     setToast(`✅ ${entries.length} lançamento(s) adicionado(s)`);
   }
 
   function deleteEntry(st,id){
-    if(st==="investments"){const e=data.investments.find(i=>i.id===id);if(e){const{ed,pd}=reserveDelta(e,-1);if(ed!==0||pd!==0)setSettings(s=>({...s,emergencyDelta:(s.emergencyDelta||0)+ed,personalDelta:(s.personalDelta||0)+pd}));}}
+    if(st==="investments"){
+      const e=data.investments.find(i=>i.id===id);
+      if(e){
+        const{ed,pd}=reserveDelta(e,-1);
+        if(ed!==0||pd!==0)setSettings(s=>({...s,emergencyDelta:(s.emergencyDelta||0)+ed,personalDelta:(s.personalDelta||0)+pd}));
+        // Remove entrada automática vinculada se existir
+        if(isWithdrawal(e)){
+          setData(d=>({...d,
+            investments:d.investments.filter(i=>i.id!==id),
+            incomes:d.incomes.filter(i=>i.linkedInvestmentId!==id)
+          }));
+          return;
+        }
+      }
+    }
     setData(d=>({...d,[st]:d[st].filter(i=>i.id!==id)}));
   }
 
@@ -619,7 +684,6 @@ function AppInner({session}){
         .topbar{display:flex;align-items:center;justify-content:space-between;padding:12px 14px 9px;position:sticky;top:0;z-index:90;background:var(--bg);border-bottom:1px solid var(--border);}
         .logo{font-size:16px;font-weight:700;letter-spacing:-.5px;}.logo em{color:var(--accent);font-style:normal;}
         .greeting{font-size:10px;color:var(--muted);margin-left:6px;}
-        .sync{font-size:9px;color:var(--muted);margin-left:6px;}
         .mnav{display:flex;align-items:center;gap:6px;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:6px 10px;}
         .mnav button{background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;padding:0 3px;}
         .mlbl{font-size:11px;font-weight:600;min-width:108px;text-align:center;white-space:nowrap;}
@@ -694,8 +758,7 @@ function AppInner({session}){
         <div className="topbar">
           <div className="logo">
             Fin<em>Track</em>
-            <span className="greeting">Olá, {settings.name}!</span>
-            {syncing&&<span className="sync">☁️</span>}
+            <span className="greeting">Olá, {settings.name}!{syncing&&" ☁️"}</span>
           </div>
           <div style={{display:"flex",alignItems:"center",gap:8}}>
             <div className="mnav">
@@ -808,11 +871,20 @@ function AppInner({session}){
             <button className="bulkbtn" onClick={()=>openModal("bulk_income")}>📋 Colar em lote</button>
             {data.incomes.length===0?<div className="empty">Nenhuma entrada.<br/>Toque no <strong style={{color:"var(--accent)"}}>+</strong> ou cole em lote.</div>
               :<div className="txlist">{data.incomes.map(e=>(
-                <div key={e.id} className="txi" onClick={()=>openModal("income",e)}>
-                  <div className="txicon" style={{background:"#00d68f22"}}>💰</div>
-                  <div className="txinfo"><div className="txd">{e.name}</div><div className="txm">{e.date?.slice(5).split("-").reverse().join("/")} · {rawIncome>0?((e.value/rawIncome)*100).toFixed(1):0}%</div></div>
+                <div key={e.id} className="txi" onClick={()=>!e.autoFromWithdrawal&&openModal("income",e)}>
+                  <div className="txicon" style={{background:e.autoFromWithdrawal?"rgba(155,140,255,.15)":"#00d68f22"}}>
+                    {e.autoFromWithdrawal?"🔄":"💰"}
+                  </div>
+                  <div className="txinfo">
+                    <div className="txd">{e.name}</div>
+                    <div className="txm">
+                      {e.date?.slice(5).split("-").reverse().join("/")}
+                      {e.autoFromWithdrawal&&<span style={{color:"var(--accent)",fontSize:8,fontWeight:700}}>auto</span>}
+                      {" · "}{rawIncome>0?((e.value/rawIncome)*100).toFixed(1):0}%
+                    </div>
+                  </div>
                   <div className="txa" style={{color:"var(--green)"}}>+{fmt(e.value)}</div>
-                  <button className="tdel" onClick={ev=>{ev.stopPropagation();deleteEntry("incomes",e.id);}}>✕</button>
+                  {!e.autoFromWithdrawal&&<button className="tdel" onClick={ev=>{ev.stopPropagation();deleteEntry("incomes",e.id);}}>✕</button>}
                 </div>
               ))}</div>}
           </div>
@@ -894,11 +966,17 @@ function AppInner({session}){
             </div>
             {data.investments.length===0?<div className="empty">Nenhum lançamento.<br/>Toque no <strong style={{color:"var(--accent)"}}>+</strong> ou cole em lote.</div>
               :<div className="txlist">{data.investments.map(e=>{
-                const isW=e.type?.includes("Retirada");
+                const isW=isWithdrawal(e);
                 return (
                   <div key={e.id} className="txi" onClick={()=>openModal("investment",e)}>
                     <div className="txicon" style={{background:isW?"var(--wine)22":"var(--gold)22"}}>{isW?"📤":"💰"}</div>
-                    <div className="txinfo"><div className="txd">{e.name}</div><div className="txm">{e.date?.slice(5).split("-").reverse().join("/")} · {e.type}</div></div>
+                    <div className="txinfo">
+                      <div className="txd">{e.name}</div>
+                      <div className="txm">
+                        {e.date?.slice(5).split("-").reverse().join("/")} · {e.type}
+                        {isW&&<span style={{color:"var(--green)",fontSize:8,fontWeight:700}}>→ entrada auto</span>}
+                      </div>
+                    </div>
                     <div className="txa" style={{color:isW?"var(--wine)":"var(--gold)"}}>{isW?"-":"+"}{fmt(e.value)}</div>
                     <button className="tdel" onClick={ev=>{ev.stopPropagation();deleteEntry("investments",e.id);}}>✕</button>
                   </div>
