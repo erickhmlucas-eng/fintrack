@@ -1,18 +1,16 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { createClient } from "@supabase/supabase-js";
 
 const SUPABASE_URL = "https://rjcgvlstriiepixogqnl.supabase.co";
 const SUPABASE_KEY = "sb_publishable_qmzTdrWgLlNUiihld4Q3nw_iz_ED6aS";
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// ─── STORAGE ──────────────────────────────────────────────────────────────────
 async function dbGet(key) {
   try {
     const { data } = await supabase.from("user_data").select("value").eq("key", key).single();
     return data?.value ?? null;
   } catch(_) { return null; }
 }
-
 async function dbSet(key, value) {
   try {
     const { data: { user } } = await supabase.auth.getUser();
@@ -35,41 +33,43 @@ const DEFAULT_BANKS = [
   {id:"nubank",name:"Nubank",color:"#8a05be",limit:0},
 ];
 
-const EXPENSE_CATS = [
-  {name:"Alimentação",icon:"🍔",color:"#c0392b"},
-  {name:"Transporte",icon:"🚌",color:"#922b21"},
-  {name:"Gasolina",icon:"⛽",color:"#a93226"},
-  {name:"Farmácia",icon:"💊",color:"#b03a2e"},
-  {name:"Compras online",icon:"📦",color:"#96281b"},
-  {name:"Roupa / Tênis",icon:"👟",color:"#c0392b"},
-  {name:"Cursos online",icon:"📚",color:"#00cec9"},
-  {name:"Carro / Seguro / IPVA",icon:"🚗",color:"#b2c6d8"},
-  {name:"Fatura do cartão",icon:"💳",color:"#922b21"},
-  {name:"Corte de cabelo",icon:"✂️",color:"#a04000"},
-  {name:"Lazer",icon:"🎮",color:"#6c5ce7"},
-  {name:"Saúde",icon:"🏥",color:"#00b894"},
-  {name:"Assinaturas",icon:"📺",color:"#74b9ff"},
-  {name:"Moradia",icon:"🏠",color:"#784212"},
-  {name:"Outros",icon:"📌",color:"#7b241c"},
+const DEFAULT_EXPENSE_CATS = [
+  {id:"alimentacao",name:"Alimentação",icon:"🍔",color:"#c0392b"},
+  {id:"transporte",name:"Transporte",icon:"🚌",color:"#922b21"},
+  {id:"gasolina",name:"Gasolina",icon:"⛽",color:"#a93226"},
+  {id:"farmacia",name:"Farmácia",icon:"💊",color:"#b03a2e"},
+  {id:"compras",name:"Compras online",icon:"📦",color:"#96281b"},
+  {id:"roupa",name:"Roupa / Tênis",icon:"👟",color:"#c0392b"},
+  {id:"cursos",name:"Cursos online",icon:"📚",color:"#00cec9"},
+  {id:"carro",name:"Carro / Seguro / IPVA",icon:"🚗",color:"#b2c6d8"},
+  {id:"fatura",name:"Fatura do cartão",icon:"💳",color:"#922b21"},
+  {id:"cabelo",name:"Corte de cabelo",icon:"✂️",color:"#a04000"},
+  {id:"lazer",name:"Lazer",icon:"🎮",color:"#6c5ce7"},
+  {id:"saude",name:"Saúde",icon:"🏥",color:"#00b894"},
+  {id:"assinaturas",name:"Assinaturas",icon:"📺",color:"#74b9ff"},
+  {id:"moradia",name:"Moradia",icon:"🏠",color:"#784212"},
+  {id:"outros",name:"Outros",icon:"📌",color:"#7b241c"},
 ];
 
 const INVEST_TYPES = ["Reserva de Emergência","Meta pessoal","CDB","Poupança","Tesouro Direto","Ações","Cripto","Outro","Retirada — Reserva","Retirada — Meta"];
 const METHODS = ["PIX","Crédito","Débito","Dinheiro","Boleto"];
-const CAT_MAP = Object.fromEntries(EXPENSE_CATS.map(c=>[c.name,c]));
 const BANK_COLORS = ["#2d2d2d","#1a4fcc","#e8001c","#8a05be","#f78c00","#cc092f","#00b894","#6c5ce7","#555577"];
+const CAT_COLORS = ["#c0392b","#922b21","#a93226","#6c5ce7","#00b894","#74b9ff","#f78c00","#784212","#00cec9","#8a05be","#555577"];
+const CAT_ICONS = ["🍔","🚌","⛽","💊","📦","👟","📚","🚗","💳","✂️","🎮","🏥","📺","🏠","📌","🎯","💡","🎁","🐾","✈️","🏋️","🎵"];
 
 const fmt = v => new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL"}).format(v||0);
 const uid = () => Math.random().toString(36).slice(2)+Date.now().toString(36);
 const today = new Date();
-const monthKey = (y,m) => `fintrack:month:${y}:${m}:v8`;
-const SETTINGS_KEY = "fintrack:settings:v8";
-const DEBTS_KEY = "fintrack:debts:v8";
-const EMPTY_MONTH = () => ({incomes:[],expenses:[],fixed:[],investments:[],notes:"",initialized:false});
+const monthKey = (y,m) => `fintrack:month:${y}:${m}:v9`;
+const SETTINGS_KEY = "fintrack:settings:v9";
+const DEBTS_KEY = "fintrack:debts:v9";
+const EMPTY_MONTH = () => ({incomes:[],expenses:[],fixed:[],investments:[],notes:""});
 const DEFAULT_SETTINGS = {
   name:"ERICK",
   emergencyGoal:25000,emergencyBase:0,emergencyDelta:0,
   personalGoalName:"Meta X",personalGoalValue:100000,personalBase:0,personalDelta:0,
   banks:DEFAULT_BANKS,catBudgets:{},
+  expenseCats:DEFAULT_EXPENSE_CATS,
 };
 
 const NAV = [
@@ -84,8 +84,16 @@ const NAV = [
   {id:"settings", icon:"⚙️",label:"Config"},
 ];
 
-// ─── PARSERS ──────────────────────────────────────────────────────────────────
-function parseLine(line,type,banks,vy,vm){
+function isWithdrawal(e){ return e.type==="Retirada — Reserva"||e.type==="Retirada — Meta"; }
+function reserveDelta(entry,sign=1){
+  if(entry.type==="Reserva de Emergência") return {ed:sign*entry.value,pd:0};
+  if(entry.type==="Meta pessoal")          return {ed:0,pd:sign*entry.value};
+  if(entry.type==="Retirada — Reserva")    return {ed:-sign*entry.value,pd:0};
+  if(entry.type==="Retirada — Meta")       return {ed:0,pd:-sign*entry.value};
+  return {ed:0,pd:0};
+}
+
+function parseLine(line,type,banks,expenseCats,vy,vm){
   const valMatch=line.match(/\b(\d{1,6}[.,]\d{2}|\d{1,6})\b/);
   if(!valMatch) return null;
   const value=parseFloat(valMatch[1].replace(",","."));
@@ -101,8 +109,8 @@ function parseLine(line,type,banks,vy,vm){
   if(type==="income") return {id:uid(),name:rem||"Entrada",value,date};
   if(type==="fixed")  return {id:uid(),name:rem||"Despesa fixa",value,paid:false};
   if(type==="expense"){
-    let category="Outros",method="PIX",bank=banks[0]?.name||"";
-    for(const cat of EXPENSE_CATS){
+    let category=expenseCats[expenseCats.length-1]?.name||"Outros",method="PIX",bank=banks[0]?.name||"";
+    for(const cat of expenseCats){
       const key=cat.name.toLowerCase().split(/[\/\s,]/)[0];
       if(key.length>3&&rem.toLowerCase().includes(key)){category=cat.name;rem=rem.replace(new RegExp(key,"gi"),"").replace(/\s+/g," ").trim();break;}
     }
@@ -120,36 +128,11 @@ function parseLine(line,type,banks,vy,vm){
   }
   return null;
 }
-
-function parseBulk(text,type,banks,vy,vm){
-  return text.split("\n").map(l=>l.trim()).filter(Boolean).map(l=>parseLine(l,type,banks,vy,vm)).filter(Boolean);
+function parseBulk(text,type,banks,expenseCats,vy,vm){
+  return text.split("\n").map(l=>l.trim()).filter(Boolean).map(l=>parseLine(l,type,banks,expenseCats,vy,vm)).filter(Boolean);
 }
 
-function reserveDelta(entry,sign=1){
-  if(entry.type==="Reserva de Emergência") return {ed:sign*entry.value,pd:0};
-  if(entry.type==="Meta pessoal")          return {ed:0,pd:sign*entry.value};
-  if(entry.type==="Retirada — Reserva")    return {ed:-sign*entry.value,pd:0};
-  if(entry.type==="Retirada — Meta")       return {ed:0,pd:-sign*entry.value};
-  return {ed:0,pd:0};
-}
-
-// ─── Verifica se é retirada (deve virar entrada automática) ───────────────────
-function isWithdrawal(entry){
-  return entry.type==="Retirada — Reserva"||entry.type==="Retirada — Meta";
-}
-
-function getDebtInstallments(debts,year,month){
-  return debts.filter(d=>!d.closed).flatMap(d=>{
-    const idx=year*12+month-(d.startYear*12+d.startMonth);
-    if(idx<0||idx>=d.installments) return [];
-    const key=`${year}-${month}`;
-    return [{id:`debt_${d.id}_${idx}`,name:`${d.name} (${idx+1}/${d.installments})`,
-             value:d.monthlyValue,paid:d.paidMonths?.includes(key)||false,
-             isDebt:true,debtId:d.id,debtMonthKey:key}];
-  });
-}
-
-// ─── UI ───────────────────────────────────────────────────────────────────────
+// ─── UI HELPERS ───────────────────────────────────────────────────────────────
 function Donut({data,size=140,thick=24,label,sublabel}){
   const r=(size-thick)/2,cx=size/2,cy=size/2,circ=2*Math.PI*r;
   const total=data.reduce((s,d)=>s+d.value,0);
@@ -191,10 +174,7 @@ function GoalBar({label,icon,current,goal,color}){
 function Toast({msg,onDone}){
   useEffect(()=>{const t=setTimeout(onDone,2500);return()=>clearTimeout(t);},[onDone]);
   return (
-    <div style={{position:"fixed",bottom:80,left:"50%",transform:"translateX(-50%)",
-                 background:"var(--green)",color:"#000",fontFamily:"'Sora',sans-serif",
-                 fontSize:12,fontWeight:700,padding:"10px 20px",borderRadius:20,
-                 zIndex:2000,whiteSpace:"nowrap",boxShadow:"0 4px 16px rgba(0,214,143,.4)"}}>
+    <div style={{position:"fixed",bottom:80,left:"50%",transform:"translateX(-50%)",background:"var(--green)",color:"#000",fontFamily:"'Sora',sans-serif",fontSize:12,fontWeight:700,padding:"10px 20px",borderRadius:20,zIndex:2000,whiteSpace:"nowrap"}}>
       {msg}
     </div>
   );
@@ -220,26 +200,15 @@ function AuthScreen(){
   const [loading,setLoading]=useState(false);
   const [error,setError]=useState("");
   const [msg,setMsg]=useState("");
-
   async function handle(){
     setLoading(true);setError("");setMsg("");
     try{
-      if(mode==="login"){
-        const {error}=await supabase.auth.signInWithPassword({email,password});
-        if(error) setError(error.message);
-      } else if(mode==="signup"){
-        const {error}=await supabase.auth.signUp({email,password});
-        if(error) setError(error.message);
-        else setMsg("Conta criada! Verifique seu e-mail para confirmar.");
-      } else {
-        const {error}=await supabase.auth.resetPasswordForEmail(email);
-        if(error) setError(error.message);
-        else setMsg("E-mail de recuperação enviado!");
-      }
+      if(mode==="login"){const{error}=await supabase.auth.signInWithPassword({email,password});if(error)setError(error.message);}
+      else if(mode==="signup"){const{error}=await supabase.auth.signUp({email,password});if(error)setError(error.message);else setMsg("Conta criada! Verifique seu e-mail.");}
+      else{const{error}=await supabase.auth.resetPasswordForEmail(email);if(error)setError(error.message);else setMsg("E-mail de recuperação enviado!");}
     }catch(_){}
     setLoading(false);
   }
-
   return (
     <div style={{minHeight:"100vh",background:"var(--bg)",display:"flex",alignItems:"center",justifyContent:"center",padding:"20px"}}>
       <div style={{width:"100%",maxWidth:380}}>
@@ -251,58 +220,46 @@ function AuthScreen(){
           <div style={{display:"flex",gap:8,marginBottom:20}}>
             {[["login","Entrar"],["signup","Criar conta"]].map(([m,l])=>(
               <button key={m} onClick={()=>{setMode(m);setError("");setMsg("");}}
-                style={{flex:1,padding:"9px 0",borderRadius:10,border:"none",cursor:"pointer",
-                        fontFamily:"'Sora',sans-serif",fontSize:13,fontWeight:700,
-                        background:mode===m?"var(--accent)":"var(--surface)",
-                        color:mode===m?"#fff":"var(--muted)"}}>
+                style={{flex:1,padding:"9px 0",borderRadius:10,border:"none",cursor:"pointer",fontFamily:"'Sora',sans-serif",fontSize:13,fontWeight:700,background:mode===m?"var(--accent)":"var(--surface)",color:mode===m?"#fff":"var(--muted)"}}>
                 {l}
               </button>
             ))}
           </div>
           <div style={{marginBottom:12}}>
             <label style={{display:"block",fontSize:9,fontWeight:700,textTransform:"uppercase",letterSpacing:".7px",color:"var(--muted)",marginBottom:5}}>E-mail</label>
-            <input value={email} onChange={e=>setEmail(e.target.value)}
-              style={{width:"100%",background:"var(--surface)",border:"1px solid var(--border)",color:"var(--text)",fontFamily:"'Sora',sans-serif",fontSize:14,borderRadius:10,padding:"11px 12px",outline:"none",boxSizing:"border-box"}}
-              placeholder="seu@email.com" type="email"/>
+            <input value={email} onChange={e=>setEmail(e.target.value)} style={{width:"100%",background:"var(--surface)",border:"1px solid var(--border)",color:"var(--text)",fontFamily:"'Sora',sans-serif",fontSize:14,borderRadius:10,padding:"11px 12px",outline:"none",boxSizing:"border-box"}} placeholder="seu@email.com" type="email"/>
           </div>
           {mode!=="reset"&&(
             <div style={{marginBottom:16}}>
               <label style={{display:"block",fontSize:9,fontWeight:700,textTransform:"uppercase",letterSpacing:".7px",color:"var(--muted)",marginBottom:5}}>Senha</label>
-              <input value={password} onChange={e=>setPassword(e.target.value)}
-                style={{width:"100%",background:"var(--surface)",border:"1px solid var(--border)",color:"var(--text)",fontFamily:"'Sora',sans-serif",fontSize:14,borderRadius:10,padding:"11px 12px",outline:"none",boxSizing:"border-box"}}
-                placeholder="••••••••" type="password" onKeyDown={e=>e.key==="Enter"&&handle()}/>
+              <input value={password} onChange={e=>setPassword(e.target.value)} style={{width:"100%",background:"var(--surface)",border:"1px solid var(--border)",color:"var(--text)",fontFamily:"'Sora',sans-serif",fontSize:14,borderRadius:10,padding:"11px 12px",outline:"none",boxSizing:"border-box"}} placeholder="••••••••" type="password" onKeyDown={e=>e.key==="Enter"&&handle()}/>
             </div>
           )}
           {error&&<div style={{background:"rgba(192,57,43,.15)",border:"1px solid rgba(192,57,43,.3)",borderRadius:9,padding:"9px 12px",fontSize:12,color:"var(--wine)",marginBottom:12}}>{error}</div>}
           {msg&&<div style={{background:"rgba(0,214,143,.1)",border:"1px solid rgba(0,214,143,.2)",borderRadius:9,padding:"9px 12px",fontSize:12,color:"var(--green)",marginBottom:12}}>{msg}</div>}
-          <button onClick={handle} disabled={loading}
-            style={{width:"100%",background:"var(--accent)",color:"#fff",border:"none",fontFamily:"'Sora',sans-serif",fontSize:14,fontWeight:700,borderRadius:11,padding:13,cursor:"pointer",opacity:loading?.6:1}}>
+          <button onClick={handle} disabled={loading} style={{width:"100%",background:"var(--accent)",color:"#fff",border:"none",fontFamily:"'Sora',sans-serif",fontSize:14,fontWeight:700,borderRadius:11,padding:13,cursor:"pointer",opacity:loading?.6:1}}>
             {loading?"Aguarde...":{login:"Entrar",signup:"Criar conta",reset:"Enviar e-mail"}[mode]}
           </button>
-          {mode==="login"&&(
-            <button onClick={()=>{setMode("reset");setError("");setMsg("");}}
-              style={{width:"100%",background:"none",border:"none",color:"var(--muted)",fontFamily:"'Sora',sans-serif",fontSize:12,cursor:"pointer",marginTop:12,padding:4}}>
-              Esqueci minha senha
-            </button>
-          )}
+          {mode==="login"&&<button onClick={()=>{setMode("reset");setError("");setMsg("");}} style={{width:"100%",background:"none",border:"none",color:"var(--muted)",fontFamily:"'Sora',sans-serif",fontSize:12,cursor:"pointer",marginTop:12,padding:4}}>Esqueci minha senha</button>}
         </div>
       </div>
     </div>
   );
 }
 
-function BulkPanel({type,banks,vy,vm,onConfirm,onClose}){
+function BulkPanel({type,banks,expenseCats,vy,vm,onConfirm,onClose}){
   const [text,setText]=useState("");
   const [preview,setPreview]=useState([]);
   const [processed,setProcessed]=useState(false);
   const labels={income:"Entradas",expense:"Gastos",fixed:"Despesas Fixas",investment:"Reservas"};
   const examples={
     income:"Salário 5000 05/04\nFreela Cliente X 1200 10/04",
-    expense:"iFood 45.90 alimentação 15/04\nUber 23 transporte nubank crédito 16/04\nGasolina 180 18/04",
-    fixed:"Parcela carro 850\nSeguro celular 49.90\nPlano celular 65",
+    expense:"iFood 45.90 alimentação 15/04\nUber 23 transporte nubank crédito 16/04",
+    fixed:"Parcela carro 850\nSeguro celular 49.90",
     investment:"Reserva de Emergência 500 01/04\nCDB 200 01/04",
   };
-  function process(){setPreview(parseBulk(text,type,banks,vy,vm));setProcessed(true);}
+  const catMap=Object.fromEntries(expenseCats.map(c=>[c.name,c]));
+  function process(){setPreview(parseBulk(text,type,banks,expenseCats,vy,vm));setProcessed(true);}
   return (
     <>
       <div className="mhdr"><div className="mtitle">📋 Colar em lote — {labels[type]}</div><button className="mclose" onClick={onClose}>✕</button></div>
@@ -320,7 +277,7 @@ function BulkPanel({type,banks,vy,vm,onConfirm,onClose}){
             ?<div style={{textAlign:"center",color:"var(--wine)",padding:"20px 0",fontSize:13}}>Nenhum reconhecido.</div>
             :<div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:14}}>
               {preview.map((p,i)=>{
-                const cat=type==="expense"?(CAT_MAP[p.category]||{icon:"📌"}):null;
+                const cat=type==="expense"?(catMap[p.category]||{icon:"📌"}):null;
                 return (
                   <div key={i} style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:10,padding:"9px 11px",display:"flex",alignItems:"center",gap:9}}>
                     {cat&&<span style={{fontSize:16}}>{cat.icon}</span>}
@@ -345,17 +302,16 @@ function BulkPanel({type,banks,vy,vm,onConfirm,onClose}){
 }
 
 function CartoesPage({expenses,banks,vm,vy}){
-  const [selected,setSelected]=useState(()=>{
-    const first=banks.find(b=>expenses.some(e=>e.bank===b.name&&e.method==="Crédito"));
-    return first?.name||banks[0]?.name||"";
-  });
+  const [selected,setSelected]=useState(banks[0]?.name||"");
   const bank=banks.find(b=>b.name===selected)||banks[0];
   const items=expenses.filter(e=>e.bank===selected&&e.method==="Crédito").sort((a,b)=>new Date(b.date)-new Date(a.date));
   const total=items.reduce((s,e)=>s+e.value,0);
-  const limit=bank?.limit||0;
-  const pct=limit>0?Math.min((total/limit)*100,100):0;
-  const catBreak=EXPENSE_CATS.map(c=>({...c,value:items.filter(e=>e.category===c.name).reduce((s,e)=>s+e.value,0)})).filter(c=>c.value>0).sort((a,b)=>b.value-a.value);
-  const maxCat=catBreak[0]?.value||1;
+  const limit=bank?.limit||0,pct=limit>0?Math.min((total/limit)*100,100):0;
+  const cats=[...new Set(items.map(e=>e.category))].map(name=>{
+    const val=items.filter(e=>e.category===name).reduce((s,e)=>s+e.value,0);
+    return {name,val};
+  }).sort((a,b)=>b.val-a.val);
+  const maxCat=cats[0]?.val||1;
   return (
     <div className="pg">
       <div className="st">Cartões — {MONTHS_FULL[vm]} {vy}</div>
@@ -364,9 +320,7 @@ function CartoesPage({expenses,banks,vm,vy}){
           const tot=expenses.filter(e=>e.bank===b.name&&e.method==="Crédito").reduce((s,e)=>s+e.value,0);
           return (
             <button key={b.id} onClick={()=>setSelected(b.name)}
-              style={{padding:"7px 14px",borderRadius:20,border:`2px solid ${selected===b.name?b.color:"var(--border)"}`,
-                      background:selected===b.name?b.color+"22":"var(--surface)",color:selected===b.name?b.color:"var(--muted)",
-                      fontFamily:"'Sora',sans-serif",fontSize:12,fontWeight:700,cursor:"pointer",opacity:tot>0?1:0.5}}>
+              style={{padding:"7px 14px",borderRadius:20,border:`2px solid ${selected===b.name?b.color:"var(--border)"}`,background:selected===b.name?b.color+"22":"var(--surface)",color:selected===b.name?b.color:"var(--muted)",fontFamily:"'Sora',sans-serif",fontSize:12,fontWeight:700,cursor:"pointer",opacity:tot>0?1:0.5}}>
               {b.name}{tot>0&&<span style={{marginLeft:5,fontSize:9,background:b.color,color:"#fff",padding:"1px 5px",borderRadius:10}}>{fmt(tot)}</span>}
             </button>
           );
@@ -395,23 +349,23 @@ function CartoesPage({expenses,banks,vm,vy}){
         </>}
         {items.length===0&&<div style={{textAlign:"center",color:"var(--muted)",fontSize:12,padding:"16px 0"}}>Nenhum gasto no crédito em {MONTHS_FULL[vm]}.</div>}
       </div>
-      {catBreak.length>0&&(
+      {cats.length>0&&(
         <div className="card">
           <div className="st" style={{marginBottom:10}}>Por categoria</div>
           <div style={{display:"flex",justifyContent:"center",marginBottom:14}}>
-            <Donut size={130} thick={22} data={catBreak.map(c=>({color:c.color,value:c.value}))} label={fmt(total)} sublabel={selected}/>
+            <Donut size={130} thick={22} data={cats.map((c,i)=>({color:CAT_COLORS[i%CAT_COLORS.length],value:c.val}))} label={fmt(total)} sublabel={selected}/>
           </div>
-          {catBreak.map(c=>(
+          {cats.map((c,i)=>(
             <div key={c.name} style={{marginBottom:9}}>
               <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
-                <span style={{fontSize:11,fontWeight:500}}>{c.icon} {c.name}</span>
+                <span style={{fontSize:11,fontWeight:500}}>{c.name}</span>
                 <span style={{fontSize:11,color:"var(--muted)",display:"flex",gap:8}}>
-                  <span>{total>0?((c.value/total)*100).toFixed(0):0}%</span>
-                  <span style={{fontWeight:600,color:"var(--wine)"}}>{fmt(c.value)}</span>
+                  <span>{total>0?((c.val/total)*100).toFixed(0):0}%</span>
+                  <span style={{fontWeight:600,color:"var(--wine)"}}>{fmt(c.val)}</span>
                 </span>
               </div>
               <div style={{height:5,background:"var(--border)",borderRadius:3,overflow:"hidden"}}>
-                <div style={{height:"100%",width:`${(c.value/maxCat)*100}%`,background:c.color,borderRadius:3}}/>
+                <div style={{height:"100%",width:`${(c.val/maxCat)*100}%`,background:CAT_COLORS[i%CAT_COLORS.length],borderRadius:3}}/>
               </div>
             </div>
           ))}
@@ -422,11 +376,10 @@ function CartoesPage({expenses,banks,vm,vy}){
           <div className="st" style={{marginBottom:8}}>Lançamentos ({items.length})</div>
           <div className="txlist">
             {items.map(e=>{
-              const cat=CAT_MAP[e.category]||{icon:"📌",color:"#888"};
               const d=e.date?e.date.slice(5).split("-").reverse().join("/"):"";
               return (
                 <div key={e.id} style={{display:"flex",alignItems:"center",gap:8,padding:"10px",background:"var(--surface)",border:"1px solid var(--border)",borderRadius:11}}>
-                  <div style={{width:32,height:32,borderRadius:9,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,flexShrink:0,background:cat.color+"33"}}>{cat.icon}</div>
+                  <div style={{width:32,height:32,borderRadius:9,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,flexShrink:0,background:"#c0392b33"}}>🛒</div>
                   <div style={{flex:1,minWidth:0}}>
                     <div style={{fontSize:12,fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{e.description||e.category}</div>
                     <div style={{fontSize:9,color:"var(--muted)",marginTop:2}}>{d} · {e.category}</div>
@@ -446,27 +399,23 @@ function CartoesPage({expenses,banks,vm,vy}){
 export default function FinTrack(){
   const [session,setSession]=useState(null);
   const [authLoading,setAuthLoading]=useState(true);
-
   useEffect(()=>{
     supabase.auth.getSession().then(({data:{session}})=>{setSession(session);setAuthLoading(false);});
     const {data:{subscription}}=supabase.auth.onAuthStateChange((_,session)=>setSession(session));
     return ()=>subscription.unsubscribe();
   },[]);
-
   if(authLoading) return (
     <div style={{minHeight:"100vh",background:"var(--bg)",display:"flex",alignItems:"center",justifyContent:"center",color:"var(--muted)",fontFamily:"'Sora',sans-serif"}}>
       <style>{`@import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;700&display=swap');:root{--bg:#07070f;--muted:#6060a0;}`}</style>
       Carregando...
     </div>
   );
-
   if(!session) return (
     <>
       <style>{`@import url('https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700&display=swap');*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}:root{--bg:#07070f;--surface:#0d0d1a;--card:#111120;--border:#1a1a2e;--border2:#22223a;--text:#eeeeff;--muted:#6060a0;--green:#00d68f;--wine:#c0392b;--accent:#9b8cff;--gold:#ffd166;--blue:#4d9fff;}html,body{background:var(--bg);color:var(--text);font-family:'Sora',sans-serif;}`}</style>
       <AuthScreen/>
     </>
   );
-
   return <AppInner session={session}/>;
 }
 
@@ -483,163 +432,163 @@ function AppInner({session}){
   const [toast,setToast]=useState(null);
   const [prevBalance,setPrevBalance]=useState(0);
   const [syncing,setSyncing]=useState(false);
+  const [loading,setLoading]=useState(false);
+  const saveTimer=useRef(null);
 
+  // Load settings & debts once
   useEffect(()=>{
     (async()=>{
       const s=await dbGet(SETTINGS_KEY);
-      if(s) setSettings(p=>({...DEFAULT_SETTINGS,...s,banks:s.banks||DEFAULT_BANKS,catBudgets:s.catBudgets||{}}));
+      if(s) setSettings(p=>({...DEFAULT_SETTINGS,...s,banks:s.banks||DEFAULT_BANKS,catBudgets:s.catBudgets||{},expenseCats:s.expenseCats||DEFAULT_EXPENSE_CATS}));
       const d=await dbGet(DEBTS_KEY);
       if(d) setDebts(d);
       setLoaded(true);
     })();
   },[]);
 
+  // ── KEY FIX: Reset data immediately when month changes, then load from DB ──
   useEffect(()=>{
-    if(!loaded)return;
+    if(!loaded) return;
+    setData(EMPTY_MONTH()); // ← reset imediato, evita "vazamento" entre meses
+    setLoading(true);
+    setPrevBalance(0);
     (async()=>{
+      // Load current month
       const r=await dbGet(monthKey(vy,vm));
-      if(r){ setData(r); }
-      else{
-        const pm=vm===0?11:vm-1,py=vm===0?vy-1:vy;
-        const pr=await dbGet(monthKey(py,pm));
-        const carried=pr?(pr.fixed||[]).filter(f=>!f.isDebt).map(f=>({...f,id:uid(),paid:false})):[];
-        setData({...EMPTY_MONTH(),fixed:carried,initialized:true});
-      }
-    })();
-  },[vm,vy,loaded]);
+      if(r) setData(r);
+      else setData(EMPTY_MONTH());
 
-  useEffect(()=>{
-    if(!loaded)return;
-    (async()=>{
+      // Load prev balance
       const pm=vm===0?11:vm-1,py=vm===0?vy-1:vy;
-      const r=await dbGet(monthKey(py,pm));
-      if(!r){setPrevBalance(0);return;}
-      const inc=r.incomes.reduce((s,t)=>s+t.value,0);
-      const exp=r.expenses.reduce((s,t)=>s+t.value,0);
-      const fix=r.fixed.reduce((s,t)=>s+(t.value||0),0);
-      const inv=r.investments.reduce((s,t)=>s+t.value,0);
-      setPrevBalance(Math.max(inc-exp-fix-inv,0));
+      const pr=await dbGet(monthKey(py,pm));
+      if(pr){
+        const inc=(pr.incomes||[]).reduce((s,t)=>s+t.value,0);
+        const exp=(pr.expenses||[]).reduce((s,t)=>s+t.value,0);
+        const fix=(pr.fixed||[]).reduce((s,t)=>s+(t.value||0),0);
+        const inv=(pr.investments||[]).filter(e=>!isWithdrawal(e)).reduce((s,t)=>s+t.value,0);
+        setPrevBalance(Math.max(inc-exp-fix-inv,0));
+      }
+      setLoading(false);
     })();
   },[vm,vy,loaded]);
 
+  // Load year cache
   const loadYearCache=useCallback(async()=>{
     const cache={};
     for(let m=0;m<12;m++){const r=await dbGet(monthKey(vy,m));cache[m]=r||EMPTY_MONTH();}
     setYearCache(cache);
   },[vy]);
 
+  // Debounced save
   useEffect(()=>{
-    if(!loaded)return;
+    if(!loaded||loading) return;
+    clearTimeout(saveTimer.current);
     setSyncing(true);
-    dbSet(monthKey(vy,vm),data).then(()=>loadYearCache()).finally(()=>setSyncing(false));
-  },[data,vm,vy,loaded,loadYearCache]);
+    saveTimer.current=setTimeout(()=>{
+      dbSet(monthKey(vy,vm),data).then(()=>loadYearCache()).finally(()=>setSyncing(false));
+    },800);
+    return ()=>clearTimeout(saveTimer.current);
+  },[data,vm,vy,loaded,loading,loadYearCache]);
 
   useEffect(()=>{ if(loaded) dbSet(SETTINGS_KEY,settings); },[settings,loaded]);
   useEffect(()=>{ if(loaded) dbSet(DEBTS_KEY,debts); },[debts,loaded]);
 
+  const expenseCats=settings.expenseCats||DEFAULT_EXPENSE_CATS;
+  const catMap=Object.fromEntries(expenseCats.map(c=>[c.name,c]));
   const banks=settings.banks||DEFAULT_BANKS;
+
   const rawIncome   =data.incomes.reduce((s,t)=>s+t.value,0);
   const totalIncome =rawIncome+prevBalance;
   const totalExpense=data.expenses.reduce((s,t)=>s+t.value,0);
-  const totalFixed  =data.fixed.filter(f=>!f.isDebt).reduce((s,t)=>s+(t.value||0),0);
+  const totalFixed  =data.fixed.reduce((s,t)=>s+(t.value||0),0);
   const totalInvest =data.investments.filter(e=>!isWithdrawal(e)).reduce((s,t)=>s+t.value,0);
   const totalOut    =totalExpense+totalFixed+totalInvest;
   const balance     =totalIncome-totalOut;
   const emergencyTotal=(settings.emergencyBase||0)+(settings.emergencyDelta||0);
   const personalTotal =(settings.personalBase||0)+(settings.personalDelta||0);
   const bankCredit    =banks.map(b=>({...b,spent:data.expenses.filter(e=>e.bank===b.name&&e.method==="Crédito").reduce((s,e)=>s+e.value,0)}));
-  const catData       =EXPENSE_CATS.map(c=>({...c,value:data.expenses.filter(e=>e.category===c.name).reduce((s,e)=>s+e.value,0),budget:settings.catBudgets?.[c.name]||0})).filter(c=>c.value>0||c.budget>0).sort((a,b)=>b.value-a.value);
+  const catData       =expenseCats.map(c=>({...c,value:data.expenses.filter(e=>e.category===c.name).reduce((s,e)=>s+e.value,0),budget:settings.catBudgets?.[c.name]||0})).filter(c=>c.value>0||c.budget>0).sort((a,b)=>b.value-a.value);
   const maxCat        =Math.max(...catData.map(c=>Math.max(c.value,c.budget)),1);
-  const debtInst      =getDebtInstallments(debts,vy,vm);
-  const allFixed      =[...data.fixed.filter(f=>!f.isDebt),...debtInst];
-  const unpaidFixed   =allFixed.filter(f=>!f.paid).length;
-  const pendingFixed  =allFixed.filter(f=>!f.paid);
-  const paidFixed     =allFixed.filter(f=>f.paid);
+
+  // Debt installments for this month
+  const debtInst=debts.filter(d=>!d.closed).flatMap(d=>{
+    const idx=vy*12+vm-(d.startYear*12+d.startMonth);
+    if(idx<0||idx>=d.installments) return [];
+    const key=`${vy}-${vm}`;
+    return [{id:`debt_${d.id}_${idx}`,name:`${d.name} (${idx+1}/${d.installments})`,value:d.monthlyValue,paid:d.paidMonths?.includes(key)||false,isDebt:true,debtId:d.id,debtMonthKey:key}];
+  });
+  const allFixed=[...data.fixed,...debtInst];
+  const pendingFixed=allFixed.filter(f=>!f.paid);
+  const paidFixed=allFixed.filter(f=>f.paid);
+  const unpaidFixed=pendingFixed.length;
 
   const annualRows=MONTHS.map((_,i)=>{
     const d=yearCache[i]||EMPTY_MONTH();
-    const inc=d.incomes.reduce((s,t)=>s+t.value,0);
-    const exp=d.expenses.reduce((s,t)=>s+t.value,0);
-    const fix=d.fixed.reduce((s,t)=>s+(t.value||0),0);
-    const inv=d.investments.filter(e=>!isWithdrawal(e)).reduce((s,t)=>s+t.value,0);
+    const inc=(d.incomes||[]).reduce((s,t)=>s+t.value,0);
+    const exp=(d.expenses||[]).reduce((s,t)=>s+t.value,0);
+    const fix=(d.fixed||[]).reduce((s,t)=>s+(t.value||0),0);
+    const inv=(d.investments||[]).filter(e=>!isWithdrawal(e)).reduce((s,t)=>s+t.value,0);
     return {i,inc,exp,fix,inv,out:exp+fix+inv,bal:inc-exp-fix-inv};
   });
   const annualInc=annualRows.reduce((s,r)=>s+r.inc,0);
   const annualOut=annualRows.reduce((s,r)=>s+r.out,0);
-  const chartMax =Math.max(...annualRows.flatMap(r=>[r.inc,r.out]),1);
+  const chartMax=Math.max(...annualRows.flatMap(r=>[r.inc,r.out]),1);
 
   const alerts=[];
-  if(rawIncome===0) alerts.push({type:"warn",msg:`Sem entradas em ${MONTHS_FULL[vm]}`});
-  if(balance<0&&rawIncome>0) alerts.push({type:"danger",msg:`Saldo negativo: ${fmt(Math.abs(balance))} a mais`});
-  if(balance>0&&rawIncome>0) alerts.push({type:"ok",msg:`Você guardou ${((balance/totalIncome)*100).toFixed(0)}% da renda 👏`});
-  if(prevBalance>0) alerts.push({type:"ok",msg:`Saldo de ${MONTHS_FULL[vm===0?11:vm-1]}: +${fmt(prevBalance)}`});
-  if(unpaidFixed>0) alerts.push({type:"warn",msg:`${unpaidFixed} fixa(s) pendente(s)`});
-  bankCredit.forEach(b=>{if(b.limit>0&&b.spent>0){const p=(b.spent/b.limit)*100;if(p>=80)alerts.push({type:p>=100?"danger":"warn",msg:`${b.name}: ${p.toFixed(0)}% do limite usado`});}});
+  if(!loading&&rawIncome===0) alerts.push({type:"warn",msg:`Sem entradas em ${MONTHS_FULL[vm]}`});
+  if(!loading&&balance<0&&rawIncome>0) alerts.push({type:"danger",msg:`Saldo negativo: ${fmt(Math.abs(balance))}`});
+  if(!loading&&balance>0&&rawIncome>0) alerts.push({type:"ok",msg:`Você guardou ${((balance/totalIncome)*100).toFixed(0)}% da renda 👏`});
+  if(!loading&&prevBalance>0) alerts.push({type:"ok",msg:`Saldo de ${MONTHS_FULL[vm===0?11:vm-1]}: +${fmt(prevBalance)}`});
+  if(!loading&&unpaidFixed>0) alerts.push({type:"warn",msg:`${unpaidFixed} fixa(s) pendente(s)`});
+  bankCredit.forEach(b=>{if(b.limit>0&&b.spent>0){const p=(b.spent/b.limit)*100;if(p>=80)alerts.push({type:p>=100?"danger":"warn",msg:`${b.name}: ${p.toFixed(0)}% do limite`});}});
 
   function prevMonth(){if(vm===0){setVm(11);setVy(y=>y-1);}else setVm(m=>m-1);}
   function nextMonth(){if(vm===11){setVm(0);setVy(y=>y+1);}else setVm(m=>m+1);}
 
+  // ── SAVE ENTRY — fixed routing ─────────────────────────────────────────────
   function saveEntry(st,entry,oldEntry=null){
-    // Atualiza reserva/meta
     if(st==="investments"){
       const od=oldEntry?reserveDelta(oldEntry,-1):{ed:0,pd:0};
       const nd=reserveDelta(entry,1);
       const ed=od.ed+nd.ed,pd=od.pd+nd.pd;
-      if(ed!==0||pd!==0)setSettings(s=>({...s,emergencyDelta:(s.emergencyDelta||0)+ed,personalDelta:(s.personalDelta||0)+pd}));
+      if(ed!==0||pd!==0) setSettings(s=>({...s,emergencyDelta:(s.emergencyDelta||0)+ed,personalDelta:(s.personalDelta||0)+pd}));
     }
-
     setData(d=>{
-      let newData={...d};
+      // Route to correct list
+      const stMap={incomes:"incomes",expenses:"expenses",fixed:"fixed",investments:"investments"};
+      const key=stMap[st];
+      if(!key) return d;
+      const list=[...(d[key]||[])];
+      const idx=list.findIndex(i=>i.id===entry.id);
+      if(idx>=0) list[idx]=entry; else list.unshift(entry);
+      let newData={...d,[key]:list};
 
-      // Salva o investimento/retirada
-      const invList=[...d.investments];
-      const invIdx=invList.findIndex(i=>i.id===entry.id);
-      if(invIdx>=0) invList[invIdx]=entry; else invList.unshift(entry);
-      newData={...newData,investments:invList};
-
-      // ← NOVO: se for retirada, cria entrada automática
+      // Auto-income from withdrawal
       if(st==="investments"&&isWithdrawal(entry)&&!oldEntry){
-        const autoIncome={
-          id:uid(),
-          name:`Retirada — ${entry.type.includes("Reserva")?"Reserva de Emergência":"Meta pessoal"}`,
-          value:entry.value,
-          date:entry.date,
-          autoFromWithdrawal:true,
-          linkedInvestmentId:entry.id,
-        };
+        const autoIncome={id:uid(),name:`Retirada — ${entry.type.includes("Reserva")?"Reserva de Emergência":"Meta pessoal"}`,value:entry.value,date:entry.date,autoFromWithdrawal:true,linkedInvestmentId:entry.id};
         newData={...newData,incomes:[autoIncome,...newData.incomes]};
       }
-
-      // Se estava editando e era retirada, atualiza a entrada automática vinculada
       if(st==="investments"&&isWithdrawal(entry)&&oldEntry){
-        const incomes=newData.incomes.map(inc=>
-          inc.linkedInvestmentId===entry.id
-            ?{...inc,value:entry.value,date:entry.date}
-            :inc
-        );
-        newData={...newData,incomes};
+        newData={...newData,incomes:newData.incomes.map(inc=>inc.linkedInvestmentId===entry.id?{...inc,value:entry.value,date:entry.date}:inc)};
       }
-
       return newData;
     });
     setModal(null);
   }
 
   function saveBulk(st,entries){
-    if(!entries.length)return;
+    if(!entries.length) return;
     if(st==="investments"){
       let ed=0,pd=0;entries.forEach(e=>{const d=reserveDelta(e,1);ed+=d.ed;pd+=d.pd;});
-      if(ed!==0||pd!==0)setSettings(s=>({...s,emergencyDelta:(s.emergencyDelta||0)+ed,personalDelta:(s.personalDelta||0)+pd}));
+      if(ed!==0||pd!==0) setSettings(s=>({...s,emergencyDelta:(s.emergencyDelta||0)+ed,personalDelta:(s.personalDelta||0)+pd}));
     }
     setData(d=>{
-      let newData={...d,[st]:[...entries,...d[st]]};
-      // Auto-entradas para retiradas em lote
+      const stMap={incomes:"incomes",expenses:"expenses",fixed:"fixed",investments:"investments"};
+      const key=stMap[st];
+      if(!key) return d;
+      let newData={...d,[key]:[...entries,...(d[key]||[])]};
       if(st==="investments"){
-        const autoIncomes=entries.filter(e=>isWithdrawal(e)).map(e=>({
-          id:uid(),
-          name:`Retirada — ${e.type.includes("Reserva")?"Reserva de Emergência":"Meta pessoal"}`,
-          value:e.value,date:e.date,autoFromWithdrawal:true,linkedInvestmentId:e.id,
-        }));
+        const autoIncomes=entries.filter(e=>isWithdrawal(e)).map(e=>({id:uid(),name:`Retirada — ${e.type.includes("Reserva")?"Reserva de Emergência":"Meta pessoal"}`,value:e.value,date:e.date,autoFromWithdrawal:true,linkedInvestmentId:e.id}));
         if(autoIncomes.length) newData={...newData,incomes:[...autoIncomes,...newData.incomes]};
       }
       return newData;
@@ -652,22 +601,27 @@ function AppInner({session}){
       const e=data.investments.find(i=>i.id===id);
       if(e){
         const{ed,pd}=reserveDelta(e,-1);
-        if(ed!==0||pd!==0)setSettings(s=>({...s,emergencyDelta:(s.emergencyDelta||0)+ed,personalDelta:(s.personalDelta||0)+pd}));
-        // Remove entrada automática vinculada se existir
+        if(ed!==0||pd!==0) setSettings(s=>({...s,emergencyDelta:(s.emergencyDelta||0)+ed,personalDelta:(s.personalDelta||0)+pd}));
         if(isWithdrawal(e)){
-          setData(d=>({...d,
-            investments:d.investments.filter(i=>i.id!==id),
-            incomes:d.incomes.filter(i=>i.linkedInvestmentId!==id)
-          }));
+          setData(d=>({...d,investments:d.investments.filter(i=>i.id!==id),incomes:d.incomes.filter(i=>i.linkedInvestmentId!==id)}));
           return;
         }
       }
     }
-    setData(d=>({...d,[st]:d[st].filter(i=>i.id!==id)}));
+    const stMap={incomes:"incomes",expenses:"expenses",fixed:"fixed",investments:"investments"};
+    const key=stMap[st];
+    if(key) setData(d=>({...d,[key]:(d[key]||[]).filter(i=>i.id!==id)}));
   }
 
-  function toggleFixed(id){setData(d=>({...d,fixed:d.fixed.map(f=>f.id===id?{...f,paid:!f.paid}:f)}));}
-  function toggleDebtPaid(debtId,mk){setDebts(ds=>ds.map(d=>{if(d.id!==debtId)return d;const paid=d.paidMonths||[];return{...d,paidMonths:paid.includes(mk)?paid.filter(k=>k!==mk):[...paid,mk],paidCount:paid.includes(mk)?(d.paidCount||0)-1:(d.paidCount||0)+1};}));}
+  function toggleFixed(id){setData(d=>({...d,fixed:(d.fixed||[]).map(f=>f.id===id?{...f,paid:!f.paid}:f)}));}
+  function toggleDebtPaid(debtId,mk){
+    setDebts(ds=>ds.map(d=>{
+      if(d.id!==debtId) return d;
+      const paid=d.paidMonths||[];
+      const wasPaid=paid.includes(mk);
+      return{...d,paidMonths:wasPaid?paid.filter(k=>k!==mk):[...paid,mk],paidCount:wasPaid?(d.paidCount||0)-1:(d.paidCount||0)+1};
+    }));
+  }
 
   const openModal=useCallback((type,entry)=>setModal({type,entry}),[]);
   const closeModal=useCallback(()=>setModal(null),[]);
@@ -752,28 +706,25 @@ function AppInner({session}){
         .atable tfoot td{border-top:2px solid var(--border2);font-weight:700;}
         .section-sep{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:var(--muted);padding:8px 0 5px;display:flex;align-items:center;gap:8px;}
         .section-sep::after{content:'';flex:1;height:1px;background:var(--border);}
+        .loading-overlay{display:flex;align-items:center;justify-content:center;padding:40px;color:var(--muted);font-size:13px;}
       `}</style>
 
       <div className="app">
         <div className="topbar">
-          <div className="logo">
-            Fin<em>Track</em>
-            <span className="greeting">Olá, {settings.name}!{syncing&&" ☁️"}</span>
-          </div>
+          <div className="logo">Fin<em>Track</em><span className="greeting">Olá, {settings.name}!{syncing&&" ☁️"}</span></div>
           <div style={{display:"flex",alignItems:"center",gap:8}}>
             <div className="mnav">
               <button onClick={prevMonth}>‹</button>
               <span className="mlbl">{MONTHS_FULL[vm]} {vy}</span>
               <button onClick={nextMonth}>›</button>
             </div>
-            <button onClick={()=>supabase.auth.signOut()}
-              style={{background:"none",border:"1px solid var(--border)",color:"var(--muted)",fontFamily:"'Sora',sans-serif",fontSize:10,borderRadius:8,padding:"5px 8px",cursor:"pointer"}}>
-              Sair
-            </button>
+            <button onClick={()=>supabase.auth.signOut()} style={{background:"none",border:"1px solid var(--border)",color:"var(--muted)",fontFamily:"'Sora',sans-serif",fontSize:10,borderRadius:8,padding:"5px 8px",cursor:"pointer"}}>Sair</button>
           </div>
         </div>
 
-        {page==="dashboard"&&(
+        {loading&&<div className="loading-overlay">Carregando {MONTHS_FULL[vm]}...</div>}
+
+        {!loading&&page==="dashboard"&&(
           <div className="pg">
             {alerts.length>0&&<div style={{display:"flex",flexDirection:"column",gap:6}}>{alerts.map((a,i)=><div key={i} className={`alert ${a.type}`}><span>{a.type==="ok"?"✅":a.type==="warn"?"⚠️":"🚨"}</span>{a.msg}</div>)}</div>}
             <div>
@@ -861,7 +812,7 @@ function AppInner({session}){
           </div>
         )}
 
-        {page==="incomes"&&(
+        {!loading&&page==="incomes"&&(
           <div className="pg">
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
               <div className="st">Entradas — {MONTHS_FULL[vm]}</div>
@@ -869,19 +820,13 @@ function AppInner({session}){
             </div>
             {prevBalance>0&&<div style={{background:"rgba(0,214,143,.08)",border:"1px solid rgba(0,214,143,.2)",borderRadius:10,padding:"9px 12px",fontSize:11,color:"var(--green)",fontWeight:500}}>✅ Saldo anterior: +{fmt(prevBalance)}</div>}
             <button className="bulkbtn" onClick={()=>openModal("bulk_income")}>📋 Colar em lote</button>
-            {data.incomes.length===0?<div className="empty">Nenhuma entrada.<br/>Toque no <strong style={{color:"var(--accent)"}}>+</strong> ou cole em lote.</div>
-              :<div className="txlist">{data.incomes.map(e=>(
+            {data.incomes.length===0?<div className="empty">Nenhuma entrada ainda.<br/>Toque no <strong style={{color:"var(--accent)"}}>+</strong> ou cole em lote.</div>
+              :<div className="txlist">{(data.incomes||[]).map(e=>(
                 <div key={e.id} className="txi" onClick={()=>!e.autoFromWithdrawal&&openModal("income",e)}>
-                  <div className="txicon" style={{background:e.autoFromWithdrawal?"rgba(155,140,255,.15)":"#00d68f22"}}>
-                    {e.autoFromWithdrawal?"🔄":"💰"}
-                  </div>
+                  <div className="txicon" style={{background:e.autoFromWithdrawal?"rgba(155,140,255,.15)":"#00d68f22"}}>{e.autoFromWithdrawal?"🔄":"💰"}</div>
                   <div className="txinfo">
                     <div className="txd">{e.name}</div>
-                    <div className="txm">
-                      {e.date?.slice(5).split("-").reverse().join("/")}
-                      {e.autoFromWithdrawal&&<span style={{color:"var(--accent)",fontSize:8,fontWeight:700}}>auto</span>}
-                      {" · "}{rawIncome>0?((e.value/rawIncome)*100).toFixed(1):0}%
-                    </div>
+                    <div className="txm">{e.date?.slice(5).split("-").reverse().join("/")} {e.autoFromWithdrawal&&<span style={{color:"var(--accent)",fontSize:8,fontWeight:700}}>auto</span>}</div>
                   </div>
                   <div className="txa" style={{color:"var(--green)"}}>+{fmt(e.value)}</div>
                   {!e.autoFromWithdrawal&&<button className="tdel" onClick={ev=>{ev.stopPropagation();deleteEntry("incomes",e.id);}}>✕</button>}
@@ -890,16 +835,16 @@ function AppInner({session}){
           </div>
         )}
 
-        {page==="expenses"&&(
+        {!loading&&page==="expenses"&&(
           <div className="pg">
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
               <div className="st">Gastos — {MONTHS_FULL[vm]}</div>
               <div style={{fontSize:13,fontWeight:700,color:"var(--wine)"}}>{fmt(totalExpense)}</div>
             </div>
             <button className="bulkbtn" onClick={()=>openModal("bulk_expense")}>📋 Colar em lote</button>
-            {data.expenses.length===0?<div className="empty">Nenhum gasto.<br/>Toque no <strong style={{color:"var(--accent)"}}>+</strong> ou cole em lote.</div>
-              :<div className="txlist">{data.expenses.map(e=>{
-                const cat=CAT_MAP[e.category]||{icon:"📌",color:"#888"};
+            {data.expenses.length===0?<div className="empty">Nenhum gasto ainda.<br/>Toque no <strong style={{color:"var(--accent)"}}>+</strong> ou cole em lote.</div>
+              :<div className="txlist">{(data.expenses||[]).map(e=>{
+                const cat=catMap[e.category]||{icon:"📌",color:"#888"};
                 const bk=banks.find(b=>b.name===e.bank);
                 const d=e.date?e.date.slice(5).split("-").reverse().join("/"):"";
                 return (
@@ -917,7 +862,7 @@ function AppInner({session}){
           </div>
         )}
 
-        {page==="fixed"&&(
+        {!loading&&page==="fixed"&&(
           <div className="pg">
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
               <div className="st">Despesas Fixas</div>
@@ -925,7 +870,8 @@ function AppInner({session}){
             </div>
             <button className="bulkbtn" onClick={()=>openModal("bulk_fixed")}>📋 Colar em lote</button>
             {allFixed.length===0?<div className="empty">Nenhuma despesa fixa.<br/>Toque no <strong style={{color:"var(--accent)"}}>+</strong> ou cole em lote.</div>:<>
-              {pendingFixed.length>0&&<><div className="section-sep">A pagar ({pendingFixed.length})</div>
+              {pendingFixed.length>0&&<>
+                <div className="section-sep">A pagar ({pendingFixed.length})</div>
                 <div style={{display:"flex",flexDirection:"column",gap:6}}>
                   {pendingFixed.map(e=>(
                     <div key={e.id} className="checkrow" onClick={()=>e.isDebt?toggleDebtPaid(e.debtId,e.debtMonthKey):toggleFixed(e.id)}>
@@ -935,8 +881,10 @@ function AppInner({session}){
                       {!e.isDebt&&<><button className="tdel" onClick={ev=>{ev.stopPropagation();openModal("fixed",e);}}>✏️</button><button className="tdel" onClick={ev=>{ev.stopPropagation();deleteEntry("fixed",e.id);}}>✕</button></>}
                     </div>
                   ))}
-                </div></>}
-              {paidFixed.length>0&&<><div className="section-sep">Pagas ({paidFixed.length})</div>
+                </div>
+              </>}
+              {paidFixed.length>0&&<>
+                <div className="section-sep">Pagas ({paidFixed.length})</div>
                 <div style={{display:"flex",flexDirection:"column",gap:6}}>
                   {paidFixed.map(e=>(
                     <div key={e.id} className="checkrow" onClick={()=>e.isDebt?toggleDebtPaid(e.debtId,e.debtMonthKey):toggleFixed(e.id)}>
@@ -946,14 +894,15 @@ function AppInner({session}){
                       {!e.isDebt&&<><button className="tdel" onClick={ev=>{ev.stopPropagation();openModal("fixed",e);}}>✏️</button><button className="tdel" onClick={ev=>{ev.stopPropagation();deleteEntry("fixed",e.id);}}>✕</button></>}
                     </div>
                   ))}
-                </div></>}
+                </div>
+              </>}
             </>}
           </div>
         )}
 
-        {page==="cards"&&<CartoesPage expenses={data.expenses} banks={banks} vm={vm} vy={vy}/>}
+        {!loading&&page==="cards"&&<CartoesPage expenses={data.expenses||[]} banks={banks} vm={vm} vy={vy}/>}
 
-        {page==="investments"&&(
+        {!loading&&page==="investments"&&(
           <div className="pg">
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
               <div className="st">Reservas & Investimentos</div>
@@ -965,17 +914,14 @@ function AppInner({session}){
               <GoalBar label={settings.personalGoalName} icon="🎯" current={personalTotal} goal={settings.personalGoalValue} color="var(--accent)"/>
             </div>
             {data.investments.length===0?<div className="empty">Nenhum lançamento.<br/>Toque no <strong style={{color:"var(--accent)"}}>+</strong> ou cole em lote.</div>
-              :<div className="txlist">{data.investments.map(e=>{
+              :<div className="txlist">{(data.investments||[]).map(e=>{
                 const isW=isWithdrawal(e);
                 return (
                   <div key={e.id} className="txi" onClick={()=>openModal("investment",e)}>
                     <div className="txicon" style={{background:isW?"var(--wine)22":"var(--gold)22"}}>{isW?"📤":"💰"}</div>
                     <div className="txinfo">
-                      <div className="txd">{e.name}</div>
-                      <div className="txm">
-                        {e.date?.slice(5).split("-").reverse().join("/")} · {e.type}
-                        {isW&&<span style={{color:"var(--green)",fontSize:8,fontWeight:700}}>→ entrada auto</span>}
-                      </div>
+                      <div className="txd">{e.name||e.type}</div>
+                      <div className="txm">{e.date?.slice(5).split("-").reverse().join("/")} · {e.type}{isW&&<span style={{color:"var(--green)",fontSize:8,fontWeight:700}}>→ entrada auto</span>}</div>
                     </div>
                     <div className="txa" style={{color:isW?"var(--wine)":"var(--gold)"}}>{isW?"-":"+"}{fmt(e.value)}</div>
                     <button className="tdel" onClick={ev=>{ev.stopPropagation();deleteEntry("investments",e.id);}}>✕</button>
@@ -985,9 +931,9 @@ function AppInner({session}){
           </div>
         )}
 
-        {page==="debts"&&<DebtsPage debts={debts} setDebts={setDebts} vm={vm} vy={vy}/>}
+        {!loading&&page==="debts"&&<DebtsPage debts={debts} setDebts={setDebts} vm={vm} vy={vy}/>}
 
-        {page==="annual"&&(
+        {!loading&&page==="annual"&&(
           <div className="pg">
             <div className="st">Visão Anual — {vy}</div>
             <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:7}}>
@@ -1034,7 +980,7 @@ function AppInner({session}){
           </div>
         )}
 
-        {page==="settings"&&<SettingsPage settings={settings} setSettings={setSettings} data={data} setData={setData} userEmail={session?.user?.email}/>}
+        {!loading&&page==="settings"&&<SettingsPage settings={settings} setSettings={setSettings} data={data} setData={setData} userEmail={session?.user?.email} expenseCats={expenseCats}/>}
 
         <div className="bnav">
           {NAV.map(n=>(
@@ -1050,12 +996,12 @@ function AppInner({session}){
 
       {modal&&(
         <Modal onClose={closeModal} tall={modal.type?.startsWith("bulk")||modal.type==="expense"}>
-          {modal.type==="bulk_income"&&<BulkPanel type="income" banks={banks} vy={vy} vm={vm} onClose={closeModal} onConfirm={i=>{saveBulk("incomes",i);closeModal();}}/>}
-          {modal.type==="bulk_expense"&&<BulkPanel type="expense" banks={banks} vy={vy} vm={vm} onClose={closeModal} onConfirm={i=>{saveBulk("expenses",i);closeModal();}}/>}
-          {modal.type==="bulk_fixed"&&<BulkPanel type="fixed" banks={banks} vy={vy} vm={vm} onClose={closeModal} onConfirm={i=>{saveBulk("fixed",i);closeModal();}}/>}
-          {modal.type==="bulk_investment"&&<BulkPanel type="investment" banks={banks} vy={vy} vm={vm} onClose={closeModal} onConfirm={i=>{saveBulk("investments",i);closeModal();}}/>}
+          {modal.type==="bulk_income"&&<BulkPanel type="income" banks={banks} expenseCats={expenseCats} vy={vy} vm={vm} onClose={closeModal} onConfirm={i=>{saveBulk("incomes",i);closeModal();}}/>}
+          {modal.type==="bulk_expense"&&<BulkPanel type="expense" banks={banks} expenseCats={expenseCats} vy={vy} vm={vm} onClose={closeModal} onConfirm={i=>{saveBulk("expenses",i);closeModal();}}/>}
+          {modal.type==="bulk_fixed"&&<BulkPanel type="fixed" banks={banks} expenseCats={expenseCats} vy={vy} vm={vm} onClose={closeModal} onConfirm={i=>{saveBulk("fixed",i);closeModal();}}/>}
+          {modal.type==="bulk_investment"&&<BulkPanel type="investment" banks={banks} expenseCats={expenseCats} vy={vy} vm={vm} onClose={closeModal} onConfirm={i=>{saveBulk("investments",i);closeModal();}}/>}
           {["income","expense","fixed","investment"].includes(modal.type)&&(
-            <EntryModal type={modal.type} entry={modal.entry} banks={banks} onClose={closeModal} onSave={saveEntry} vm={vm} vy={vy}/>
+            <EntryModal type={modal.type} entry={modal.entry} banks={banks} expenseCats={expenseCats} onClose={closeModal} onSave={saveEntry} vm={vm} vy={vy}/>
           )}
         </Modal>
       )}
@@ -1063,6 +1009,7 @@ function AppInner({session}){
   );
 }
 
+// ─── DEBTS ────────────────────────────────────────────────────────────────────
 function DebtsPage({debts,setDebts,vm,vy}){
   const [showForm,setShowForm]=useState(false);
   const active=debts.filter(d=>!d.closed),closed=debts.filter(d=>d.closed);
@@ -1073,35 +1020,60 @@ function DebtsPage({debts,setDebts,vm,vy}){
         <button onClick={()=>setShowForm(s=>!s)} style={{background:"var(--accent)",border:"none",color:"#fff",fontFamily:"'Sora',sans-serif",fontSize:11,fontWeight:700,borderRadius:8,padding:"5px 10px",cursor:"pointer"}}>{showForm?"Cancelar":"+ Nova"}</button>
       </div>
       {showForm&&<DebtForm onSave={d=>{setDebts(ds=>[...ds,d]);setShowForm(false);}} vm={vm} vy={vy}/>}
-      {active.length===0&&!showForm&&<div className="empty">Nenhuma dívida ativa.</div>}
+      {active.length===0&&!showForm&&<div className="empty">Nenhuma dívida ativa.<br/>Toque em <strong style={{color:"var(--accent)"}}>+ Nova</strong> para adicionar.</div>}
       {active.map(d=>{
         const pct=Math.min(((d.paidCount||0)/d.installments)*100,100);
         const remaining=d.totalValue-(d.paidCount||0)*d.monthlyValue;
-        const dueThisMonth=vy*12+vm>=d.startYear*12+d.startMonth&&vy*12+vm<d.startYear*12+d.startMonth+d.installments;
+        const curAbs=vy*12+vm,startAbs=d.startYear*12+d.startMonth;
+        const dueThisMonth=curAbs>=startAbs&&curAbs<startAbs+d.installments;
+        const key=`${vy}-${vm}`;
+        const paidThisMonth=d.paidMonths?.includes(key)||false;
         return (
           <div key={d.id} className="card">
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
-              <div><div style={{fontSize:13,fontWeight:700}}>{d.name}</div><div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>{d.installments}x de {fmt(d.monthlyValue)} · Total: {fmt(d.totalValue)}</div></div>
-              <div style={{textAlign:"right"}}><div style={{fontSize:12,fontWeight:700,color:"var(--wine)"}}>{fmt(Math.max(remaining,0))}</div><div style={{fontSize:9,color:"var(--muted)"}}>restando</div></div>
+              <div>
+                <div style={{fontSize:13,fontWeight:700}}>{d.name}</div>
+                <div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>{d.installments}x de {fmt(d.monthlyValue)} · Total: {fmt(d.totalValue)}</div>
+              </div>
+              <div style={{textAlign:"right"}}>
+                <div style={{fontSize:12,fontWeight:700,color:"var(--wine)"}}>{fmt(Math.max(remaining,0))}</div>
+                <div style={{fontSize:9,color:"var(--muted)"}}>restando</div>
+              </div>
             </div>
-            <div style={{height:6,background:"var(--border)",borderRadius:3,overflow:"hidden",marginBottom:4}}><div style={{height:"100%",width:`${pct}%`,background:"var(--green)",borderRadius:3}}/></div>
+            <div style={{height:6,background:"var(--border)",borderRadius:3,overflow:"hidden",marginBottom:4}}>
+              <div style={{height:"100%",width:`${pct}%`,background:"var(--green)",borderRadius:3}}/>
+            </div>
             <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:"var(--muted)",marginBottom:10}}>
-              <span>{d.paidCount||0}/{d.installments} pagas</span>
-              {dueThisMonth&&<span style={{color:"var(--gold)",fontWeight:600}}>⚡ parcela deste mês</span>}
+              <span>{d.paidCount||0}/{d.installments} pagas ({pct.toFixed(0)}%)</span>
+              {dueThisMonth&&<span style={{color:paidThisMonth?"var(--green)":"var(--gold)",fontWeight:600}}>{paidThisMonth?"✓ Paga este mês":"⚡ Vence este mês"}</span>}
             </div>
+            {dueThisMonth&&(
+              <button onClick={()=>setDebts(ds=>ds.map(x=>{
+                if(x.id!==d.id) return x;
+                const paid=x.paidMonths||[];
+                const wasPaid=paid.includes(key);
+                return{...x,paidMonths:wasPaid?paid.filter(k=>k!==key):[...paid,key],paidCount:wasPaid?(x.paidCount||0)-1:(x.paidCount||0)+1};
+              }))}
+                style={{width:"100%",background:paidThisMonth?"rgba(0,214,143,.1)":"var(--surface)",border:`1px solid ${paidThisMonth?"var(--green)":"var(--border)"}`,color:paidThisMonth?"var(--green)":"var(--muted)",fontFamily:"'Sora',sans-serif",fontSize:12,fontWeight:600,borderRadius:9,padding:"8px 0",cursor:"pointer",marginBottom:8}}>
+                {paidThisMonth?"✓ Parcela de "+MONTHS_FULL[vm]+" paga":"Marcar parcela de "+MONTHS_FULL[vm]+" como paga"}
+              </button>
+            )}
             <div style={{display:"flex",gap:7}}>
-              <button onClick={()=>setDebts(ds=>ds.map(x=>x.id===d.id?{...x,closed:true}:x))} style={{flex:1,background:"var(--surface)",border:"1px solid var(--border)",color:"var(--green)",fontFamily:"'Sora',sans-serif",fontSize:11,fontWeight:600,borderRadius:8,padding:"6px 0",cursor:"pointer"}}>✓ Quitar</button>
+              <button onClick={()=>setDebts(ds=>ds.map(x=>x.id===d.id?{...x,closed:true}:x))} style={{flex:1,background:"var(--surface)",border:"1px solid var(--border)",color:"var(--green)",fontFamily:"'Sora',sans-serif",fontSize:11,fontWeight:600,borderRadius:8,padding:"6px 0",cursor:"pointer"}}>✓ Quitar tudo</button>
               <button onClick={()=>setDebts(ds=>ds.filter(x=>x.id!==d.id))} style={{background:"var(--surface)",border:"1px solid var(--wine)",color:"var(--wine)",fontFamily:"'Sora',sans-serif",fontSize:11,fontWeight:600,borderRadius:8,padding:"6px 12px",cursor:"pointer"}}>Apagar</button>
             </div>
           </div>
         );
       })}
-      {closed.length>0&&closed.map(d=>(
-        <div key={d.id} style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:11,padding:"10px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-          <div><div style={{fontSize:12,fontWeight:600,color:"var(--muted)",textDecoration:"line-through"}}>{d.name}</div><div style={{fontSize:10,color:"var(--muted)"}}>{d.installments}x de {fmt(d.monthlyValue)}</div></div>
-          <button onClick={()=>setDebts(ds=>ds.filter(x=>x.id!==d.id))} style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:14}}>✕</button>
-        </div>
-      ))}
+      {closed.length>0&&<>
+        <div className="section-sep">Quitadas</div>
+        {closed.map(d=>(
+          <div key={d.id} style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:11,padding:"10px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div><div style={{fontSize:12,fontWeight:600,color:"var(--muted)",textDecoration:"line-through"}}>{d.name}</div><div style={{fontSize:10,color:"var(--muted)"}}>{d.installments}x de {fmt(d.monthlyValue)}</div></div>
+            <button onClick={()=>setDebts(ds=>ds.filter(x=>x.id!==d.id))} style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:14}}>✕</button>
+          </div>
+        ))}
+      </>}
     </div>
   );
 }
@@ -1129,8 +1101,21 @@ function DebtForm({onSave,vm,vy}){
   );
 }
 
-function SettingsPage({settings,setSettings,data,setData,userEmail}){
+// ─── SETTINGS ─────────────────────────────────────────────────────────────────
+function SettingsPage({settings,setSettings,data,setData,userEmail,expenseCats}){
   const banks=settings.banks||DEFAULT_BANKS;
+  const [newCat,setNewCat]=useState({name:"",icon:"📌",color:"#7b241c"});
+  const [showNewCat,setShowNewCat]=useState(false);
+
+  function addCat(){
+    if(!newCat.name.trim()) return;
+    const cat={id:uid(),...newCat};
+    setSettings(s=>({...s,expenseCats:[...(s.expenseCats||DEFAULT_EXPENSE_CATS),cat]}));
+    setNewCat({name:"",icon:"📌",color:"#7b241c"});
+    setShowNewCat(false);
+  }
+  function deleteCat(id){setSettings(s=>({...s,expenseCats:(s.expenseCats||DEFAULT_EXPENSE_CATS).filter(c=>c.id!==id)}));}
+
   return (
     <div className="pg">
       <div className="st">Conta</div>
@@ -1169,8 +1154,7 @@ function SettingsPage({settings,setSettings,data,setData,userEmail}){
           <div key={b.id} style={{marginBottom:16,paddingBottom:16,borderBottom:"1px solid var(--border)"}}>
             <div style={{display:"flex",gap:6,alignItems:"center",marginBottom:8,flexWrap:"wrap"}}>
               {BANK_COLORS.map(c=>(
-                <button key={c} onClick={()=>setSettings(s=>({...s,banks:s.banks.map(x=>x.id===b.id?{...x,color:c}:x)}))}
-                  style={{width:17,height:17,borderRadius:"50%",background:c,border:"none",cursor:"pointer",outline:b.color===c?"2px solid #fff":"none",outlineOffset:1}}/>
+                <button key={c} onClick={()=>setSettings(s=>({...s,banks:s.banks.map(x=>x.id===b.id?{...x,color:c}:x)}))} style={{width:17,height:17,borderRadius:"50%",background:c,border:"none",cursor:"pointer",outline:b.color===c?"2px solid #fff":"none",outlineOffset:1}}/>
               ))}
               <button onClick={()=>setSettings(s=>({...s,banks:s.banks.filter(x=>x.id!==b.id)}))} style={{background:"none",border:"1px solid var(--wine)",color:"var(--wine)",fontFamily:"'Sora',sans-serif",fontSize:10,borderRadius:6,padding:"3px 8px",cursor:"pointer",marginLeft:"auto"}}>Apagar</button>
             </div>
@@ -1182,11 +1166,46 @@ function SettingsPage({settings,setSettings,data,setData,userEmail}){
         ))}
       </div>
       <div className="divider"/>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div className="st">Categorias de Gasto</div>
+        <button onClick={()=>setShowNewCat(s=>!s)} style={{background:"var(--accent)",border:"none",color:"#fff",fontFamily:"'Sora',sans-serif",fontSize:11,fontWeight:700,borderRadius:8,padding:"5px 10px",cursor:"pointer"}}>{showNewCat?"Cancelar":"+ Nova"}</button>
+      </div>
+      {showNewCat&&(
+        <div className="card">
+          <div className="frow">
+            <div className="fg"><label className="fl">Nome</label><input className="fi" placeholder="Ex: Pet, Academia…" value={newCat.name} onChange={e=>setNewCat(c=>({...c,name:e.target.value}))}/></div>
+            <div className="fg"><label className="fl">Ícone</label>
+              <select className="fi" value={newCat.icon} onChange={e=>setNewCat(c=>({...c,icon:e.target.value}))}>
+                {CAT_ICONS.map(i=><option key={i} value={i}>{i}</option>)}
+              </select>
+            </div>
+          </div>
+          <div className="fg"><label className="fl">Cor</label>
+            <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+              {CAT_COLORS.map(c=>(
+                <button key={c} onClick={()=>setNewCat(nc=>({...nc,color:c}))} style={{width:20,height:20,borderRadius:"50%",background:c,border:"none",cursor:"pointer",outline:newCat.color===c?"2px solid #fff":"none",outlineOffset:1}}/>
+              ))}
+            </div>
+          </div>
+          <button className="savebtn" onClick={addCat} disabled={!newCat.name.trim()}>Adicionar categoria</button>
+        </div>
+      )}
+      <div className="card">
+        {expenseCats.map(c=>(
+          <div key={c.id} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 0",borderBottom:"1px solid var(--border)"}}>
+            <span style={{fontSize:18}}>{c.icon}</span>
+            <div style={{flex:1,fontSize:12,fontWeight:500}}>{c.name}</div>
+            <span style={{width:12,height:12,borderRadius:"50%",background:c.color,display:"inline-block"}}/>
+            <button onClick={()=>deleteCat(c.id)} style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:14}}>✕</button>
+          </div>
+        ))}
+      </div>
+      <div className="divider"/>
       <div className="st">Orçamento por categoria 🎯</div>
       <div className="card">
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
-          {EXPENSE_CATS.map(c=>(
-            <div key={c.name} className="fg" style={{margin:0}}><label className="fl">{c.icon} {c.name}</label>
+          {expenseCats.map(c=>(
+            <div key={c.id} className="fg" style={{margin:0}}><label className="fl">{c.icon} {c.name}</label>
               <input className="fi" type="number" placeholder="sem limite" value={settings.catBudgets?.[c.name]||""} onChange={e=>setSettings(s=>({...s,catBudgets:{...s.catBudgets,[c.name]:parseFloat(e.target.value)||0}}))}/></div>
           ))}
         </div>
@@ -1198,22 +1217,25 @@ function SettingsPage({settings,setSettings,data,setData,userEmail}){
   );
 }
 
-function EntryModal({type,entry,banks,onClose,onSave,vm,vy}){
+// ─── ENTRY MODAL ──────────────────────────────────────────────────────────────
+function EntryModal({type,entry,banks,expenseCats,onClose,onSave,vm,vy}){
   const isEdit=!!entry;
   const dd=`${vy}-${String(vm+1).padStart(2,"0")}-${String(today.getDate()).padStart(2,"0")}`;
   const [form,setForm]=useState(()=>{
-    if(isEdit)return{...entry};
-    if(type==="income")return{id:uid(),name:"",value:"",date:dd};
-    if(type==="expense")return{id:uid(),category:"Alimentação",date:dd,description:"",value:"",bank:banks[0]?.name||"",method:"PIX",essential:false};
-    if(type==="fixed")return{id:uid(),name:"",value:"",paid:false};
-    if(type==="investment")return{id:uid(),name:"",type:"Reserva de Emergência",value:"",date:dd};
+    if(isEdit) return{...entry};
+    if(type==="income")     return{id:uid(),name:"",value:"",date:dd};
+    if(type==="expense")    return{id:uid(),category:expenseCats[0]?.name||"Outros",date:dd,description:"",value:"",bank:banks[0]?.name||"",method:"PIX",essential:false};
+    if(type==="fixed")      return{id:uid(),name:"",value:"",paid:false};
+    if(type==="investment") return{id:uid(),name:"",type:"Reserva de Emergência",value:"",date:dd};
     return{};
   });
   const upd=(k,v)=>setForm(f=>({...f,[k]:v}));
   function save(){
-    const st={income:"incomes",expense:"expenses",fixed:"fixed",investment:"investments"}[type];
+    const stMap={income:"incomes",expense:"expenses",fixed:"fixed",investment:"investments"};
+    const st=stMap[type];
     const p={...form};
-    if(["income","expense","investment","fixed"].includes(type)) p.value=parseFloat(String(form.value).replace(",","."))||0;
+    p.value=parseFloat(String(form.value||"0").replace(",","."))||0;
+    if(type==="fixed") p.value=parseFloat(String(form.value||"0").replace(",","."))||0;
     onSave(st,p,isEdit?entry:null);
   }
   const titles={income:"Entrada",expense:"Gasto",fixed:"Despesa Fixa",investment:"Reserva / Investimento"};
@@ -1229,8 +1251,8 @@ function EntryModal({type,entry,banks,onClose,onSave,vm,vy}){
       </>}
       {type==="expense"&&<>
         <div className="fg"><label className="fl">Categoria</label>
-          <div className="catgrid">{EXPENSE_CATS.map(c=>(
-            <button key={c.name} className={`catopt${form.category===c.name?" selected":""}`}
+          <div className="catgrid">{expenseCats.map(c=>(
+            <button key={c.id||c.name} className={`catopt${form.category===c.name?" selected":""}`}
               style={form.category===c.name?{borderColor:c.color,background:c.color+"33",color:"#fff"}:{}}
               onClick={()=>upd("category",c.name)}>{c.icon} {c.name}</button>
           ))}</div>
@@ -1253,7 +1275,7 @@ function EntryModal({type,entry,banks,onClose,onSave,vm,vy}){
       </>}
       {type==="investment"&&<>
         <div className="fg"><label className="fl">Tipo</label><select className="fi" value={form.type} onChange={e=>upd("type",e.target.value)}>{INVEST_TYPES.map(t=><option key={t}>{t}</option>)}</select></div>
-        <div className="fg"><label className="fl">Nome / descrição</label><input className="fi" placeholder="Ex: CDB Nubank, Retirada emergência…" value={form.name} onChange={e=>upd("name",e.target.value)}/></div>
+        <div className="fg"><label className="fl">Nome / descrição</label><input className="fi" placeholder="Ex: CDB Nubank, Aporte reserva…" value={form.name} onChange={e=>upd("name",e.target.value)}/></div>
         <div className="frow">
           <div className="fg"><label className="fl">Valor (R$)</label><input className="fi" type="number" inputMode="decimal" placeholder="0,00" value={form.value} onChange={e=>upd("value",e.target.value)}/></div>
           <div className="fg"><label className="fl">Data</label><input className="fi" type="date" value={form.date} onChange={e=>upd("date",e.target.value)}/></div>
