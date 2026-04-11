@@ -59,10 +59,10 @@ const CAT_ICONS = ["🍔","🚌","⛽","💊","📦","👟","📚","🚗","✂�
 const fmt = v => new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL"}).format(v||0);
 const uid = () => Math.random().toString(36).slice(2)+Date.now().toString(36);
 const today = new Date();
-const monthKey = (y,m) => `fintrack:month:${y}:${m}:v10`;
-const creditKey = (y,m) => `fintrack:credit:${y}:${m}:v10`;
-const SETTINGS_KEY = "fintrack:settings:v10";
-const DEBTS_KEY = "fintrack:debts:v10";
+const monthKey = (y,m) => `fintrack:month:${y}:${m}:v9`;
+const creditKey = (y,m) => `fintrack:credit:${y}:${m}:v9`;
+const SETTINGS_KEY = "fintrack:settings:v9";
+const DEBTS_KEY = "fintrack:debts:v9";
 const EMPTY_MONTH = () => ({incomes:[],expenses:[],fixed:[],investments:[],notes:""});
 const EMPTY_CREDIT = () => ({purchases:[]});
 const DEFAULT_SETTINGS = {
