@@ -259,7 +259,11 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
       const curKey=`${vy}-${vm}`;
       const curParcels=allParcels.filter(p=>p.monthYear===curKey);
       if(curParcels.length>0){
-        setCreditData(d=>({purchases:[...curParcels,...(d.purchases||[])]}));
+        setCreditData(d=>{
+          const updated={purchases:[...curParcels,...(d.purchases||[])]};
+          dbSet(creditKey(vy,vm),updated);
+          return updated;
+        });
       }
       // Save all months to DB
       const grouped={};
@@ -274,15 +278,18 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
     } else {
       const p={...purchase,id:uid(),monthYear:`${invoiceY}-${invoiceM}`,monthlyValue:purchase.totalValue,installmentNum:1};
       if(isCurrent){
-        // Add to current month state
-        setCreditData(d=>({purchases:[p,...(d.purchases||[])]}));
+        // Update state AND save to DB immediately
+        setCreditData(d=>{
+          const updated={purchases:[p,...(d.purchases||[])]};
+          dbSet(creditKey(vy,vm),updated);
+          return updated;
+        });
       } else {
         // Save directly to the target month in DB
         dbGet(creditKey(invoiceY,invoiceM)).then(existing=>{
           const ex=existing||EMPTY_CREDIT();
           dbSet(creditKey(invoiceY,invoiceM),{purchases:[p,...(ex.purchases||[])]});
         });
-        // Show toast
       }
     }
     setShowAddModal(false);
