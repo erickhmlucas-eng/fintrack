@@ -211,7 +211,7 @@ function AuthScreen(){
 }
 
 // ─── CARTÕES PAGE ─────────────────────────────────────────────────────────────
-function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData,setMonthData}){
+function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData,setMonthData,bankCredit}){
   const [selectedBank,setSelectedBank]=useState(banks[0]?.name||"");
   const [showAddModal,setShowAddModal]=useState(false);
   const catMap=Object.fromEntries(expenseCats.map(c=>[c.name,c]));
@@ -328,7 +328,7 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
               <span style={{width:12,height:12,borderRadius:"50%",background:bank?.color,display:"inline-block"}}/>
               <span style={{fontSize:14,fontWeight:700}}>{selectedBank}</span>
             </div>
-            <div style={{fontSize:11,color:"var(--muted)"}}>Próxima fatura — {MONTHS_FULL[vm]}</div>
+            <div style={{fontSize:11,color:"var(--muted)"}}>{bankCredit?.find(b=>b.name===selectedBank)?.nextInvoice?.label||`Próxima fatura — ${MONTHS_FULL[vm]}`}</div>
           </div>
           <div style={{textAlign:"right"}}>
             <div style={{fontSize:20,fontWeight:700,color:"var(--wine)"}}>{fmt(totalUsed)}</div>
@@ -401,21 +401,22 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
 
       {showAddModal&&(
         <Modal onClose={()=>setShowAddModal(false)} tall>
-          <CreditPurchaseForm banks={banks} expenseCats={expenseCats} selectedBank={selectedBank} vm={vm} vy={vy} onSave={addPurchase} onClose={()=>setShowAddModal(false)}/>
+          <CreditPurchaseForm banks={banks} expenseCats={expenseCats} selectedBank={selectedBank} vm={vm} vy={vy} onSave={addPurchase} onClose={()=>setShowAddModal(false)} defaultInvoiceMonth={bankCredit?.find(b=>b.name===selectedBank)?.nextInvoice?`${bankCredit.find(b=>b.name===selectedBank).nextInvoice.y}-${bankCredit.find(b=>b.name===selectedBank).nextInvoice.m}`:undefined}/>
         </Modal>
       )}
     </div>
   );
 }
 
-function CreditPurchaseForm({banks,expenseCats,selectedBank,vm,vy,onSave,onClose}){
+function CreditPurchaseForm({banks,expenseCats,selectedBank,vm,vy,onSave,onClose,defaultInvoiceMonth}){
   const dd=`${vy}-${String(vm+1).padStart(2,"0")}-${String(today.getDate()).padStart(2,"0")}`;
   // Invoice month options: current + next 3 months
   const invoiceOptions=Array.from({length:4},(_,i)=>{
     const m=(vm+i)%12, y=vy+Math.floor((vm+i)/12);
     return {label:`Fatura de ${MONTHS_FULL[m]} ${y}`,value:`${y}-${m}`};
   });
-  const [form,setForm]=useState({name:"",category:expenseCats[0]?.name||"Outros",bank:selectedBank,totalValue:"",installments:"1",date:dd,invoiceMonth:`${vy}-${vm}`});
+  const defInvoice=defaultInvoiceMonth||`${vy}-${vm}`;
+  const [form,setForm]=useState({name:"",category:expenseCats[0]?.name||"Outros",bank:selectedBank,totalValue:"",installments:"1",date:dd,invoiceMonth:defInvoice});
   const upd=(k,v)=>setForm(f=>({...f,[k]:v}));
   const tv=parseFloat(String(form.totalValue||"0").replace(",","."))||0;
   const inst=parseInt(form.installments||"1")||1;
@@ -693,9 +694,24 @@ function AppInner({session}){
   const personalTotal=(settings.personalBase||0)+(settings.personalDelta||0);
 
   // Credit by bank from creditData
+  // nextInvoiceMonth: if current month's invoice is paid in fixed, use next month
+  function getNextInvoiceMonth(bankName){
+    const curInvoiceKey=`auto_invoice_${bankName}_${vy}_${vm}`;
+    const prevM=vm===0?11:vm-1, prevY=vm===0?vy-1:vy;
+    const prevInvoiceKey=`auto_invoice_${bankName}_${prevY}_${prevM}`;
+    // Check if prev month invoice is paid in current month fixed
+    const prevInvoicePaid=(data.fixed||[]).some(f=>(f.id===prevInvoiceKey||f.autoInvoiceKey===prevInvoiceKey)&&f.paid);
+    if(prevInvoicePaid){
+      // Next invoice = next month
+      const nm=vm===11?0:vm+1, ny=vm===11?vy+1:vy;
+      return {m:nm,y:ny,label:`Próxima fatura — ${MONTHS_FULL[nm]}`};
+    }
+    return {m:vm,y:vy,label:`Fatura em aberto — ${MONTHS_FULL[vm]}`};
+  }
   const bankCredit=banks.map(b=>({
     ...b,
-    spent:(creditData.purchases||[]).filter(p=>p.bank===b.name).reduce((s,p)=>s+p.monthlyValue,0)
+    spent:(creditData.purchases||[]).filter(p=>p.bank===b.name).reduce((s,p)=>s+p.monthlyValue,0),
+    nextInvoice:getNextInvoiceMonth(b.name),
   }));
 
   const catData=expenseCats.map(c=>({
@@ -968,29 +984,31 @@ function AppInner({session}){
             </div>
             {bankCredit.some(b=>b.spent>0)&&(
               <div className="card">
-                <div className="st" style={{marginBottom:10}}>Próximas faturas 💳</div>
+                <div className="st" style={{marginBottom:10}}>Faturas 💳</div>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
                   <span style={{fontSize:11,color:"var(--muted)"}}>Total acumulado</span>
                   <span style={{fontSize:16,fontWeight:700,color:"var(--wine)"}}>{fmt(bankCredit.reduce((s,b)=>s+b.spent,0))}</span>
                 </div>
                 {bankCredit.filter(b=>b.spent>0).map(b=>{
                   const pct=b.limit>0?Math.min((b.spent/b.limit)*100,100):0;
+                  const isNext=b.nextInvoice&&b.nextInvoice.m!==vm;
                   return (
                     <div key={b.id} style={{marginBottom:10}}>
-                      <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+                      <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
                         <span style={{display:"flex",alignItems:"center",gap:6,fontSize:12,fontWeight:600}}>
                           <span style={{width:8,height:8,borderRadius:"50%",background:b.color,display:"inline-block"}}/>
                           {b.name}
+                          {isNext&&<span style={{fontSize:8,background:"rgba(0,214,143,.15)",color:"var(--green)",padding:"1px 5px",borderRadius:8,fontWeight:700}}>paga ✓</span>}
                         </span>
                         <span style={{fontSize:12,fontWeight:700,color:pct>90?"var(--wine)":pct>70?"var(--gold)":"var(--text)"}}>{fmt(b.spent)}{b.limit>0&&<span style={{fontSize:9,color:"var(--muted)",fontWeight:400}}> / {fmt(b.limit)}</span>}</span>
                       </div>
+                      <div style={{fontSize:9,color:isNext?"var(--green)":"var(--muted)",marginBottom:4}}>{b.nextInvoice?.label}</div>
                       {b.limit>0&&<div style={{height:5,background:"var(--border)",borderRadius:3,overflow:"hidden"}}>
                         <div style={{height:"100%",width:`${pct}%`,borderRadius:3,background:pct>90?"var(--wine)":pct>70?"var(--gold)":b.color}}/>
                       </div>}
                     </div>
                   );
                 })}
-                <div style={{fontSize:10,color:"var(--muted)",marginTop:4}}>Compras lançadas em Cartões este mês</div>
               </div>
             )}
             {catData.length>0&&(
@@ -1120,7 +1138,7 @@ function AppInner({session}){
         )}
 
         {!loading&&page==="cards"&&(
-          <CartoesPage banks={banks} expenseCats={expenseCats} vm={vm} vy={vy} creditData={creditData} setCreditData={setCreditData} monthData={data} setMonthData={setData}/>
+          <CartoesPage banks={banks} expenseCats={expenseCats} vm={vm} vy={vy} creditData={creditData} setCreditData={setCreditData} monthData={data} setMonthData={setData} bankCredit={bankCredit}/>
         )}
 
         {!loading&&page==="investments"&&(
