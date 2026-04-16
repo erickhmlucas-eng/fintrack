@@ -214,6 +214,7 @@ function AuthScreen(){
 function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData,setMonthData,bankCredit}){
   const [selectedBank,setSelectedBank]=useState(banks[0]?.name||"");
   const [showAddModal,setShowAddModal]=useState(false);
+  const [closingInvoice,setClosingInvoice]=useState(false);
   const catMap=Object.fromEntries(expenseCats.map(c=>[c.name,c]));
 
   const purchases=creditData.purchases||[];
@@ -232,8 +233,36 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
     return {...c,val};
   }).filter(c=>c.val>0).sort((a,b)=>b.val-a.val);
 
-  // Auto-invoice: purchases from prev month that haven't been invoiced yet
-  const pm=vm===0?11:vm-1, py=vm===0?vy-1:vy;
+  // Check if invoice already closed for this bank this month
+  const invoiceId=`invoice_${selectedBank}_${vy}_${vm}`;
+  const invoiceAlreadyClosed=(monthData.fixed||[]).some(f=>f.id===invoiceId);
+
+  // Next month
+  const nm=vm===11?0:vm+1, ny=vm===11?vy+1:vy;
+
+  // Close invoice: move current month purchases to next month fixed
+  function closeInvoice(){
+    if(!totalUsed||invoiceAlreadyClosed) return;
+    setClosingInvoice(true);
+    const fixedEntry={
+      id:invoiceId,
+      name:`Fatura ${selectedBank} — ${MONTHS_FULL[vm]}/${vy}`,
+      value:parseFloat(totalUsed.toFixed(2)),
+      paid:false,
+      isAutoInvoice:true,
+      autoInvoiceKey:invoiceId,
+    };
+    // Add to next month fixed
+    dbGet(monthKey(ny,nm)).then(existing=>{
+      const ex=existing||{incomes:[],expenses:[],fixed:[],investments:[],notes:""};
+      const alreadyThere=(ex.fixed||[]).some(f=>f.id===invoiceId);
+      if(!alreadyThere){
+        dbSet(monthKey(ny,nm),{...ex,fixed:[fixedEntry,...(ex.fixed||[])]});
+      }
+    }).finally(()=>setClosingInvoice(false));
+    // Mark as closed in current month data
+    setMonthData(d=>({...d,fixed:[...(d.fixed||[]),{...fixedEntry,closedInMonth:true}]}));
+  }
 
   function addPurchase(purchase){
     // Parse the chosen invoice month (e.g. "2026-4")
@@ -328,7 +357,9 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
               <span style={{width:12,height:12,borderRadius:"50%",background:bank?.color,display:"inline-block"}}/>
               <span style={{fontSize:14,fontWeight:700}}>{selectedBank}</span>
             </div>
-            <div style={{fontSize:11,color:"var(--muted)"}}>{bankCredit?.find(b=>b.name===selectedBank)?.nextInvoice?.label||`Próxima fatura — ${MONTHS_FULL[vm]}`}</div>
+            <div style={{fontSize:11,color:invoiceAlreadyClosed?"var(--green)":"var(--muted)"}}>
+              {invoiceAlreadyClosed?`✓ Fatura fechada — vai para ${MONTHS_FULL[nm]}`:`Fatura em aberto — ${MONTHS_FULL[vm]}`}
+            </div>
           </div>
           <div style={{textAlign:"right"}}>
             <div style={{fontSize:20,fontWeight:700,color:"var(--wine)"}}>{fmt(totalUsed)}</div>
@@ -346,11 +377,17 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
         </>}
       </div>
 
-      {/* Add purchase button */}
-      <button onClick={()=>setShowAddModal(true)}
-        style={{background:"var(--accent)",border:"none",color:"#fff",fontFamily:"'Sora',sans-serif",fontSize:13,fontWeight:700,borderRadius:11,padding:"12px",cursor:"pointer",width:"100%"}}>
-        + Lançar compra no crédito
-      </button>
+      {/* Actions */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+        <button onClick={()=>setShowAddModal(true)}
+          style={{background:"var(--accent)",border:"none",color:"#fff",fontFamily:"'Sora',sans-serif",fontSize:12,fontWeight:700,borderRadius:11,padding:"12px 8px",cursor:"pointer"}}>
+          + Lançar compra
+        </button>
+        <button onClick={closeInvoice} disabled={!totalUsed||invoiceAlreadyClosed||closingInvoice}
+          style={{background:invoiceAlreadyClosed?"rgba(0,214,143,.1)":"var(--surface)",border:`1px solid ${invoiceAlreadyClosed?"var(--green)":"var(--border)"}`,color:invoiceAlreadyClosed?"var(--green)":"var(--muted)",fontFamily:"'Sora',sans-serif",fontSize:12,fontWeight:700,borderRadius:11,padding:"12px 8px",cursor:"pointer",opacity:(!totalUsed||invoiceAlreadyClosed)?0.5:1}}>
+          {invoiceAlreadyClosed?`✓ Fatura fechada`:`Fechar fatura → ${MONTHS_FULL[nm]}`}
+        </button>
+      </div>
 
       {/* Category breakdown */}
       {catBreak.length>0&&(
@@ -595,30 +632,7 @@ function AppInner({session}){
       if(cr) setCreditData(cr);
       else setCreditData(EMPTY_CREDIT());
 
-      // ── Auto-invoice: ALWAYS check prev month credit, inject into fixed if not already there ──
-      const pm=vm===0?11:vm-1, py=vm===0?vy-1:vy;
-      const prevCredit=await dbGet(creditKey(py,pm));
-      if(prevCredit?.purchases?.length>0){
-        const byBank={};
-        prevCredit.purchases.forEach(p=>{
-          if(!byBank[p.bank]) byBank[p.bank]={bank:p.bank,total:0};
-          byBank[p.bank].total+=p.monthlyValue;
-        });
-        const autoFixed=Object.values(byBank).map(({bank,total})=>({
-          id:`auto_invoice_${bank}_${py}_${pm}`,
-          name:`Fatura ${bank} — ${MONTHS_FULL[pm]}/${py}`,
-          value:parseFloat(total.toFixed(2)),
-          paid:false,
-          isAutoInvoice:true,
-          autoInvoiceKey:`auto_invoice_${bank}_${py}_${pm}`,
-        }));
-        setData(d=>{
-          const existingIds=new Set((d.fixed||[]).map(f=>f.id));
-          const newAuto=autoFixed.filter(a=>!existingIds.has(a.id));
-          if(newAuto.length===0) return d;
-          return {...d,fixed:[...newAuto,...(d.fixed||[])]};
-        });
-      }
+      // Auto-invoice is now manual via "Fechar fatura" button in Cartões
 
       // ── Prev balance: read _balance saved by previous month directly ──
       const pm2=vm===0?11:vm-1, py2=vm===0?vy-1:vy;
@@ -696,17 +710,13 @@ function AppInner({session}){
   // Credit by bank from creditData
   // nextInvoiceMonth: if current month's invoice is paid in fixed, use next month
   function getNextInvoiceMonth(bankName){
-    const curInvoiceKey=`auto_invoice_${bankName}_${vy}_${vm}`;
-    const prevM=vm===0?11:vm-1, prevY=vm===0?vy-1:vy;
-    const prevInvoiceKey=`auto_invoice_${bankName}_${prevY}_${prevM}`;
-    // Check if prev month invoice is paid in current month fixed
-    const prevInvoicePaid=(data.fixed||[]).some(f=>(f.id===prevInvoiceKey||f.autoInvoiceKey===prevInvoiceKey)&&f.paid);
-    if(prevInvoicePaid){
-      // Next invoice = next month
+    const invoiceId=`invoice_${bankName}_${vy}_${vm}`;
+    const isClosed=(data.fixed||[]).some(f=>f.id===invoiceId);
+    if(isClosed){
       const nm=vm===11?0:vm+1, ny=vm===11?vy+1:vy;
-      return {m:nm,y:ny,label:`Próxima fatura — ${MONTHS_FULL[nm]}`};
+      return {m:nm,y:ny,label:`Próxima fatura — ${MONTHS_FULL[nm]}`,closed:true};
     }
-    return {m:vm,y:vy,label:`Fatura em aberto — ${MONTHS_FULL[vm]}`};
+    return {m:vm,y:vy,label:`Fatura em aberto — ${MONTHS_FULL[vm]}`,closed:false};
   }
   const bankCredit=banks.map(b=>({
     ...b,
@@ -991,7 +1001,7 @@ function AppInner({session}){
                 </div>
                 {bankCredit.filter(b=>b.spent>0).map(b=>{
                   const pct=b.limit>0?Math.min((b.spent/b.limit)*100,100):0;
-                  const isNext=b.nextInvoice&&b.nextInvoice.m!==vm;
+                  const isNext=b.nextInvoice?.closed;
                   return (
                     <div key={b.id} style={{marginBottom:10}}>
                       <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
