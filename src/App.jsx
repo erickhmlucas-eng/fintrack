@@ -236,13 +236,17 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
   const pm=vm===0?11:vm-1, py=vm===0?vy-1:vy;
 
   function addPurchase(purchase){
-    // If installments > 1, create entries for each future month
-    const newPurchases=[...purchases];
+    // Parse the chosen invoice month (e.g. "2026-4")
+    const [invoiceY, invoiceM]=purchase.invoiceMonth.split("-").map(Number);
+    const isCurrent=(invoiceY===vy&&invoiceM===vm);
+
     if(purchase.installments>1){
+      // Distribute parcels starting from chosen invoice month
+      const allParcels=[];
       for(let i=0;i<purchase.installments;i++){
-        const m=(vm+i)%12;
-        const y=vy+Math.floor((vm+i)/12);
-        newPurchases.push({
+        const totalM=invoiceM+i;
+        const m=totalM%12, y=invoiceY+Math.floor(totalM/12);
+        allParcels.push({
           ...purchase,
           id:uid(),
           monthYear:`${y}-${m}`,
@@ -251,27 +255,35 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
           name:`${purchase.name} (${i+1}/${purchase.installments})`,
         });
       }
-      // Save future months credit data
-      const grouped={};
-      newPurchases.forEach(p=>{
-        const key=p.monthYear||`${vy}-${vm}`;
-        if(!grouped[key]) grouped[key]=[];
-        grouped[key].push(p);
-      });
-      // Update current month
+      // Update current month state if any parcel is here
       const curKey=`${vy}-${vm}`;
-      setCreditData({purchases:newPurchases.filter(p=>p.monthYear===curKey||(p.installments===1&&!p.monthYear))});
-      // Save all future months
+      const curParcels=allParcels.filter(p=>p.monthYear===curKey);
+      if(curParcels.length>0){
+        setCreditData(d=>({purchases:[...curParcels,...(d.purchases||[])]}));
+      }
+      // Save all months to DB
+      const grouped={};
+      allParcels.forEach(p=>{if(!grouped[p.monthYear]) grouped[p.monthYear]=[];grouped[p.monthYear].push(p);});
       Object.entries(grouped).forEach(([key,ps])=>{
         const [y,m]=key.split("-").map(Number);
         dbGet(creditKey(y,m)).then(existing=>{
           const ex=existing||EMPTY_CREDIT();
-          dbSet(creditKey(y,m),{purchases:[...ex.purchases.filter(ep=>ep.groupId!==purchase.groupId),...ps]});
+          dbSet(creditKey(y,m),{purchases:[...(ex.purchases||[]).filter(ep=>ep.groupId!==purchase.groupId),...ps]});
         });
       });
     } else {
-      newPurchases.push({...purchase,id:uid(),monthYear:`${vy}-${vm}`,monthlyValue:purchase.totalValue,installmentNum:1});
-      setCreditData({purchases:newPurchases});
+      const p={...purchase,id:uid(),monthYear:`${invoiceY}-${invoiceM}`,monthlyValue:purchase.totalValue,installmentNum:1};
+      if(isCurrent){
+        // Add to current month state
+        setCreditData(d=>({purchases:[p,...(d.purchases||[])]}));
+      } else {
+        // Save directly to the target month in DB
+        dbGet(creditKey(invoiceY,invoiceM)).then(existing=>{
+          const ex=existing||EMPTY_CREDIT();
+          dbSet(creditKey(invoiceY,invoiceM),{purchases:[p,...(ex.purchases||[])]});
+        });
+        // Show toast
+      }
     }
     setShowAddModal(false);
   }
@@ -391,7 +403,12 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
 
 function CreditPurchaseForm({banks,expenseCats,selectedBank,vm,vy,onSave,onClose}){
   const dd=`${vy}-${String(vm+1).padStart(2,"0")}-${String(today.getDate()).padStart(2,"0")}`;
-  const [form,setForm]=useState({name:"",category:expenseCats[0]?.name||"Outros",bank:selectedBank,totalValue:"",installments:"1",date:dd});
+  // Invoice month options: current + next 3 months
+  const invoiceOptions=Array.from({length:4},(_,i)=>{
+    const m=(vm+i)%12, y=vy+Math.floor((vm+i)/12);
+    return {label:`Fatura de ${MONTHS_FULL[m]} ${y}`,value:`${y}-${m}`};
+  });
+  const [form,setForm]=useState({name:"",category:expenseCats[0]?.name||"Outros",bank:selectedBank,totalValue:"",installments:"1",date:dd,invoiceMonth:`${vy}-${vm}`});
   const upd=(k,v)=>setForm(f=>({...f,[k]:v}));
   const tv=parseFloat(String(form.totalValue||"0").replace(",","."))||0;
   const inst=parseInt(form.installments||"1")||1;
@@ -414,11 +431,16 @@ function CreditPurchaseForm({banks,expenseCats,selectedBank,vm,vy,onSave,onClose
           {banks.map(b=><option key={b.id} value={b.name}>{b.name}</option>)}
         </select>
       </div>
+      <div className="fg"><label className="fl">Cai na fatura de</label>
+        <select className="fi" value={form.invoiceMonth} onChange={e=>upd("invoiceMonth",e.target.value)}>
+          {invoiceOptions.map(o=><option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
+      </div>
       <div className="frow">
         <div className="fg"><label className="fl">Valor total (R$)</label><input className="fi" type="number" inputMode="decimal" placeholder="0,00" value={form.totalValue} onChange={e=>upd("totalValue",e.target.value)}/></div>
         <div className="fg"><label className="fl">Parcelas</label><input className="fi" type="number" inputMode="numeric" min="1" max="48" value={form.installments} onChange={e=>upd("installments",e.target.value)}/></div>
       </div>
-      {inst>1&&monthly>0&&<div style={{background:"rgba(155,140,255,.1)",border:"1px solid rgba(155,140,255,.25)",borderRadius:9,padding:"8px 11px",marginBottom:10,fontSize:12,color:"var(--accent)",fontWeight:600}}>{inst}x de {fmt(monthly)} · Fatura de {MONTHS_FULL[vm]} até {MONTHS_FULL[(vm+inst-1)%12]} {vy+Math.floor((vm+inst-1)/12)}</div>}
+      {inst>1&&monthly>0&&<div style={{background:"rgba(155,140,255,.1)",border:"1px solid rgba(155,140,255,.25)",borderRadius:9,padding:"8px 11px",marginBottom:10,fontSize:12,color:"var(--accent)",fontWeight:600}}>{inst}x de {fmt(monthly)} · A partir da fatura selecionada</div>}
       <div className="fg"><label className="fl">Data da compra</label><input className="fi" type="date" value={form.date} onChange={e=>upd("date",e.target.value)}/></div>
       <button className="savebtn" onClick={save} disabled={!form.name||!tv}>Adicionar {inst>1?`(${inst}x de ${fmt(monthly)})`:`(${fmt(tv)})`}</button>
     </>
@@ -563,43 +585,48 @@ function AppInner({session}){
       // Load credit data for this month
       const cr=await dbGet(creditKey(vy,vm));
       if(cr) setCreditData(cr);
-      else {
-        // Check if prev month had credit purchases — generate auto-invoice fixed
-        const pm=vm===0?11:vm-1, py=vm===0?vy-1:vy;
-        const prevCredit=await dbGet(creditKey(py,pm));
-        if(prevCredit?.purchases?.length>0){
-          // Group by bank
-          const byBank={};
-          prevCredit.purchases.forEach(p=>{
-            if(!byBank[p.bank]) byBank[p.bank]={bank:p.bank,total:0,items:[]};
-            byBank[p.bank].total+=p.monthlyValue;
-            byBank[p.bank].items.push(p);
-          });
-          // Create auto fixed invoices
-          const autoFixed=Object.values(byBank).map(({bank,total})=>({
-            id:`auto_invoice_${bank}_${py}_${pm}`,
-            name:`Fatura ${bank} — ${MONTHS_FULL[pm]}/${py}`,
-            value:parseFloat(total.toFixed(2)),
-            paid:false,
-            isAutoInvoice:true,
-            autoInvoiceKey:`auto_invoice_${bank}_${py}_${pm}`,
-          }));
-          setData(d=>({...d,fixed:[...autoFixed,...(d.fixed||[]).filter(f=>!f.isAutoInvoice)]}));
-        }
-        setCreditData(EMPTY_CREDIT());
+      else setCreditData(EMPTY_CREDIT());
+
+      // ── Auto-invoice: ALWAYS check prev month credit, inject into fixed if not already there ──
+      const pm=vm===0?11:vm-1, py=vm===0?vy-1:vy;
+      const prevCredit=await dbGet(creditKey(py,pm));
+      if(prevCredit?.purchases?.length>0){
+        const byBank={};
+        prevCredit.purchases.forEach(p=>{
+          if(!byBank[p.bank]) byBank[p.bank]={bank:p.bank,total:0};
+          byBank[p.bank].total+=p.monthlyValue;
+        });
+        const autoFixed=Object.values(byBank).map(({bank,total})=>({
+          id:`auto_invoice_${bank}_${py}_${pm}`,
+          name:`Fatura ${bank} — ${MONTHS_FULL[pm]}/${py}`,
+          value:parseFloat(total.toFixed(2)),
+          paid:false,
+          isAutoInvoice:true,
+          autoInvoiceKey:`auto_invoice_${bank}_${py}_${pm}`,
+        }));
+        setData(d=>{
+          const existingIds=new Set((d.fixed||[]).map(f=>f.id));
+          const newAuto=autoFixed.filter(a=>!existingIds.has(a.id));
+          if(newAuto.length===0) return d;
+          return {...d,fixed:[...newAuto,...(d.fixed||[])]};
+        });
       }
 
-      // ── FIX: Calculate prev balance correctly ──
+      // ── Prev balance: read _balance saved by previous month directly ──
       const pm2=vm===0?11:vm-1, py2=vm===0?vy-1:vy;
       const pr=await dbGet(monthKey(py2,pm2));
       if(pr){
-        const inc=(pr.incomes||[]).reduce((s,t)=>s+t.value,0);
-        const exp=(pr.expenses||[]).reduce((s,t)=>s+t.value,0);
-        // Only count paid fixed items for balance calculation
-        const fix=(pr.fixed||[]).reduce((s,t)=>t.paid?(s+(t.value||0)):s,0);
-        const inv=(pr.investments||[]).filter(e=>!isWithdrawal(e)).reduce((s,t)=>s+t.value,0);
-        const bal=inc-exp-fix-inv;
-        setPrevBalance(Math.max(bal,0));
+        // Use stored _balance if available (exact saldo shown in prev month)
+        if(typeof pr._balance === 'number'){
+          setPrevBalance(pr._balance);
+        } else {
+          // Fallback: compute from scratch
+          const inc=(pr.incomes||[]).reduce((s,t)=>s+t.value,0);
+          const exp=(pr.expenses||[]).reduce((s,t)=>s+t.value,0);
+          const fix=(pr.fixed||[]).reduce((s,t)=>t.paid?(s+(t.value||0)):s,0);
+          const inv=(pr.investments||[]).filter(e=>!isWithdrawal(e)).reduce((s,t)=>s+t.value,0);
+          setPrevBalance(Math.max(inc-exp-fix-inv,0));
+        }
       }
       setLoading(false);
     })();
@@ -612,16 +639,21 @@ function AppInner({session}){
     setYearCache(cache);
   },[vy]);
 
-  // Debounced save — month data
+  // Debounced save — saves _balance so next month reads it directly
   useEffect(()=>{
     if(!loaded||loading) return;
     clearTimeout(saveTimer.current);
     setSyncing(true);
     saveTimer.current=setTimeout(()=>{
-      dbSet(monthKey(vy,vm),data).then(()=>loadYearCache()).finally(()=>setSyncing(false));
+      const inc=(data.incomes||[]).reduce((s,t)=>s+t.value,0);
+      const exp=(data.expenses||[]).reduce((s,t)=>s+t.value,0);
+      const fix=(data.fixed||[]).reduce((s,t)=>t.paid?(s+(t.value||0)):s,0);
+      const inv=(data.investments||[]).filter(e=>!isWithdrawal(e)).reduce((s,t)=>s+t.value,0);
+      const computedBalance=Math.max(inc+prevBalance-exp-fix-inv,0);
+      dbSet(monthKey(vy,vm),{...data,_balance:computedBalance}).then(()=>loadYearCache()).finally(()=>setSyncing(false));
     },800);
     return ()=>clearTimeout(saveTimer.current);
-  },[data,vm,vy,loaded,loading,loadYearCache]);
+  },[data,vm,vy,loaded,loading,loadYearCache,prevBalance]);
 
   // Debounced save — credit data
   useEffect(()=>{
@@ -927,6 +959,33 @@ function AppInner({session}){
               <GoalBar label="Reserva de Emergência" icon="🛡️" current={emergencyTotal} goal={settings.emergencyGoal} color="var(--green)"/>
               <GoalBar label={settings.personalGoalName} icon="🎯" current={personalTotal} goal={settings.personalGoalValue} color="var(--accent)"/>
             </div>
+            {bankCredit.some(b=>b.spent>0)&&(
+              <div className="card">
+                <div className="st" style={{marginBottom:10}}>Próximas faturas 💳</div>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                  <span style={{fontSize:11,color:"var(--muted)"}}>Total acumulado</span>
+                  <span style={{fontSize:16,fontWeight:700,color:"var(--wine)"}}>{fmt(bankCredit.reduce((s,b)=>s+b.spent,0))}</span>
+                </div>
+                {bankCredit.filter(b=>b.spent>0).map(b=>{
+                  const pct=b.limit>0?Math.min((b.spent/b.limit)*100,100):0;
+                  return (
+                    <div key={b.id} style={{marginBottom:10}}>
+                      <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+                        <span style={{display:"flex",alignItems:"center",gap:6,fontSize:12,fontWeight:600}}>
+                          <span style={{width:8,height:8,borderRadius:"50%",background:b.color,display:"inline-block"}}/>
+                          {b.name}
+                        </span>
+                        <span style={{fontSize:12,fontWeight:700,color:pct>90?"var(--wine)":pct>70?"var(--gold)":"var(--text)"}}>{fmt(b.spent)}{b.limit>0&&<span style={{fontSize:9,color:"var(--muted)",fontWeight:400}}> / {fmt(b.limit)}</span>}</span>
+                      </div>
+                      {b.limit>0&&<div style={{height:5,background:"var(--border)",borderRadius:3,overflow:"hidden"}}>
+                        <div style={{height:"100%",width:`${pct}%`,borderRadius:3,background:pct>90?"var(--wine)":pct>70?"var(--gold)":b.color}}/>
+                      </div>}
+                    </div>
+                  );
+                })}
+                <div style={{fontSize:10,color:"var(--muted)",marginTop:4}}>Compras lançadas em Cartões este mês</div>
+              </div>
+            )}
             {catData.length>0&&(
               <div className="card">
                 <div className="st" style={{marginBottom:10}}>Gastos por categoria (débito/pix)</div>
