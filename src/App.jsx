@@ -221,7 +221,6 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
 
   const purchases=(creditData?.purchases)||[];
   const bank=banks?.find(b=>b.name===selectedBank)||banks?.[0];
-  if(!bank) return <div className="pg"><div className="empty">Configure seus cartões em ⚙️ Config.</div></div>;
 
   // Purchases for selected bank this month
   const bankPurchases=purchases.filter(p=>p.bank===selectedBank);
@@ -334,6 +333,12 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
   // Check if there's an auto-invoice fixed for this bank from prev month
   const autoInvoiceKey=`auto_invoice_${selectedBank}_${py}_${pm}`;
   const hasAutoInvoice=(monthData.fixed||[]).some(f=>f.id===autoInvoiceKey||f.autoInvoiceKey===autoInvoiceKey);
+
+  if(!bank) return (
+    <div className="pg">
+      <div className="empty">Nenhum cartão configurado.<br/>Vá em <strong style={{color:"var(--accent)"}}>⚙️ Config</strong> para adicionar seus bancos.</div>
+    </div>
+  );
 
   return (
     <div className="pg">
