@@ -7,7 +7,9 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 async function dbGet(key) {
   try {
-    const { data } = await supabase.from("user_data").select("value").eq("key", key).single();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return null;
+    const { data } = await supabase.from("user_data").select("value").eq("key", key).eq("user_id", user.id).single();
     return data?.value ?? null;
   } catch(_) { return null; }
 }
@@ -66,7 +68,7 @@ const DEBTS_KEY = "fintrack:debts:v9";
 const EMPTY_MONTH = () => ({incomes:[],expenses:[],fixed:[],investments:[],notes:""});
 const EMPTY_CREDIT = () => ({purchases:[]});
 const DEFAULT_SETTINGS = {
-  name:"ERICK",
+  name:"",
   emergencyGoal:10000,emergencyBase:0,emergencyDelta:0,
   personalGoalName:"Meta X",personalGoalValue:100000,personalBase:0,personalDelta:0,
   banks:DEFAULT_BANKS,catBudgets:{},expenseCats:DEFAULT_EXPENSE_CATS,
@@ -217,8 +219,9 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
   const [closingInvoice,setClosingInvoice]=useState(false);
   const catMap=Object.fromEntries(expenseCats.map(c=>[c.name,c]));
 
-  const purchases=creditData.purchases||[];
-  const bank=banks.find(b=>b.name===selectedBank)||banks[0];
+  const purchases=(creditData?.purchases)||[];
+  const bank=banks?.find(b=>b.name===selectedBank)||banks?.[0];
+  if(!bank) return <div className="pg"><div className="empty">Configure seus cartões em ⚙️ Config.</div></div>;
 
   // Purchases for selected bank this month
   const bankPurchases=purchases.filter(p=>p.bank===selectedBank);
