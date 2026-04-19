@@ -330,10 +330,6 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
     setCreditData({purchases:purchases.filter(p=>p.id!==id)});
   }
 
-  // Check if there's an auto-invoice fixed for this bank from prev month
-  const autoInvoiceKey=`auto_invoice_${selectedBank}_${py}_${pm}`;
-  const hasAutoInvoice=(monthData.fixed||[]).some(f=>f.id===autoInvoiceKey||f.autoInvoiceKey===autoInvoiceKey);
-
   if(!bank) return (
     <div className="pg">
       <div className="empty">Nenhum cartão configurado.<br/>Vá em <strong style={{color:"var(--accent)"}}>⚙️ Config</strong> para adicionar seus bancos.</div>
