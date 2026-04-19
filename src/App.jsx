@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { createClient } from "@supabase/supabase-js";
 
 const SUPABASE_URL = "https://rjcgvlstriiepixogqnl.supabase.co";
@@ -22,6 +22,25 @@ async function dbSet(key, value) {
       { onConflict: "user_id,key" }
     );
   } catch(_) {}
+}
+
+// ─── ERROR BOUNDARY ──────────────────────────────────────────────────────────
+class ErrorBoundary extends React.Component{
+  constructor(props){super(props);this.state={hasError:false,error:null};}
+  static getDerivedStateFromError(error){return{hasError:true,error};}
+  componentDidCatch(error,info){console.error("FinTrack Error:",error,info);}
+  render(){
+    if(this.state.hasError){
+      return(
+        <div style={{padding:24,background:"var(--card)",border:"1px solid var(--border)",borderRadius:14,margin:12}}>
+          <div style={{fontSize:14,fontWeight:700,color:"var(--wine)",marginBottom:8}}>⚠️ Erro nesta seção</div>
+          <div style={{fontSize:12,color:"var(--muted)",marginBottom:12}}>{String(this.state.error?.message||"Erro desconhecido")}</div>
+          <button onClick={()=>this.setState({hasError:false,error:null})} style={{background:"var(--accent)",border:"none",color:"#fff",fontFamily:"'Sora',sans-serif",fontSize:12,fontWeight:700,borderRadius:9,padding:"8px 16px",cursor:"pointer"}}>Tentar novamente</button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
 }
 
 // ─── CONSTANTS ────────────────────────────────────────────────────────────────
@@ -442,7 +461,7 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
 
       {showAddModal&&(
         <Modal onClose={()=>setShowAddModal(false)} tall>
-          <CreditPurchaseForm banks={banks} expenseCats={expenseCats} selectedBank={selectedBank} vm={vm} vy={vy} onSave={addPurchase} onClose={()=>setShowAddModal(false)} defaultInvoiceMonth={bankCredit?.find(b=>b.name===selectedBank)?.nextInvoice?`${bankCredit.find(b=>b.name===selectedBank).nextInvoice.y}-${bankCredit.find(b=>b.name===selectedBank).nextInvoice.m}`:undefined}/>
+          <CreditPurchaseForm banks={banks} expenseCats={expenseCats} selectedBank={selectedBank} vm={vm} vy={vy} onSave={addPurchase} onClose={()=>setShowAddModal(false)} defaultInvoiceMonth={`${vy}-${vm}`}/>
         </Modal>
       )}
     </div>
@@ -714,13 +733,17 @@ function AppInner({session}){
   // Credit by bank from creditData
   // nextInvoiceMonth: if current month's invoice is paid in fixed, use next month
   function getNextInvoiceMonth(bankName){
-    const invoiceId=`invoice_${bankName}_${vy}_${vm}`;
-    const isClosed=(data.fixed||[]).some(f=>f.id===invoiceId);
-    if(isClosed){
-      const nm=vm===11?0:vm+1, ny=vm===11?vy+1:vy;
-      return {m:nm,y:ny,label:`Próxima fatura — ${MONTHS_FULL[nm]}`,closed:true};
+    try{
+      const invoiceId=`invoice_${bankName}_${vy}_${vm}`;
+      const isClosed=(data.fixed||[]).some(f=>f.id===invoiceId);
+      if(isClosed){
+        const nm=vm===11?0:vm+1, ny=vm===11?vy+1:vy;
+        return {m:nm,y:ny,label:`Próxima fatura — ${MONTHS_FULL[nm]}`,closed:true};
+      }
+      return {m:vm,y:vy,label:`Fatura em aberto — ${MONTHS_FULL[vm]}`,closed:false};
+    }catch(_){
+      return {m:vm,y:vy,label:`Fatura em aberto — ${MONTHS_FULL[vm]}`,closed:false};
     }
-    return {m:vm,y:vy,label:`Fatura em aberto — ${MONTHS_FULL[vm]}`,closed:false};
   }
   const bankCredit=banks.map(b=>({
     ...b,
@@ -1152,7 +1175,9 @@ function AppInner({session}){
         )}
 
         {!loading&&page==="cards"&&(
+          <ErrorBoundary key={`cards-${vm}-${vy}`}>
           <CartoesPage banks={banks} expenseCats={expenseCats} vm={vm} vy={vy} creditData={creditData} setCreditData={setCreditData} monthData={data} setMonthData={setData} bankCredit={bankCredit}/>
+        </ErrorBoundary>
         )}
 
         {!loading&&page==="investments"&&(
