@@ -1022,10 +1022,50 @@ function AppInner({session}){
         .ml{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--text2);margin-bottom:4px;}
         .mv{font-size:13px;font-weight:800;letter-spacing:-.3px;}
         .mv.g{color:var(--green);}.mv.w{color:var(--red);}.mv.p{color:var(--accent);}.mv.b{color:var(--blue);}.mv.gold{color:var(--gold);}.mv.gr{color:var(--muted);}
+
+        /* ── DESKTOP RESPONSIVE ── */
+        @media(min-width:768px){
+          .desktop-layout{display:flex;min-height:100vh;}
+          .desktop-sidebar{width:240px;flex-shrink:0;background:var(--card);border-right:1px solid var(--border);display:flex;flex-direction:column;padding:0 0 24px;position:sticky;top:0;height:100vh;overflow-y:auto;}
+          .desktop-main{flex:1;min-width:0;max-width:680px;}
+          .desktop-sidebar-header{padding:20px 20px 18px;border-bottom:1px solid var(--border);}
+          .desktop-sidebar-logo{font-size:20px;font-weight:800;letter-spacing:-.5px;}
+          .desktop-sidebar-logo em{color:var(--accent);font-style:normal;}
+          .desktop-sidebar-user{margin-top:12px;display:flex;align-items:center;gap:10px;}
+          .desktop-sidebar-avatar{width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;font-size:13px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+          .desktop-sidebar-name{font-size:13px;font-weight:700;}
+          .desktop-sidebar-email{font-size:10px;color:var(--muted);}
+          .desktop-sidebar-nav{flex:1;padding:10px;}
+          .desktop-snav-item{display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:12px;cursor:pointer;margin-bottom:2px;color:var(--text2);font-size:13px;font-weight:500;border:none;background:none;width:100%;text-align:left;font-family:'Plus Jakarta Sans',sans-serif;transition:all .15s;}
+          .desktop-snav-item:hover{background:var(--card2);}
+          .desktop-snav-item.active{background:var(--accent-dim);color:var(--accent);font-weight:700;}
+          .desktop-snav-icon{font-size:16px;width:20px;text-align:center;flex-shrink:0;}
+          .desktop-sidebar-footer{padding:14px 16px 0;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:8px;}
+          .desktop-theme-toggle{display:flex;align-items:center;justify-content:space-between;padding:9px 12px;background:var(--card2);border-radius:12px;border:1px solid var(--border);cursor:pointer;}
+          .desktop-signout{display:flex;align-items:center;gap:8px;padding:9px 12px;border-radius:12px;cursor:pointer;color:var(--red);font-size:13px;font-weight:600;border:none;background:none;width:100%;font-family:'Plus Jakarta Sans',sans-serif;}
+          .desktop-signout:hover{background:var(--red-dim);}
+          .app{max-width:100%;padding-bottom:0;}
+          .topbar{display:none;}
+          .hamburger{display:none;}
+          .sidebar-overlay{display:none;}
+          .sidebar{display:none;}
+          .fab{bottom:24px;right:24px;}
+          .metrics4{padding:0 20px;}
+          .health-card{margin:10px 20px 0;}
+          .summary-card{margin:10px 20px 0;}
+          .pg{padding:10px 20px 6px;}
+          .month-nav{padding:12px 20px 6px;}
+          .hero{padding:10px 20px 16px;}
+        }
+        @media(max-width:767px){
+          .desktop-layout{display:block;}
+          .desktop-sidebar{display:none;}
+          .desktop-main{width:100%;}
+        }
       `}</style>
 
-      <div className={`app ${theme}`}>
-        {/* ── SIDEBAR ── */}
+      <div className={`${theme}`} style={{minHeight:"100vh",background:"var(--bg)",color:"var(--text)"}}>
+        {/* ── MOBILE: Sidebar overlay ── */}
         {menuOpen&&<div className="sidebar-overlay" onClick={()=>setMenuOpen(false)}/>}
         {menuOpen&&(
           <div className="sidebar">
@@ -1058,26 +1098,57 @@ function AppInner({session}){
           </div>
         )}
 
-        {/* ── TOPBAR ── */}
-        <div className="topbar">
-          <div className="topbar-left">
-            <button className="hamburger" onClick={()=>setMenuOpen(o=>!o)}>
-              <span/><span/><span/>
-            </button>
-            <div className="logo-text">Fin<em>Track</em></div>
+        <div className="desktop-layout">
+          {/* ── DESKTOP: Sidebar fixa ── */}
+          <div className="desktop-sidebar">
+            <div className="desktop-sidebar-header">
+              <div className="desktop-sidebar-logo">Fin<em>Track</em></div>
+              <div className="desktop-sidebar-user">
+                <div className="desktop-sidebar-avatar">{(settings.name||"U").slice(0,2).toUpperCase()}</div>
+                <div>
+                  <div className="desktop-sidebar-name">{settings.name||"Usuário"}</div>
+                  <div className="desktop-sidebar-email">{session?.user?.email}</div>
+                </div>
+              </div>
+            </div>
+            <div className="desktop-sidebar-nav">
+              {NAV.map(n=>(
+                <button key={n.id} className={`desktop-snav-item${page===n.id?" active":""}`} onClick={()=>setPage(n.id)}>
+                  <span className="desktop-snav-icon">{n.icon}</span>{n.label}
+                </button>
+              ))}
+            </div>
+            <div className="desktop-sidebar-footer">
+              <div className="desktop-theme-toggle" onClick={toggleTheme}>
+                <span style={{fontSize:13,fontWeight:500,color:"var(--text2)",display:"flex",alignItems:"center",gap:8}}>{theme==="dark"?"🌙 Tema escuro":"☀️ Tema claro"}</span>
+                <div className={`toggle-pill${theme==="light"?" on":""}`}/>
+              </div>
+              <button className="desktop-signout" onClick={()=>supabase.auth.signOut()}>🚪 Sair da conta</button>
+            </div>
           </div>
-          <div className="topbar-right">
-            {syncing&&<span style={{fontSize:14}}>☁️</span>}
-            <div className="avatar">{(settings.name||"U").slice(0,2).toUpperCase()}</div>
-          </div>
-        </div>
 
-        {/* ── MONTH NAV ── */}
-        <div className="month-nav">
-          <button onClick={prevMonth}>‹</button>
-          <span className="month-label">{MONTHS_FULL[vm]} {vy}</span>
-          <button onClick={nextMonth}>›</button>
-        </div>
+          {/* ── MAIN CONTENT ── */}
+          <div className={`app ${theme} desktop-main`}>
+            {/* ── MOBILE TOPBAR ── */}
+            <div className="topbar">
+              <div className="topbar-left">
+                <button className="hamburger" onClick={()=>setMenuOpen(o=>!o)}>
+                  <span/><span/><span/>
+                </button>
+                <div className="logo-text">Fin<em>Track</em></div>
+              </div>
+              <div className="topbar-right">
+                {syncing&&<span style={{fontSize:14}}>☁️</span>}
+                <div className="avatar">{(settings.name||"U").slice(0,2).toUpperCase()}</div>
+              </div>
+            </div>
+
+            {/* ── MONTH NAV ── */}
+            <div className="month-nav">
+              <button onClick={prevMonth}>‹</button>
+              <span className="month-label">{MONTHS_FULL[vm]} {vy}{syncing&&" ☁️"}</span>
+              <button onClick={nextMonth}>›</button>
+            </div>
 
         {loading&&<div className="loading-overlay"><div className="loading-dot"/><span>Carregando {MONTHS_FULL[vm]}...</span></div>}
 
@@ -1461,7 +1532,9 @@ function AppInner({session}){
         {!loading&&page==="settings"&&<SettingsPage settings={settings} setSettings={setSettings} data={data} setData={setData} userEmail={session?.user?.email} expenseCats={expenseCats}/>}
 
 
-      </div>
+          </div>{/* desktop-main */}
+        </div>{/* desktop-layout */}
+      </div>{/* theme wrapper */}
 
       {fabType&&<button className="fab" onClick={()=>openModal(fabType)}>+</button>}
       {toast&&<Toast msg={toast} onDone={()=>setToast(null)}/>}
