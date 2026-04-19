@@ -1082,6 +1082,7 @@ function AppInner({session}){
         {loading&&<div className="loading-overlay"><div className="loading-dot"/><span>Carregando {MONTHS_FULL[vm]}...</span></div>}
 
         {!loading&&page==="dashboard"&&(
+          <>
           {/* ── HERO ── */}
           <div className="hero">
             <div className="hero-greeting">Olá, {settings.name||"👋"}</div>
@@ -1273,6 +1274,7 @@ function AppInner({session}){
               <textarea className="notesarea" placeholder="Ajustes, onde passou do esperado, decisões pro próximo mês…" value={data.notes||""} onChange={e=>setData(d=>({...d,notes:e.target.value}))}/>
             </div>
           </div>
+          </>
         )}
 
         {!loading&&page==="incomes"&&(
