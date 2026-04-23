@@ -170,8 +170,8 @@ function Toast({msg,onDone}){
 function Modal({onClose,children,tall=false}){
   useEffect(()=>{document.body.style.overflow="hidden";return()=>{document.body.style.overflow="";};},[]);
   return (
-    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.87)",backdropFilter:"blur(6px)",zIndex:1000,display:"flex",alignItems:"flex-end",justifyContent:"center"}} onClick={e=>{if(e.target===e.currentTarget)onClose();}}>
-      <div style={{background:"var(--card)",border:"1px solid var(--border2)",borderRadius:"20px 20px 0 0",width:"100%",maxWidth:520,padding:"20px 18px 36px",maxHeight:tall?"95vh":"88vh",overflowY:"auto"}} onClick={e=>e.stopPropagation()}>
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.75)",backdropFilter:"blur(8px)",zIndex:1000,display:"flex",alignItems:"flex-end",justifyContent:"center"}} onClick={e=>{if(e.target===e.currentTarget)onClose();}}>
+      <div style={{background:"var(--surface)",border:"1px solid var(--border2)",borderRadius:"20px 20px 0 0",width:"100%",maxWidth:520,padding:"22px 20px 40px",maxHeight:tall?"95vh":"88vh",overflowY:"auto",color:"var(--text)"}} onClick={e=>e.stopPropagation()}>
         {children}
       </div>
     </div>
@@ -560,8 +560,8 @@ function BulkPanel({type,banks,expenseCats,vy,vm,onConfirm,onClose}){
       <div className="mhdr"><div className="mtitle">📋 Colar em lote — {labels[type]}</div><button className="mclose" onClick={onClose}>✕</button></div>
       {!processed?(
         <>
-          <div style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:9,padding:10,marginBottom:10,fontSize:10,color:"var(--muted)",lineHeight:1.8,fontFamily:"monospace"}}>{examples[type]}</div>
-          <textarea style={{width:"100%",background:"var(--surface)",border:"1px solid var(--border)",color:"var(--text)",fontFamily:"'Sora',sans-serif",fontSize:13,borderRadius:10,padding:11,resize:"vertical",minHeight:130,outline:"none"}} placeholder={`Cole aqui...\n\nEx:\n${examples[type]}`} value={text} onChange={e=>setText(e.target.value)} autoFocus/>
+          <div style={{background:"var(--card2)",border:"1px solid var(--border2)",borderRadius:10,padding:12,marginBottom:10,fontSize:11,color:"var(--text2)",lineHeight:1.9,fontFamily:"monospace",fontWeight:500}}>{examples[type]}</div>
+          <textarea style={{width:"100%",background:"var(--card2)",border:"1px solid var(--border2)",color:"var(--text)",fontFamily:"'Plus Jakarta Sans',sans-serif",fontSize:13,borderRadius:12,padding:12,resize:"vertical",minHeight:130,outline:"none",fontWeight:500}} placeholder={`Cole aqui...\n\nEx:\n${examples[type]}`} value={text} onChange={e=>setText(e.target.value)} autoFocus/>
           <button className="savebtn" style={{marginTop:10}} onClick={process} disabled={!text.trim()}>Processar →</button>
         </>
       ):(
@@ -980,19 +980,19 @@ function AppInner({session}){
         .fab:active{transform:scale(.92);}
         .mhdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;}
         .mtitle{font-size:15px;font-weight:800;}
-        .mclose{background:none;border:none;color:var(--text2);font-size:22px;cursor:pointer;padding:2px 6px;}
-        .fl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--text2);margin-bottom:6px;display:block;}
-        .fi{width:100%;background:var(--surface);border:1px solid var(--border);color:var(--text);font-family:'Plus Jakarta Sans',sans-serif;font-size:14px;border-radius:12px;padding:12px 14px;outline:none;transition:border-color .2s;-webkit-appearance:none;}
+        .mclose{background:none;border:none;color:var(--text);font-size:22px;cursor:pointer;padding:2px 6px;opacity:.6;}
+        .fl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--text);margin-bottom:6px;display:block;opacity:.7;}
+        .fi{width:100%;background:var(--card2);border:1px solid var(--border2);color:var(--text);font-family:'Plus Jakarta Sans',sans-serif;font-size:14px;border-radius:12px;padding:12px 14px;outline:none;transition:border-color .2s;-webkit-appearance:none;font-weight:500;}
         .fi:focus{border-color:var(--accent);}
         .fg{margin-bottom:12px;}
         .frow{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
         .catgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;}
-        .catopt{border:1px solid var(--border);background:var(--surface);color:var(--text2);font-family:'Plus Jakarta Sans',sans-serif;font-size:10px;font-weight:600;border-radius:10px;padding:8px 4px;cursor:pointer;text-align:center;line-height:1.3;transition:all .12s;}
+        .catopt{border:1px solid var(--border2);background:var(--card2);color:var(--text);font-family:'Plus Jakarta Sans',sans-serif;font-size:10px;font-weight:600;border-radius:10px;padding:8px 4px;cursor:pointer;text-align:center;line-height:1.3;transition:all .12s;}
         .savebtn{width:100%;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;border:none;font-family:'Plus Jakarta Sans',sans-serif;font-size:14px;font-weight:700;border-radius:13px;padding:14px;cursor:pointer;margin-top:6px;}
         .savebtn:active{opacity:.85;}.savebtn:disabled{opacity:.4;cursor:not-allowed;}
         select.fi{appearance:none;-webkit-appearance:none;}
         .divider{height:1px;background:var(--border);margin:14px 0;}
-        .notesarea{width:100%;background:var(--surface);border:1px solid var(--border);color:var(--text);font-family:'Plus Jakarta Sans',sans-serif;font-size:13px;border-radius:12px;padding:12px;resize:vertical;min-height:80px;outline:none;}
+        .notesarea{width:100%;background:var(--card2);border:1px solid var(--border2);color:var(--text);font-family:'Plus Jakarta Sans',sans-serif;font-size:13px;border-radius:12px;padding:12px;resize:vertical;min-height:80px;outline:none;font-weight:500;}
         .notesarea:focus{border-color:var(--accent);}
         .empty{text-align:center;color:var(--muted);font-size:13px;padding:36px 0;line-height:1.8;}
         .alert{display:flex;align-items:center;gap:10px;padding:11px 14px;border-radius:12px;font-size:12px;font-weight:500;}
