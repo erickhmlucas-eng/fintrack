@@ -171,7 +171,7 @@ function Modal({onClose,children,tall=false}){
   useEffect(()=>{document.body.style.overflow="hidden";return()=>{document.body.style.overflow="";};},[]);
   return (
     <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.75)",backdropFilter:"blur(8px)",zIndex:1000,display:"flex",alignItems:"flex-end",justifyContent:"center"}} onClick={e=>{if(e.target===e.currentTarget)onClose();}}>
-      <div style={{background:"var(--surface)",border:"1px solid var(--border2)",borderRadius:"20px 20px 0 0",width:"100%",maxWidth:520,padding:"22px 20px 40px",maxHeight:tall?"95vh":"88vh",overflowY:"auto",color:"var(--text)"}} onClick={e=>e.stopPropagation()}>
+      <div style={{background:"var(--card)",border:"1px solid var(--border2)",borderRadius:"20px 20px 0 0",width:"100%",maxWidth:520,padding:"22px 20px 40px",maxHeight:tall?"95vh":"88vh",overflowY:"auto",color:"var(--text)"}} onClick={e=>e.stopPropagation()}>
         {children}
       </div>
     </div>
@@ -210,12 +210,12 @@ function AuthScreen(){
             ))}
           </div>
           <div style={{marginBottom:12}}>
-            <label style={{display:"block",fontSize:9,fontWeight:700,textTransform:"uppercase",letterSpacing:".7px",color:"var(--muted)",marginBottom:5}}>E-mail</label>
+            <label style={{display:"block",fontSize:11,fontWeight:600,letterSpacing:".04em",color:"var(--text)",opacity:.7,marginBottom:5}}>E-mail</label>
             <input value={email} onChange={e=>setEmail(e.target.value)} style={{width:"100%",background:"var(--surface)",border:"1px solid var(--border)",color:"var(--text)",fontFamily:"'Sora',sans-serif",fontSize:14,borderRadius:10,padding:"11px 12px",outline:"none",boxSizing:"border-box"}} placeholder="seu@email.com" type="email"/>
           </div>
           {mode!=="reset"&&(
             <div style={{marginBottom:16}}>
-              <label style={{display:"block",fontSize:9,fontWeight:700,textTransform:"uppercase",letterSpacing:".7px",color:"var(--muted)",marginBottom:5}}>Senha</label>
+              <label style={{display:"block",fontSize:11,fontWeight:600,letterSpacing:".04em",color:"var(--text)",opacity:.7,marginBottom:5}}>Senha</label>
               <input value={password} onChange={e=>setPassword(e.target.value)} style={{width:"100%",background:"var(--surface)",border:"1px solid var(--border)",color:"var(--text)",fontFamily:"'Sora',sans-serif",fontSize:14,borderRadius:10,padding:"11px 12px",outline:"none",boxSizing:"border-box"}} placeholder="••••••••" type="password" onKeyDown={e=>e.key==="Enter"&&handle()}/>
             </div>
           )}
@@ -910,7 +910,7 @@ export default function FinTrack(){
     return ()=>subscription.unsubscribe();
   },[]);
   if(authLoading) return <div style={{minHeight:"100vh",background:"var(--bg)",display:"flex",alignItems:"center",justifyContent:"center",color:"var(--muted)",fontFamily:"'Sora',sans-serif"}}><style>{`@import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;700&display=swap');:root{--bg:#07070f;--muted:#6060a0;}`}</style>Carregando...</div>;
-  if(!session) return <><style>{`@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap');*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}html,body{background:#09090f;color:#f0f0ff;font-family:'Plus Jakarta Sans',sans-serif;}.dark{--bg:#09090f;--surface:#111118;--card:#16161f;--border:rgba(255,255,255,.07);--border2:rgba(255,255,255,.12);--text:#f0f0ff;--text2:#9090b0;--muted:#505070;--green:#22c55e;--red:#ef4444;--gold:#f59e0b;--accent:#6366f1;--accent2:#8b5cf6;--accent-dim:rgba(99,102,241,.15);--wine:#ef4444;}`}</style><div className="dark"><AuthScreen/></div></>;
+  if(!session) return <><style>{`@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap');*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}html,body{background:#09090f;color:#f0f0ff;font-family:'Plus Jakarta Sans',sans-serif;}.dark{--bg:#09090f;--surface:#111118;--card:#16161f;--card2:#1c1c28;--border:rgba(255,255,255,.07);--border2:rgba(255,255,255,.18);--text:#f0f0ff;--text2:#b0b0cc;--muted:#505070;--green:#22c55e;--green-dim:rgba(34,197,94,.12);--red:#ef4444;--red-dim:rgba(239,68,68,.12);--gold:#f59e0b;--gold-dim:rgba(245,158,11,.12);--accent:#6366f1;--accent2:#8b5cf6;--accent-dim:rgba(99,102,241,.15);--blue:#3b82f6;--blue-dim:rgba(59,130,246,.12);--wine:#ef4444;}`}</style><div className="dark"><AuthScreen/></div></>;
   return <AppInner session={session}/>;
 }
 
@@ -1175,7 +1175,7 @@ function AppInner({session}){
         @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap');
         *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
         .dark{--bg:#09090f;--surface:#111118;--card:#16161f;--card2:#1c1c28;--border:rgba(255,255,255,.07);--border2:rgba(255,255,255,.12);--text:#f0f0ff;--text2:#9090b0;--muted:#505070;--green:#22c55e;--green-dim:rgba(34,197,94,.12);--red:#ef4444;--red-dim:rgba(239,68,68,.12);--gold:#f59e0b;--gold-dim:rgba(245,158,11,.12);--accent:#6366f1;--accent2:#8b5cf6;--accent-dim:rgba(99,102,241,.15);--blue:#3b82f6;--blue-dim:rgba(59,130,246,.12);}
-        .light{--bg:#f1f1f7;--surface:#fff;--card:#fff;--card2:#f8f8fc;--border:rgba(0,0,0,.08);--border2:rgba(0,0,0,.14);--text:#0f0f1a;--text2:#4a4a6a;--muted:#9090b0;--green:#16a34a;--green-dim:rgba(22,163,74,.1);--red:#dc2626;--red-dim:rgba(220,38,38,.1);--gold:#d97706;--gold-dim:rgba(217,119,6,.1);--accent:#4f46e5;--accent2:#7c3aed;--accent-dim:rgba(79,70,229,.1);--blue:#2563eb;--blue-dim:rgba(37,99,235,.1);}
+        .light{--bg:#f1f1f7;--surface:#fff;--card:#fff;--card2:#ebebf2;--border:rgba(0,0,0,.08);--border2:rgba(0,0,0,.22);--text:#0f0f1a;--text2:#4a4a6a;--muted:#9090b0;--green:#16a34a;--green-dim:rgba(22,163,74,.1);--red:#dc2626;--red-dim:rgba(220,38,38,.1);--gold:#d97706;--gold-dim:rgba(217,119,6,.1);--accent:#4f46e5;--accent2:#7c3aed;--accent-dim:rgba(79,70,229,.1);--blue:#2563eb;--blue-dim:rgba(37,99,235,.1);}
         html,body{background:var(--bg);color:var(--text);font-family:'Plus Jakarta Sans',sans-serif;-webkit-font-smoothing:antialiased;transition:background .25s,color .25s;}
         .app{min-height:100vh;padding-bottom:24px;max-width:480px;margin:0 auto;}
         .topbar{display:flex;align-items:center;justify-content:space-between;padding:12px 16px 10px;position:sticky;top:0;z-index:90;background:var(--bg);border-bottom:1px solid var(--border);}
@@ -1247,9 +1247,9 @@ function AppInner({session}){
         .surplus-bar{height:7px;background:var(--border);border-radius:4px;overflow:hidden;margin-top:8px;}
         .surplus-fill{height:100%;border-radius:4px;transition:width .6s;}
         .pg{padding:10px 16px 6px;display:flex;flex-direction:column;gap:12px;}
-        .section-title{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:var(--text2);}
+        .section-title{font-size:11px;font-weight:600;letter-spacing:.04em;color:var(--text);opacity:.65;}
         .card{background:var(--card);border:1px solid var(--border);border-radius:15px;padding:14px;}
-        .st{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:var(--text2);}
+        .st{font-size:11px;font-weight:600;letter-spacing:.04em;color:var(--text);opacity:.65;}
         .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
         .txlist{display:flex;flex-direction:column;gap:7px;}
         .txi{display:flex;align-items:center;gap:10px;padding:11px;background:var(--surface);border:1px solid var(--border);border-radius:13px;cursor:pointer;user-select:none;}
@@ -1268,11 +1268,11 @@ function AppInner({session}){
         .fab{position:fixed;bottom:20px;right:16px;width:52px;height:52px;border-radius:16px;background:linear-gradient(135deg,var(--accent),var(--accent2));border:none;color:#fff;font-size:24px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 8px 24px rgba(99,102,241,.4);z-index:80;}
         .fab:active{transform:scale(.92);}
         .mhdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;}
-        .mtitle{font-size:15px;font-weight:800;}
+        .mtitle{font-size:15px;font-weight:800;color:var(--text);}
         .mclose{background:none;border:none;color:var(--text);font-size:22px;cursor:pointer;padding:2px 6px;opacity:.6;}
-        .fl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--text2);margin-bottom:6px;display:block;}
-        .fi{width:100%;background:var(--card2);border:1px solid var(--border2);color:var(--text);font-family:'Plus Jakarta Sans',sans-serif;font-size:14px;border-radius:12px;padding:12px 14px;outline:none;transition:border-color .2s;-webkit-appearance:none;font-weight:500;}
-        .fi:focus{border-color:var(--accent);}
+        .fl{font-size:11px;font-weight:600;letter-spacing:.04em;color:var(--text);opacity:.7;margin-bottom:6px;display:block;}
+        .fi{width:100%;background:var(--card2);border:1.5px solid var(--border2);color:var(--text);font-family:'Plus Jakarta Sans',sans-serif;font-size:14px;border-radius:12px;padding:12px 14px;outline:none;transition:border-color .2s;-webkit-appearance:none;font-weight:500;}
+        .fi:focus{border-color:var(--accent);}.fi::placeholder{color:var(--muted);opacity:1;}
         .fg{margin-bottom:12px;}
         .frow{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
         .catgrid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;}
@@ -1281,14 +1281,14 @@ function AppInner({session}){
         .savebtn:active{opacity:.85;}.savebtn:disabled{opacity:.4;cursor:not-allowed;}
         select.fi{appearance:none;-webkit-appearance:none;}
         .divider{height:1px;background:var(--border);margin:14px 0;}
-        .notesarea{width:100%;background:var(--card2);border:1px solid var(--border2);color:var(--text);font-family:'Plus Jakarta Sans',sans-serif;font-size:13px;border-radius:12px;padding:12px;resize:vertical;min-height:80px;outline:none;font-weight:500;}
+        .notesarea{width:100%;background:var(--card2);border:1.5px solid var(--border2);color:var(--text);font-family:'Plus Jakarta Sans',sans-serif;font-size:13px;border-radius:12px;padding:12px;resize:vertical;min-height:80px;outline:none;font-weight:500;}
         .notesarea:focus{border-color:var(--accent);}
         .empty{text-align:center;color:var(--muted);font-size:13px;padding:36px 0;line-height:1.8;}
         .alert{display:flex;align-items:center;gap:10px;padding:11px 14px;border-radius:12px;font-size:12px;font-weight:500;}
         .alert.ok{background:var(--green-dim);border:1px solid rgba(34,197,94,.2);color:var(--green);}
         .alert.warn{background:var(--gold-dim);border:1px solid rgba(245,158,11,.2);color:var(--gold);}
         .alert.danger{background:var(--red-dim);border:1px solid rgba(239,68,68,.2);color:var(--red);}
-        .bulkbtn{background:var(--surface);border:1px solid var(--border);color:var(--text2);font-family:'Plus Jakarta Sans',sans-serif;font-size:12px;font-weight:600;border-radius:11px;padding:9px 14px;cursor:pointer;}
+        .bulkbtn{background:var(--surface);border:1.5px solid var(--border2);color:var(--text);font-family:'Plus Jakarta Sans',sans-serif;font-size:12px;font-weight:600;border-radius:11px;padding:9px 14px;cursor:pointer;}
         .bulkbtn:active{border-color:var(--accent);color:var(--accent);}
         .chart{display:flex;align-items:flex-end;gap:4px;}
         .cgrp{display:flex;align-items:flex-end;gap:2px;flex:1;}
@@ -1910,7 +1910,7 @@ function DebtForm({onSave,vm,vy}){
     <div className="card">
       <div className="fg"><label className="fl">Nome da dívida</label><input className="fi" placeholder="Ex: Carro, Funileiro…" value={f.name} onChange={e=>upd("name",e.target.value)}/></div>
       <div className="frow">
-        <div className="fg"><label className="fl">Valor total (R$)</label><input className="fi" type="number" inputMode="decimal" value={f.totalValue} onChange={e=>upd("totalValue",e.target.value)}/></div>
+        <div className="fg"><label className="fl">Valor total (R$)</label><input className="fi" type="text" inputMode="decimal" pattern="[0-9.,]*" value={f.totalValue} onChange={e=>upd("totalValue",e.target.value)}/></div>
         <div className="fg"><label className="fl">Nº de parcelas</label><input className="fi" type="number" inputMode="numeric" value={f.installments} onChange={e=>upd("installments",e.target.value)}/></div>
       </div>
       {monthly>0&&<div style={{background:"rgba(155,140,255,.1)",border:"1px solid rgba(155,140,255,.25)",borderRadius:9,padding:"8px 11px",marginBottom:10,fontSize:12,color:"var(--accent)",fontWeight:600}}>Parcela mensal: {fmt(monthly)}</div>}
