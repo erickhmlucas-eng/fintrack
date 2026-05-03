@@ -235,33 +235,29 @@ function AuthScreen(){
 function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData,setMonthData,bankCredit}){
   const [selectedBank,setSelectedBank]=useState(banks[0]?.name||"");
   const [showAddModal,setShowAddModal]=useState(false);
+  const [showImportModal,setShowImportModal]=useState(false);
   const [closingInvoice,setClosingInvoice]=useState(false);
   const catMap=Object.fromEntries(expenseCats.map(c=>[c.name,c]));
 
   const purchases=(creditData?.purchases)||[];
   const bank=banks?.find(b=>b.name===selectedBank)||banks?.[0];
 
-  // Purchases for selected bank this month
   const bankPurchases=purchases.filter(p=>p.bank===selectedBank);
   const totalUsed=bankPurchases.reduce((s,p)=>s+p.monthlyValue,0);
   const limit=bank?.limit||0;
   const available=limit>0?Math.max(limit-totalUsed,0):null;
   const pct=limit>0?Math.min((totalUsed/limit)*100,100):0;
 
-  // Category breakdown
   const catBreak=expenseCats.map(c=>{
     const val=bankPurchases.filter(p=>p.category===c.name).reduce((s,p)=>s+p.monthlyValue,0);
     return {...c,val};
   }).filter(c=>c.val>0).sort((a,b)=>b.val-a.val);
 
-  // Check if invoice already closed for this bank this month
   const invoiceId=`invoice_${selectedBank}_${vy}_${vm}`;
   const invoiceAlreadyClosed=(monthData.fixed||[]).some(f=>f.id===invoiceId);
 
-  // Next month
   const nm=vm===11?0:vm+1, ny=vm===11?vy+1:vy;
 
-  // Close invoice: move current month purchases to next month fixed
   function closeInvoice(){
     if(!totalUsed||invoiceAlreadyClosed) return;
     setClosingInvoice(true);
@@ -273,7 +269,6 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
       isAutoInvoice:true,
       autoInvoiceKey:invoiceId,
     };
-    // Add to next month fixed
     dbGet(monthKey(ny,nm)).then(existing=>{
       const ex=existing||{incomes:[],expenses:[],fixed:[],investments:[],notes:""};
       const alreadyThere=(ex.fixed||[]).some(f=>f.id===invoiceId);
@@ -281,17 +276,14 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
         dbSet(monthKey(ny,nm),{...ex,fixed:[fixedEntry,...(ex.fixed||[])]});
       }
     }).finally(()=>setClosingInvoice(false));
-    // Mark as closed in current month data
     setMonthData(d=>({...d,fixed:[...(d.fixed||[]),{...fixedEntry,closedInMonth:true}]}));
   }
 
   function addPurchase(purchase){
-    // Parse the chosen invoice month (e.g. "2026-4")
     const [invoiceY, invoiceM]=purchase.invoiceMonth.split("-").map(Number);
     const isCurrent=(invoiceY===vy&&invoiceM===vm);
 
     if(purchase.installments>1){
-      // Distribute parcels starting from chosen invoice month
       const allParcels=[];
       for(let i=0;i<purchase.installments;i++){
         const totalM=invoiceM+i;
@@ -305,7 +297,6 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
           name:`${purchase.name} (${i+1}/${purchase.installments})`,
         });
       }
-      // Update current month state if any parcel is here
       const curKey=`${vy}-${vm}`;
       const curParcels=allParcels.filter(p=>p.monthYear===curKey);
       if(curParcels.length>0){
@@ -315,7 +306,6 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
           return updated;
         });
       }
-      // Save all months to DB
       const grouped={};
       allParcels.forEach(p=>{if(!grouped[p.monthYear]) grouped[p.monthYear]=[];grouped[p.monthYear].push(p);});
       Object.entries(grouped).forEach(([key,ps])=>{
@@ -328,14 +318,12 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
     } else {
       const p={...purchase,id:uid(),monthYear:`${invoiceY}-${invoiceM}`,monthlyValue:purchase.totalValue,installmentNum:1};
       if(isCurrent){
-        // Update state AND save to DB immediately
         setCreditData(d=>{
           const updated={purchases:[p,...(d.purchases||[])]};
           dbSet(creditKey(vy,vm),updated);
           return updated;
         });
       } else {
-        // Save directly to the target month in DB
         dbGet(creditKey(invoiceY,invoiceM)).then(existing=>{
           const ex=existing||EMPTY_CREDIT();
           dbSet(creditKey(invoiceY,invoiceM),{purchases:[p,...(ex.purchases||[])]});
@@ -359,7 +347,6 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
     <div className="pg">
       <div className="st">Cartões — {MONTHS_FULL[vm]} {vy}</div>
 
-      {/* Bank selector */}
       <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
         {banks.map(b=>{
           const tot=purchases.filter(p=>p.bank===b.name).reduce((s,p)=>s+p.monthlyValue,0);
@@ -372,7 +359,6 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
         })}
       </div>
 
-      {/* Limit card */}
       <div className="card">
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
           <div>
@@ -400,8 +386,7 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
         </>}
       </div>
 
-      {/* Actions */}
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
         <button onClick={()=>setShowAddModal(true)}
           style={{background:"var(--accent)",border:"none",color:"#fff",fontFamily:"'Sora',sans-serif",fontSize:12,fontWeight:700,borderRadius:11,padding:"12px 8px",cursor:"pointer"}}>
           + Lançar compra
@@ -410,9 +395,12 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
           style={{background:invoiceAlreadyClosed?"rgba(0,214,143,.1)":"var(--surface)",border:`1px solid ${invoiceAlreadyClosed?"var(--green)":"var(--border)"}`,color:invoiceAlreadyClosed?"var(--green)":"var(--muted)",fontFamily:"'Sora',sans-serif",fontSize:12,fontWeight:700,borderRadius:11,padding:"12px 8px",cursor:"pointer",opacity:(!totalUsed||invoiceAlreadyClosed)?0.5:1}}>
           {invoiceAlreadyClosed?`✓ Fatura fechada`:`Fechar fatura → ${MONTHS_FULL[nm]}`}
         </button>
+        <button onClick={()=>setShowImportModal(true)}
+          style={{background:"rgba(99,102,241,.1)",border:"1px solid rgba(99,102,241,.3)",color:"var(--accent)",fontFamily:"'Sora',sans-serif",fontSize:12,fontWeight:700,borderRadius:11,padding:"12px 8px",cursor:"pointer"}}>
+          📂 Importar fatura
+        </button>
       </div>
 
-      {/* Category breakdown */}
       {catBreak.length>0&&(
         <div className="card">
           <div className="st" style={{marginBottom:10}}>Por categoria</div>
@@ -433,7 +421,6 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
         </div>
       )}
 
-      {/* Purchases list */}
       {bankPurchases.length>0&&(
         <div>
           <div className="st" style={{marginBottom:8}}>Lançamentos ({bankPurchases.length})</div>
@@ -464,13 +451,17 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
           <CreditPurchaseForm banks={banks} expenseCats={expenseCats} selectedBank={selectedBank} vm={vm} vy={vy} onSave={addPurchase} onClose={()=>setShowAddModal(false)} defaultInvoiceMonth={`${vy}-${vm}`}/>
         </Modal>
       )}
+      {showImportModal&&(
+        <Modal onClose={()=>setShowImportModal(false)} tall>
+          <ImportModal banks={banks} expenseCats={expenseCats} importType="credit" defaultBank={selectedBank} vm={vm} vy={vy} onClose={()=>setShowImportModal(false)} onImport={(type,entries)=>{setCreditData(d=>{const updated={purchases:[...entries,...(d.purchases||[])]};dbSet(creditKey(vy,vm),updated);return updated;});setShowImportModal(false);}}/>
+        </Modal>
+      )}
     </div>
   );
 }
 
 function CreditPurchaseForm({banks,expenseCats,selectedBank,vm,vy,onSave,onClose,defaultInvoiceMonth}){
   const dd=`${vy}-${String(vm+1).padStart(2,"0")}-${String(today.getDate()).padStart(2,"0")}`;
-  // Invoice month options: current + next 3 months
   const invoiceOptions=Array.from({length:4},(_,i)=>{
     const m=(vm+i)%12, y=vy+Math.floor((vm+i)/12);
     return {label:`Fatura de ${MONTHS_FULL[m]} ${y}`,value:`${y}-${m}`};
@@ -505,7 +496,7 @@ function CreditPurchaseForm({banks,expenseCats,selectedBank,vm,vy,onSave,onClose
         </select>
       </div>
       <div className="frow">
-        <div className="fg"><label className="fl">Valor total (R$)</label><input className="fi" type="number" inputMode="decimal" placeholder="0,00" value={form.totalValue} onChange={e=>upd("totalValue",e.target.value)}/></div>
+        <div className="fg"><label className="fl">Valor total (R$)</label><input className="fi" type="text" inputMode="decimal" pattern="[0-9.,]*" placeholder="0,00" value={form.totalValue} onChange={e=>upd("totalValue",e.target.value)}/></div>
         <div className="fg"><label className="fl">Parcelas</label><input className="fi" type="number" inputMode="numeric" min="1" max="48" value={form.installments} onChange={e=>upd("installments",e.target.value)}/></div>
       </div>
       {inst>1&&monthly>0&&<div style={{background:"rgba(155,140,255,.1)",border:"1px solid rgba(155,140,255,.25)",borderRadius:9,padding:"8px 11px",marginBottom:10,fontSize:12,color:"var(--accent)",fontWeight:600}}>{inst}x de {fmt(monthly)} · A partir da fatura selecionada</div>}
@@ -594,6 +585,321 @@ function BulkPanel({type,banks,expenseCats,vy,vm,onConfirm,onClose}){
   );
 }
 
+
+// ─── IMPORT MODAL (CSV + PDF fatura) ────────────────────────────────────────
+
+// Carrega PDF.js dinamicamente
+async function loadPDFJS(){
+  if(window.pdfjsLib) return window.pdfjsLib;
+  return new Promise((resolve,reject)=>{
+    const s=document.createElement("script");
+    s.src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+    s.onload=()=>{
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+      resolve(window.pdfjsLib);
+    };
+    s.onerror=()=>reject(new Error("PDF.js não pôde ser carregado"));
+    document.head.appendChild(s);
+  });
+}
+
+// Extrai texto do PDF preservando linhas por posição Y
+async function extractPDFText(file){
+  const pdfjs=await loadPDFJS();
+  const buf=await file.arrayBuffer();
+  const pdf=await pdfjs.getDocument({data:buf}).promise;
+  let full="";
+  for(let i=1;i<=pdf.numPages;i++){
+    const page=await pdf.getPage(i);
+    const content=await page.getTextContent();
+    const byY={};
+    content.items.forEach(item=>{
+      const y=Math.round(item.transform[5]);
+      if(!byY[y]) byY[y]=[];
+      byY[y].push(item.str);
+    });
+    Object.keys(byY).sort((a,b)=>b-a).forEach(y=>{full+=byY[y].join(" ")+"\n";});
+    full+="\n";
+  }
+  return full;
+}
+
+function parseCSVLine(line){
+  const res=[]; let cur=""; let inQ=false;
+  for(let i=0;i<line.length;i++){
+    const c=line[i];
+    if(c==='"'){inQ=!inQ;}
+    else if(c===","&&!inQ){res.push(cur.trim());cur="";}
+    else cur+=c;
+  }
+  res.push(cur.trim());
+  return res;
+}
+
+function parseBRDate(s){
+  if(!s) return null;
+  s=s.replace(/['"]/g,"").trim();
+  const d1=s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if(d1) return `${d1[3]}-${d1[2]}-${d1[1]}`;
+  const d2=s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if(d2) return s;
+  const d3=s.match(/^(\d{2})\/(\d{2})\/(\d{2})$/);
+  if(d3) return `20${d3[3]}-${d3[2]}-${d3[1]}`;
+  return null;
+}
+
+// Parse de data incluindo meses abreviados em português (para PDFs)
+function parseBRDateFull(s,vy){
+  if(!s) return null;
+  s=s.trim();
+  const months={JAN:"01",FEV:"02",MAR:"03",ABR:"04",MAI:"05",JUN:"06",JUL:"07",AGO:"08",SET:"09",OUT:"10",NOV:"11",DEZ:"12"};
+  const m1=s.match(/^(\d{2})\/(\d{2})(?:\/(\d{2,4}))?$/);
+  if(m1){const y=m1[3]?(m1[3].length===2?"20"+m1[3]:m1[3]):String(vy);return `${y}-${m1[2]}-${m1[1]}`;}
+  const m2=s.match(/^(\d{2})[\/\-](\d{2})[\/\-](\d{4})$/);
+  if(m2) return `${m2[3]}-${m2[2]}-${m2[1]}`;
+  const m3=s.match(/^(\d{2})\s+(JAN|FEV|MAR|ABR|MAI|JUN|JUL|AGO|SET|OUT|NOV|DEZ)(?:\s+(\d{2,4}))?$/i);
+  if(m3){const y=m3[3]?(m3[3].length===2?"20"+m3[3]:m3[3]):String(vy);return `${y}-${months[m3[2].toUpperCase()]}-${m3[1]}`;}
+  return parseBRDate(s)||null;
+}
+
+function guessCategory(desc,expenseCats){
+  const d=desc.toLowerCase();
+  const keywords={
+    "alimentação":["ifood","rappi","uber eats","mcdonalds","mc donalds","burger","pizza","restaurante","lanchonete","padaria","mercado","supermercado","hortifruti","pao de acucar","extra","carrefour","atacadao","atacado","comida","sushi","hamburguer","açougue"],
+    "gasolina":["posto","shell","petrobras","ipiranga","vibra","gasolina","combustivel","br mania","ale","raizen"],
+    "transporte":["uber","99app","taxi","onibus","metro","passagem","bilhete","embarque","transfer","estacionamento","moto","99 tecnologia"],
+    "farmácia":["drogaria","farmacia","droga","ultrafarma","pacheco","raia","drogasil","manipulacao","panvel"],
+    "saúde":["hospital","clinica","medico","consulta","exame","laboratorio","odonto","dentista","plano saude","unimed","amil","hapvida"],
+    "assinaturas":["netflix","spotify","amazon prime","youtube","adobe","microsoft","apple","google","disney","hbo","paramount","globoplay","deezer","icloud","canva","chatgpt","openai"],
+    "lazer":["cinema","teatro","show","evento","ingresso","ticket","sympla","bileto","boliche","parque","bar ","balada"],
+    "compras online":["amazon","shopee","aliexpress","americanas","magazine luiza","submarino","mercado livre","shein","magalu"],
+    "roupa / tênis":["nike","adidas","puma","vans","converse","hering","riachuelo","c&a","renner","marisa","zara","farm","arezzo"],
+    "moradia":["aluguel","condominio","iptu","agua","luz","energia","gas","enel","sabesp","comgas","net","claro residencial","tim residencial","vivo fibra"],
+    "cursos online":["udemy","coursera","alura","rocketseat","origamid","dio.me","hotmart","eduzz","monetizze"],
+    "carro / seguro / ipva":["seguro auto","ipva","dpvat","detran","revisao","mecanico","borracharia","lavagem","porto seguro auto","suhai","bradesco auto"],
+    "corte de cabelo":["barbearia","salao","hair","cabelo","barba","beauty"],
+  };
+  for(const [cat,keys] of Object.entries(keywords)){
+    if(keys.some(k=>d.includes(k))){
+      const found=expenseCats.find(c=>c.name.toLowerCase()===cat.toLowerCase()||c.name.toLowerCase().startsWith(cat.split("/")[0].trim().toLowerCase()));
+      if(found) return found.name;
+    }
+  }
+  return expenseCats[expenseCats.length-1]?.name||"Outros";
+}
+
+function ImportModal({banks,expenseCats,importType,defaultBank,vm,vy,onClose,onImport}){
+  const [step,setStep]=useState("upload"); // upload | loading | preview
+  const [fileError,setFileError]=useState("");
+  const [preview,setPreview]=useState([]);
+  const [selBank,setSelBank]=useState(defaultBank||banks[0]?.name||"");
+  const [editCats,setEditCats]=useState({});
+  const inputRef=React.useRef();
+  const todayStr=`${vy}-${String(vm+1).padStart(2,"0")}-${String(new Date().getDate()).padStart(2,"0")}`;
+
+  async function handleFile(file){
+    if(!file) return;
+    const ext=file.name.split(".").pop().toLowerCase();
+    if(!["csv","txt","ofx","pdf"].includes(ext)){setFileError("Formato não suportado. Use CSV, TXT, OFX ou PDF.");return;}
+    setFileError("");
+    setStep("loading");
+    if(ext==="pdf"){
+      try{
+        const text=await extractPDFText(file);
+        parsePDFText(text);
+      }catch(err){
+        setFileError("Erro ao ler o PDF: "+(err.message||"formato não reconhecido")+". Tente exportar como CSV.");
+        setStep("upload");
+      }
+      return;
+    }
+    const reader=new FileReader();
+    reader.onload=(e)=>parseCSV(e.target.result);
+    reader.onerror=()=>{setFileError("Erro ao ler o arquivo.");setStep("upload");};
+    reader.readAsText(file,"UTF-8");
+  }
+
+  function buildEntry(date,desc,val){
+    const dateStr=date||todayStr;
+    const category=guessCategory(desc,expenseCats);
+    const absVal=Math.abs(val);
+    if(importType==="credit") return {id:uid(),name:desc,category,bank:selBank,totalValue:absVal,monthlyValue:absVal,installments:1,installmentNum:1,date:dateStr,monthYear:`${vy}-${vm}`,groupId:uid()};
+    if(importType==="expense") return {id:uid(),category,description:desc,value:absVal,date:dateStr,bank:selBank,method:"PIX",essential:false};
+    return {id:uid(),name:desc,value:absVal,date:dateStr};
+  }
+
+  // ── Parser CSV ──
+  function parseCSV(text){
+    const lines=text.trim().split(/\r?\n/).filter(l=>l.trim());
+    if(lines.length<2){setFileError("Arquivo vazio ou inválido.");setStep("upload");return;}
+    const sep=lines[0].includes(";")?";":",";
+    const headers=lines[0].split(sep).map(h=>h.replace(/['"]/g,"").trim().toLowerCase());
+    let dateIdx=headers.findIndex(h=>/data|date|dt\b/.test(h));
+    let descIdx=headers.findIndex(h=>/títul|titulo|descri|memo|lancam|estabele|histor|narrat|lançam/.test(h));
+    let valIdx=headers.findIndex(h=>/^valor$|^value$|^amount$|montante|debito|credito/.test(h));
+    if(valIdx===-1) valIdx=headers.findIndex(h=>/valor|value|amount/.test(h));
+    if(dateIdx===-1) dateIdx=0;
+    if(descIdx===-1) descIdx=headers.length>2?1:0;
+    if(valIdx===-1){setFileError("Coluna de valor não encontrada. Verifique o formato do arquivo.");setStep("upload");return;}
+    const rows=[];
+    for(let i=1;i<lines.length;i++){
+      const cols=lines[i].split(sep).map(c=>c.replace(/['"]/g,"").trim());
+      if(cols.length<=valIdx) continue;
+      const dateRaw=cols[dateIdx]||"";
+      const desc=cols[descIdx]||`Item ${i}`;
+      const valRaw=cols[valIdx]||"0";
+      const valClean=valRaw.replace(/R\$\s*/gi,"").replace(/\./g,"").replace(",",".");
+      const val=parseFloat(valClean);
+      if(isNaN(val)||val===0) continue;
+      const dateStr=parseBRDateFull(dateRaw,vy)||todayStr;
+      rows.push(buildEntry(dateStr,desc,val));
+    }
+    if(!rows.length){setFileError("Nenhuma transação encontrada. Verifique se as colunas estão corretas.");setStep("upload");return;}
+    setPreview(rows);
+    setStep("preview");
+  }
+
+  // ── Parser PDF (texto extraído) ──
+  function parsePDFText(text){
+    const lines=text.split("\n").map(l=>l.trim()).filter(l=>l.length>2);
+    const rows=[];
+    // Patterns para capturar linha com data + descrição + valor
+    // Suporta: DD/MM, DD/MM/YYYY, DD MMM, DD MMM YYYY
+    const datePat=/\b(\d{2}[\/\-]\d{2}(?:[\/\-]\d{2,4})?|\d{2}\s+(?:JAN|FEV|MAR|ABR|MAI|JUN|JUL|AGO|SET|OUT|NOV|DEZ)(?:\s+\d{2,4})?)\b/i;
+    // Valor no fim da linha, com ou sem R$, suporta negativos e parcelas (1/3)
+    const valPat=/(?:R\$\s*)?(-?\s*\d{1,3}(?:\.\d{3})*,\d{2}|-?\s*\d+,\d{2})\s*$/;
+    const skipPat=/total|saldo|limite|fatura|pagamento|vencimento|cpf|cnpj|obrigado|extrato|banco|agência|conta|página|page|\*{3}/i;
+
+    for(let i=0;i<lines.length;i++){
+      const line=lines[i];
+      if(skipPat.test(line)) continue;
+      const dateMatch=line.match(datePat);
+      const valMatch=line.match(valPat);
+      if(!dateMatch||!valMatch) continue;
+      const dateStr=parseBRDateFull(dateMatch[1],vy)||todayStr;
+      const valStr=valMatch[1].replace(/\s/g,"").replace(/\./g,"").replace(",",".");
+      const val=parseFloat(valStr);
+      if(isNaN(val)||val===0) continue;
+      let desc=line.replace(dateMatch[0],"").replace(valMatch[0],"").replace(/R\$/g,"").replace(/\s{2,}/g," ").trim();
+      // Se descrição muito curta, pega próxima linha como complemento
+      if(desc.length<3&&i+1<lines.length&&!lines[i+1].match(datePat)){
+        desc=lines[i+1].replace(/\s{2,}/g," ").trim()||desc;
+      }
+      if(!desc||desc.length<2) desc="Importado PDF";
+      rows.push(buildEntry(dateStr,desc,val));
+    }
+    if(!rows.length){setFileError("Nenhuma transação reconhecida no PDF. O layout deste banco pode não ser suportado — tente exportar como CSV.");setStep("upload");return;}
+    setPreview(rows);
+    setStep("preview");
+  }
+
+  function confirm(){
+    const final=preview.map((p,i)=>({...p,category:editCats[i]||p.category}));
+    onImport(importType,final);
+  }
+
+  const catMap=Object.fromEntries(expenseCats.map(c=>[c.name,c]));
+  const typeLabel={expense:"Gastos (Débito/PIX)",income:"Entradas",credit:"Lançamentos no crédito"};
+
+  return (
+    <>
+      <div className="mhdr">
+        <div className="mtitle">📂 Importar — {typeLabel[importType]||importType}</div>
+        <button className="mclose" onClick={onClose}>✕</button>
+      </div>
+
+      {step==="upload"&&(
+        <>
+          <div style={{background:"rgba(99,102,241,.08)",border:"1px solid rgba(99,102,241,.25)",borderRadius:12,padding:"14px 16px",marginBottom:14,fontSize:12,color:"var(--text2)",lineHeight:1.7}}>
+            <strong style={{color:"var(--accent)"}}>Como funciona:</strong><br/>
+            Exporte o extrato ou fatura no app do banco e faça upload aqui. O sistema detecta as colunas e categorias automaticamente.
+          </div>
+
+          {importType==="credit"&&(
+            <div className="fg">
+              <label className="fl">Cartão / banco</label>
+              <select className="fi" value={selBank} onChange={e=>setSelBank(e.target.value)}>
+                {banks.map(b=><option key={b.id} value={b.name}>{b.name}</option>)}
+              </select>
+            </div>
+          )}
+
+          <div
+            onClick={()=>inputRef.current?.click()}
+            onDragOver={e=>{e.preventDefault();e.currentTarget.style.borderColor="var(--accent)";}}
+            onDragLeave={e=>{e.currentTarget.style.borderColor="var(--border2)";}}
+            onDrop={e=>{e.preventDefault();e.currentTarget.style.borderColor="var(--border2)";handleFile(e.dataTransfer.files[0]);}}
+            style={{border:"2px dashed var(--border2)",borderRadius:14,padding:"36px 20px",textAlign:"center",cursor:"pointer",marginBottom:14,transition:"border-color .2s"}}>
+            <div style={{fontSize:36,marginBottom:10}}>📄</div>
+            <div style={{fontSize:13,fontWeight:600,color:"var(--text)",marginBottom:4}}>Clique ou arraste o arquivo aqui</div>
+            <div style={{fontSize:11,color:"var(--muted)",marginBottom:8}}>CSV, TXT, OFX · ou PDF da fatura</div>
+            <div style={{display:"flex",justifyContent:"center",gap:6,flexWrap:"wrap"}}>
+              {["CSV","TXT","OFX","PDF"].map(f=>(
+                <span key={f} style={{fontSize:10,fontWeight:700,background:"var(--card2)",border:"1px solid var(--border2)",borderRadius:6,padding:"2px 8px",color:"var(--text2)"}}>{f}</span>
+              ))}
+            </div>
+            <input ref={inputRef} type="file" accept=".csv,.txt,.ofx,.pdf" style={{display:"none"}} onChange={e=>handleFile(e.target.files[0])}/>
+          </div>
+
+          {fileError&&<div style={{background:"var(--red-dim)",border:"1px solid rgba(239,68,68,.3)",borderRadius:10,padding:"10px 12px",fontSize:12,color:"var(--red)",marginBottom:12}}>{fileError}</div>}
+
+          <div style={{background:"var(--card2)",borderRadius:10,padding:"12px 14px",fontSize:11,color:"var(--muted)",lineHeight:1.7}}>
+            <strong style={{color:"var(--text2)",display:"block",marginBottom:4}}>Como exportar por banco:</strong>
+            <span style={{color:"var(--accent)"}}>Nubank:</span> App → Fatura → Exportar CSV<br/>
+            <span style={{color:"var(--accent)"}}>Santander:</span> App → Extrato → Exportar CSV ou PDF<br/>
+            <span style={{color:"var(--accent)"}}>C6:</span> App → Cartão → Exportar fatura PDF/CSV<br/>
+            <span style={{color:"var(--accent)"}}>Porto:</span> Portal online → Extrato → Download CSV
+          </div>
+        </>
+      )}
+
+      {step==="loading"&&(
+        <div style={{textAlign:"center",padding:"48px 0",color:"var(--muted)"}}>
+          <div style={{fontSize:32,marginBottom:12}}>⏳</div>
+          <div style={{fontSize:13,fontWeight:600,color:"var(--text)",marginBottom:4}}>Lendo o arquivo…</div>
+          <div style={{fontSize:11,color:"var(--muted)"}}>PDFs grandes podem levar alguns segundos</div>
+        </div>
+      )}
+
+      {step==="preview"&&(
+        <>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+            <span style={{fontSize:12,color:"var(--text2)",fontWeight:600}}>{preview.length} transação(ões) detectada(s)</span>
+            <button onClick={()=>{setStep("upload");setPreview([]);setEditCats({});}} style={{background:"none",border:"none",color:"var(--accent)",fontSize:12,cursor:"pointer",fontFamily:"'Plus Jakarta Sans',sans-serif"}}>← Trocar arquivo</button>
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:14,maxHeight:"50vh",overflowY:"auto"}}>
+            {preview.map((p,i)=>{
+              const cat=catMap[editCats[i]||p.category]||{icon:"📌",color:"#888"};
+              const d=(p.date||"").slice(5).split("-").reverse().join("/");
+              return (
+                <div key={i} style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:10,padding:"9px 11px",display:"flex",alignItems:"center",gap:9}}>
+                  <div style={{width:30,height:30,borderRadius:8,background:cat.color+"33",display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,flexShrink:0}}>{cat.icon}</div>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontSize:12,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.name||p.description}</div>
+                    <div style={{fontSize:10,color:"var(--muted)",marginTop:1,display:"flex",gap:4,alignItems:"center",flexWrap:"wrap"}}>
+                      <span>{d}</span>
+                      <select value={editCats[i]||p.category} onChange={e=>setEditCats(ec=>({...ec,[i]:e.target.value}))}
+                        style={{fontSize:10,background:"var(--card2)",border:"1px solid var(--border2)",color:"var(--text2)",borderRadius:6,padding:"2px 4px",fontFamily:"'Plus Jakarta Sans',sans-serif",cursor:"pointer"}}>
+                        {expenseCats.map(c=><option key={c.name} value={c.name}>{c.icon} {c.name}</option>)}
+                      </select>
+                    </div>
+                  </div>
+                  <div style={{fontSize:12,fontWeight:700,color:importType==="income"?"var(--green)":"var(--wine)",flexShrink:0}}>{importType==="income"?"+":"-"}{fmt(p.value||p.monthlyValue||0)}</div>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:9}}>
+            <button onClick={()=>{setStep("upload");setPreview([]);setEditCats({});}} style={{background:"var(--surface)",border:"1px solid var(--border)",color:"var(--muted)",fontFamily:"'Sora',sans-serif",fontSize:13,fontWeight:600,borderRadius:10,padding:12,cursor:"pointer"}}>← Voltar</button>
+            <button className="savebtn" style={{margin:0}} onClick={confirm}>Confirmar {preview.length} itens</button>
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
+
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
 export default function FinTrack(){
   const [session,setSession]=useState(null);
@@ -630,7 +936,6 @@ function AppInner({session}){
   const saveTimer=useRef(null);
   const creditSaveTimer=useRef(null);
 
-  // Load settings & debts once
   useEffect(()=>{
     (async()=>{
       const s=await dbGet(SETTINGS_KEY);
@@ -641,7 +946,6 @@ function AppInner({session}){
     })();
   },[]);
 
-  // Load month data — RESET IMMEDIATELY on month change
   useEffect(()=>{
     if(!loaded) return;
     setData(EMPTY_MONTH());
@@ -649,27 +953,20 @@ function AppInner({session}){
     setLoading(true);
     setPrevBalance(0);
     (async()=>{
-      // Load current month
       const r=await dbGet(monthKey(vy,vm));
       if(r) setData(r);
       else setData(EMPTY_MONTH());
 
-      // Load credit data for this month
       const cr=await dbGet(creditKey(vy,vm));
       if(cr) setCreditData(cr);
       else setCreditData(EMPTY_CREDIT());
 
-      // Auto-invoice is now manual via "Fechar fatura" button in Cartões
-
-      // ── Prev balance: read _balance saved by previous month directly ──
       const pm2=vm===0?11:vm-1, py2=vm===0?vy-1:vy;
       const pr=await dbGet(monthKey(py2,pm2));
       if(pr){
-        // Use stored _balance if available (exact saldo shown in prev month)
         if(typeof pr._balance === 'number'){
           setPrevBalance(pr._balance);
         } else {
-          // Fallback: compute from scratch
           const inc=(pr.incomes||[]).reduce((s,t)=>s+t.value,0);
           const exp=(pr.expenses||[]).reduce((s,t)=>s+t.value,0);
           const fix=(pr.fixed||[]).reduce((s,t)=>t.paid?(s+(t.value||0)):s,0);
@@ -681,14 +978,12 @@ function AppInner({session}){
     })();
   },[vm,vy,loaded]);
 
-  // Year cache
   const loadYearCache=useCallback(async()=>{
     const cache={};
     for(let m=0;m<12;m++){const r=await dbGet(monthKey(vy,m));cache[m]=r||EMPTY_MONTH();}
     setYearCache(cache);
   },[vy]);
 
-  // Debounced save — saves _balance so next month reads it directly
   useEffect(()=>{
     if(!loaded||loading) return;
     clearTimeout(saveTimer.current);
@@ -704,7 +999,6 @@ function AppInner({session}){
     return ()=>clearTimeout(saveTimer.current);
   },[data,vm,vy,loaded,loading,loadYearCache,prevBalance]);
 
-  // Debounced save — credit data
   useEffect(()=>{
     if(!loaded||loading) return;
     clearTimeout(creditSaveTimer.current);
@@ -724,7 +1018,6 @@ function AppInner({session}){
   const rawIncome=data.incomes.reduce((s,t)=>s+t.value,0);
   const totalIncome=rawIncome+prevBalance;
   const totalExpense=data.expenses.reduce((s,t)=>s+t.value,0);
-  // Fixed: only paid items count toward spending
   const totalFixedPaid=data.fixed.filter(f=>f.paid).reduce((s,t)=>s+(t.value||0),0);
   const totalFixedAll=data.fixed.reduce((s,t)=>s+(t.value||0),0);
   const totalInvest=data.investments.filter(e=>!isWithdrawal(e)).reduce((s,t)=>s+t.value,0);
@@ -734,8 +1027,6 @@ function AppInner({session}){
   const emergencyTotal=(settings.emergencyBase||0)+(settings.emergencyDelta||0);
   const personalTotal=(settings.personalBase||0)+(settings.personalDelta||0);
 
-  // Credit by bank from creditData
-  // nextInvoiceMonth: if current month's invoice is paid in fixed, use next month
   function getNextInvoiceMonth(bankName){
     try{
       const invoiceId=`invoice_${bankName}_${vy}_${vm}`;
@@ -762,7 +1053,6 @@ function AppInner({session}){
   })).filter(c=>c.value>0||c.budget>0).sort((a,b)=>b.value-a.value);
   const maxCat=Math.max(...catData.map(c=>Math.max(c.value,c.budget)),1);
 
-  // Debt installments
   const debtInst=debts.filter(d=>!d.closed).flatMap(d=>{
     const idx=vy*12+vm-(d.startYear*12+d.startMonth);
     if(idx<0||idx>=d.installments) return [];
@@ -786,7 +1076,6 @@ function AppInner({session}){
   const annualOut=annualRows.reduce((s,r)=>s+r.out,0);
   const chartMax=Math.max(...annualRows.flatMap(r=>[r.inc,r.out]),1);
 
-  // Health Score 0-100
   const healthScore=()=>{
     if(!totalIncome) return 50;
     let score=50;
@@ -981,13 +1270,13 @@ function AppInner({session}){
         .mhdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;}
         .mtitle{font-size:15px;font-weight:800;}
         .mclose{background:none;border:none;color:var(--text);font-size:22px;cursor:pointer;padding:2px 6px;opacity:.6;}
-        .fl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--text);margin-bottom:6px;display:block;opacity:.7;}
+        .fl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--text2);margin-bottom:6px;display:block;}
         .fi{width:100%;background:var(--card2);border:1px solid var(--border2);color:var(--text);font-family:'Plus Jakarta Sans',sans-serif;font-size:14px;border-radius:12px;padding:12px 14px;outline:none;transition:border-color .2s;-webkit-appearance:none;font-weight:500;}
         .fi:focus{border-color:var(--accent);}
         .fg{margin-bottom:12px;}
         .frow{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
-        .catgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;}
-        .catopt{border:1px solid var(--border2);background:var(--card2);color:var(--text);font-family:'Plus Jakarta Sans',sans-serif;font-size:10px;font-weight:600;border-radius:10px;padding:8px 4px;cursor:pointer;text-align:center;line-height:1.3;transition:all .12s;}
+        .catgrid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;}
+        .catopt{border:1px solid var(--border2);background:var(--card2);color:var(--text);font-family:'Plus Jakarta Sans',sans-serif;font-size:12px;font-weight:600;border-radius:10px;padding:10px 8px;cursor:pointer;text-align:center;line-height:1.5;transition:all .12s;word-break:break-word;overflow-wrap:break-word;}
         .savebtn{width:100%;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;border:none;font-family:'Plus Jakarta Sans',sans-serif;font-size:14px;font-weight:700;border-radius:13px;padding:14px;cursor:pointer;margin-top:6px;}
         .savebtn:active{opacity:.85;}.savebtn:disabled{opacity:.4;cursor:not-allowed;}
         select.fi{appearance:none;-webkit-appearance:none;}
@@ -1025,6 +1314,7 @@ function AppInner({session}){
 
         /* ── DESKTOP RESPONSIVE ── */
         @media(min-width:768px){
+          .catgrid{grid-template-columns:repeat(3,1fr);}
           .desktop-layout{display:flex;min-height:100vh;}
           .desktop-sidebar{width:240px;flex-shrink:0;background:var(--card);border-right:1px solid var(--border);display:flex;flex-direction:column;padding:0 0 24px;position:sticky;top:0;height:100vh;overflow-y:auto;}
           .desktop-main{flex:1;min-width:0;max-width:680px;}
@@ -1065,7 +1355,6 @@ function AppInner({session}){
       `}</style>
 
       <div className={`${theme}`} style={{minHeight:"100vh",background:"var(--bg)",color:"var(--text)"}}>
-        {/* ── MOBILE: Sidebar overlay ── */}
         {menuOpen&&<div className="sidebar-overlay" onClick={()=>setMenuOpen(false)}/>}
         {menuOpen&&(
           <div className="sidebar">
@@ -1099,7 +1388,6 @@ function AppInner({session}){
         )}
 
         <div className="desktop-layout">
-          {/* ── DESKTOP: Sidebar fixa ── */}
           <div className="desktop-sidebar">
             <div className="desktop-sidebar-header">
               <div className="desktop-sidebar-logo">Fin<em>Track</em></div>
@@ -1127,9 +1415,7 @@ function AppInner({session}){
             </div>
           </div>
 
-          {/* ── MAIN CONTENT ── */}
           <div className={`app ${theme} desktop-main`}>
-            {/* ── MOBILE TOPBAR ── */}
             <div className="topbar">
               <div className="topbar-left">
                 <button className="hamburger" onClick={()=>setMenuOpen(o=>!o)}>
@@ -1143,7 +1429,6 @@ function AppInner({session}){
               </div>
             </div>
 
-            {/* ── MONTH NAV ── */}
             <div className="month-nav">
               <button onClick={prevMonth}>‹</button>
               <span className="month-label">{MONTHS_FULL[vm]} {vy}{syncing&&" ☁️"}</span>
@@ -1154,7 +1439,6 @@ function AppInner({session}){
 
         {!loading&&page==="dashboard"&&(
           <>
-          {/* ── HERO ── */}
           <div className="hero">
             <div className="hero-greeting">Olá, {settings.name||"👋"}</div>
             <div className="hero-sub">{MONTHS_FULL[vm]} {vy} · {alerts.filter(a=>a.type==="warn"||a.type==="danger").length>0?"⚠️ Atenção necessária":"Tudo em ordem"}</div>
@@ -1165,7 +1449,6 @@ function AppInner({session}){
             </div>
           </div>
 
-          {/* ── 2x2 METRIC CARDS ── */}
           <div className="metrics4">
             <div className="mc4 green">
               <div className="mc4-icon">📈</div>
@@ -1193,7 +1476,6 @@ function AppInner({session}){
             </div>
           </div>
 
-          {/* ── HEALTH SCORE ── */}
           {(()=>{
             const r=30,circ=2*Math.PI*r,dash=(score/100)*circ;
             return (
@@ -1216,7 +1498,6 @@ function AppInner({session}){
             );
           })()}
 
-          {/* ── THIS MONTH ── */}
           <div className="summary-card">
             <div className="summary-row">
               <div className="summary-item">
@@ -1355,7 +1636,10 @@ function AppInner({session}){
               <div style={{fontSize:13,fontWeight:700,color:"var(--green)"}}>{fmt(rawIncome)}</div>
             </div>
             {prevBalance>0&&<div style={{background:"rgba(0,214,143,.08)",border:"1px solid rgba(0,214,143,.2)",borderRadius:10,padding:"9px 12px",fontSize:11,color:"var(--green)",fontWeight:500}}>✅ Saldo anterior: +{fmt(prevBalance)}</div>}
-            <button className="bulkbtn" onClick={()=>openModal("bulk_income")}>📋 Colar em lote</button>
+            <div style={{display:"flex",gap:8}}>
+              <button className="bulkbtn" onClick={()=>openModal("bulk_income")}>📋 Colar em lote</button>
+              <button className="bulkbtn" onClick={()=>openModal("import_income")} style={{color:"var(--accent)",borderColor:"rgba(99,102,241,.3)"}}>📂 Importar CSV</button>
+            </div>
             {(data.incomes||[]).length===0?<div className="empty">Nenhuma entrada ainda.<br/>Toque no <strong style={{color:"var(--accent)"}}>+</strong> ou cole em lote.</div>
               :<div className="txlist">{(data.incomes||[]).map(e=>(
                 <div key={e.id} className="txi" onClick={()=>!e.autoFromWithdrawal&&openModal("income",e)}>
@@ -1380,7 +1664,10 @@ function AppInner({session}){
             <div style={{background:"rgba(155,140,255,.08)",border:"1px solid rgba(155,140,255,.2)",borderRadius:10,padding:"9px 12px",fontSize:11,color:"var(--accent)"}}>
               💳 Gastos no crédito → registre em <strong>Cartões</strong>
             </div>
-            <button className="bulkbtn" onClick={()=>openModal("bulk_expense")}>📋 Colar em lote</button>
+            <div style={{display:"flex",gap:8}}>
+              <button className="bulkbtn" onClick={()=>openModal("bulk_expense")}>📋 Colar em lote</button>
+              <button className="bulkbtn" onClick={()=>openModal("import_expense")} style={{color:"var(--accent)",borderColor:"rgba(99,102,241,.3)"}}>📂 Importar CSV</button>
+            </div>
             {(data.expenses||[]).length===0?<div className="empty">Nenhum gasto ainda.<br/>Toque no <strong style={{color:"var(--accent)"}}>+</strong> ou cole em lote.</div>
               :<div className="txlist">{(data.expenses||[]).map(e=>{
                 const cat=catMap[e.category]||{icon:"📌",color:"#888"};
@@ -1532,15 +1819,16 @@ function AppInner({session}){
         {!loading&&page==="settings"&&<SettingsPage settings={settings} setSettings={setSettings} data={data} setData={setData} userEmail={session?.user?.email} expenseCats={expenseCats}/>}
 
 
-          </div>{/* desktop-main */}
-        </div>{/* desktop-layout */}
-      </div>{/* theme wrapper */}
+          </div>
+        </div>
+      </div>
 
       {fabType&&<button className="fab" onClick={()=>openModal(fabType)}>+</button>}
       {toast&&<Toast msg={toast} onDone={()=>setToast(null)}/>}
 
       {modal&&(
         <Modal onClose={closeModal} tall={modal.type?.startsWith("bulk")||modal.type==="expense"}>
+          {(modal.type==="import_expense"||modal.type==="import_income"||modal.type==="import_credit")&&<ImportModal banks={banks} expenseCats={expenseCats} importType={modal.type.replace("import_","")} defaultBank={banks[0]?.name||""} vm={vm} vy={vy} onClose={closeModal} onImport={(type,entries)=>{if(type==="expense")saveBulk("expenses",entries);else if(type==="income")saveBulk("incomes",entries);else if(type==="credit"){setCreditData(d=>{const updated={purchases:[...entries,...(d.purchases||[])]};dbSet(creditKey(vy,vm),updated);return updated;});setToast(`✅ ${entries.length} lançamento(s) importado(s)`);}closeModal();}}/>}
           {modal.type==="bulk_income"&&<BulkPanel type="income" banks={banks} expenseCats={expenseCats} vy={vy} vm={vm} onClose={closeModal} onConfirm={i=>{saveBulk("incomes",i);closeModal();}}/>}
           {modal.type==="bulk_expense"&&<BulkPanel type="expense" banks={banks} expenseCats={expenseCats} vy={vy} vm={vm} onClose={closeModal} onConfirm={i=>{saveBulk("expenses",i);closeModal();}}/>}
           {modal.type==="bulk_fixed"&&<BulkPanel type="fixed" banks={banks} expenseCats={expenseCats} vy={vy} vm={vm} onClose={closeModal} onConfirm={i=>{saveBulk("fixed",i);closeModal();}}/>}
@@ -1742,7 +2030,7 @@ function EntryModal({type,entry,banks,expenseCats,onClose,onSave,vm,vy}){
   const isEdit=!!entry;
   const dd=`${vy}-${String(vm+1).padStart(2,"0")}-${String(today.getDate()).padStart(2,"0")}`;
   const [form,setForm]=useState(()=>{
-    if(isEdit) return{...entry};
+    if(isEdit) return{...entry, value: String(entry.value ?? '')};
     if(type==="income")     return{id:uid(),name:"",value:"",date:dd};
     if(type==="expense")    return{id:uid(),category:expenseCats[0]?.name||"Outros",date:dd,description:"",value:"",bank:banks[0]?.name||"",method:"PIX",essential:false};
     if(type==="fixed")      return{id:uid(),name:"",value:"",paid:false};
@@ -1763,7 +2051,7 @@ function EntryModal({type,entry,banks,expenseCats,onClose,onSave,vm,vy}){
       {type==="income"&&<>
         <div className="fg"><label className="fl">Nome / fonte</label><input className="fi" placeholder="Ex: Salário, Freela…" value={form.name} onChange={e=>upd("name",e.target.value)}/></div>
         <div className="frow">
-          <div className="fg"><label className="fl">Valor (R$)</label><input className="fi" type="number" inputMode="decimal" placeholder="0,00" value={form.value} onChange={e=>upd("value",e.target.value)}/></div>
+          <div className="fg"><label className="fl">Valor (R$)</label><input className="fi" type="text" inputMode="decimal" pattern="[0-9.,]*" placeholder="0,00" value={form.value} onChange={e=>upd("value",e.target.value)}/></div>
           <div className="fg"><label className="fl">Data</label><input className="fi" type="date" value={form.date} onChange={e=>upd("date",e.target.value)}/></div>
         </div>
       </>}
@@ -1778,7 +2066,7 @@ function EntryModal({type,entry,banks,expenseCats,onClose,onSave,vm,vy}){
         </div>
         <div className="fg"><label className="fl">Descrição</label><input className="fi" placeholder="Ex: Mercado, Uber, Farmácia…" value={form.description} onChange={e=>upd("description",e.target.value)}/></div>
         <div className="frow">
-          <div className="fg"><label className="fl">Valor (R$)</label><input className="fi" type="number" inputMode="decimal" placeholder="0,00" value={form.value} onChange={e=>upd("value",e.target.value)}/></div>
+          <div className="fg"><label className="fl">Valor (R$)</label><input className="fi" type="text" inputMode="decimal" pattern="[0-9.,]*" placeholder="0,00" value={form.value} onChange={e=>upd("value",e.target.value)}/></div>
           <div className="fg"><label className="fl">Data</label><input className="fi" type="date" value={form.date} onChange={e=>upd("date",e.target.value)}/></div>
         </div>
         <div className="frow">
@@ -1788,14 +2076,14 @@ function EntryModal({type,entry,banks,expenseCats,onClose,onSave,vm,vy}){
       </>}
       {type==="fixed"&&<>
         <div className="fg"><label className="fl">Nome</label><input className="fi" placeholder="Ex: Parcela carro, Seguro…" value={form.name} onChange={e=>upd("name",e.target.value)}/></div>
-        <div className="fg"><label className="fl">Valor (R$)</label><input className="fi" type="number" inputMode="decimal" placeholder="0,00" value={form.value} onChange={e=>upd("value",e.target.value)}/></div>
+        <div className="fg"><label className="fl">Valor (R$)</label><input className="fi" type="text" inputMode="decimal" pattern="[0-9.,]*" placeholder="0,00" value={form.value} onChange={e=>upd("value",e.target.value)}/></div>
         <div className="fg"><label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:13}}><input type="checkbox" checked={!!form.paid} onChange={e=>upd("paid",e.target.checked)} style={{width:16,height:16,accentColor:"var(--green)"}}/>Já paga</label></div>
       </>}
       {type==="investment"&&<>
         <div className="fg"><label className="fl">Tipo</label><select className="fi" value={form.type} onChange={e=>upd("type",e.target.value)}>{INVEST_TYPES.map(t=><option key={t}>{t}</option>)}</select></div>
         <div className="fg"><label className="fl">Nome / descrição</label><input className="fi" placeholder="Ex: CDB Nubank, Aporte reserva…" value={form.name} onChange={e=>upd("name",e.target.value)}/></div>
         <div className="frow">
-          <div className="fg"><label className="fl">Valor (R$)</label><input className="fi" type="number" inputMode="decimal" placeholder="0,00" value={form.value} onChange={e=>upd("value",e.target.value)}/></div>
+          <div className="fg"><label className="fl">Valor (R$)</label><input className="fi" type="text" inputMode="decimal" pattern="[0-9.,]*" placeholder="0,00" value={form.value} onChange={e=>upd("value",e.target.value)}/></div>
           <div className="fg"><label className="fl">Data</label><input className="fi" type="date" value={form.date} onChange={e=>upd("date",e.target.value)}/></div>
         </div>
       </>}
