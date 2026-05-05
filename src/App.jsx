@@ -171,7 +171,7 @@ function Modal({onClose,children,tall=false}){
   useEffect(()=>{document.body.style.overflow="hidden";return()=>{document.body.style.overflow="";};},[]);
   return (
     <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.75)",backdropFilter:"blur(8px)",zIndex:1000,display:"flex",alignItems:"flex-end",justifyContent:"center"}} onClick={e=>{if(e.target===e.currentTarget)onClose();}}>
-      <div style={{background:"var(--card)",border:"1.5px solid var(--border2)",borderRadius:"20px 20px 0 0",width:"100%",maxWidth:520,padding:"22px 20px 40px",maxHeight:tall?"95vh":"88vh",overflowY:"auto",color:"var(--text)"}} onClick={e=>e.stopPropagation()}>
+      <div className="modal-surface" style={{borderRadius:"20px 20px 0 0",width:"100%",maxWidth:520,padding:"22px 20px 40px",maxHeight:tall?"95vh":"88vh",overflowY:"auto",color:"var(--text)"}} onClick={e=>e.stopPropagation()}>
         {children}
       </div>
     </div>
@@ -236,6 +236,7 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
   const [selectedBank,setSelectedBank]=useState(banks[0]?.name||"");
   const [showAddModal,setShowAddModal]=useState(false);
   const [showImportModal,setShowImportModal]=useState(false);
+  const [editingPurchase,setEditingPurchase]=useState(null);
   const [closingInvoice,setClosingInvoice]=useState(false);
   const catMap=Object.fromEntries(expenseCats.map(c=>[c.name,c]));
 
@@ -334,7 +335,16 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
   }
 
   function deletePurchase(id){
-    setCreditData({purchases:purchases.filter(p=>p.id!==id)});
+    setCreditData(d=>({purchases:(d.purchases||[]).filter(p=>p.id!==id)}));
+  }
+
+  function savePurchaseEdit(updated){
+    setCreditData(d=>{
+      const updated2={purchases:(d.purchases||[]).map(p=>p.id===updated.id?{...p,...updated,monthlyValue:updated.installments>1?parseFloat((updated.totalValue/updated.installments).toFixed(2)):updated.totalValue}:p)};
+      dbSet(creditKey(vy,vm),updated2);
+      return updated2;
+    });
+    setEditingPurchase(null);
   }
 
   if(!bank) return (
@@ -436,6 +446,7 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
                     <div style={{fontSize:9,color:"var(--muted)",marginTop:2}}>{d} · {p.category}{p.installments>1&&` · parcela ${p.installmentNum}/${p.installments}`}</div>
                   </div>
                   <div style={{fontSize:12,fontWeight:700,color:"var(--wine)",flexShrink:0}}>-{fmt(p.monthlyValue)}</div>
+                  <button onClick={()=>setEditingPurchase(p)} style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:13,padding:"5px 4px",flexShrink:0}}>✏️</button>
                   <button onClick={()=>deletePurchase(p.id)} style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:13,padding:"5px 4px",flexShrink:0}}>✕</button>
                 </div>
               );
@@ -456,29 +467,41 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
           <ImportModal banks={banks} expenseCats={expenseCats} importType="credit" defaultBank={selectedBank} vm={vm} vy={vy} onClose={()=>setShowImportModal(false)} onImport={(type,entries)=>{setCreditData(d=>{const updated={purchases:[...entries,...(d.purchases||[])]};dbSet(creditKey(vy,vm),updated);return updated;});setShowImportModal(false);}}/>
         </Modal>
       )}
+      {editingPurchase&&(
+        <Modal onClose={()=>setEditingPurchase(null)} tall>
+          <CreditPurchaseForm banks={banks} expenseCats={expenseCats} selectedBank={selectedBank} vm={vm} vy={vy}
+            onSave={savePurchaseEdit} onClose={()=>setEditingPurchase(null)}
+            defaultInvoiceMonth={`${vy}-${vm}`} initialData={editingPurchase} isEdit/>
+        </Modal>
+      )}
     </div>
   );
 }
 
-function CreditPurchaseForm({banks,expenseCats,selectedBank,vm,vy,onSave,onClose,defaultInvoiceMonth}){
+function CreditPurchaseForm({banks,expenseCats,selectedBank,vm,vy,onSave,onClose,defaultInvoiceMonth,initialData,isEdit}){
   const dd=`${vy}-${String(vm+1).padStart(2,"0")}-${String(today.getDate()).padStart(2,"0")}`;
   const invoiceOptions=Array.from({length:4},(_,i)=>{
     const m=(vm+i)%12, y=vy+Math.floor((vm+i)/12);
     return {label:`Fatura de ${MONTHS_FULL[m]} ${y}`,value:`${y}-${m}`};
   });
   const defInvoice=defaultInvoiceMonth||`${vy}-${vm}`;
-  const [form,setForm]=useState({name:"",category:expenseCats[0]?.name||"Outros",bank:selectedBank,totalValue:"",installments:"1",date:dd,invoiceMonth:defInvoice});
+  const [form,setForm]=useState(()=>{
+    if(initialData) return{...initialData,totalValue:String(initialData.totalValue??initialData.monthlyValue??""),installments:String(initialData.installments||1),invoiceMonth:initialData.monthYear||defInvoice};
+    return{name:"",category:expenseCats[0]?.name||"Outros",bank:selectedBank,totalValue:"",installments:"1",date:dd,invoiceMonth:defInvoice};
+  });
   const upd=(k,v)=>setForm(f=>({...f,[k]:v}));
   const tv=parseFloat(String(form.totalValue||"0").replace(",","."))||0;
   const inst=parseInt(form.installments||"1")||1;
   const monthly=inst>0?tv/inst:0;
   function save(){
     if(!form.name||!tv) return;
-    onSave({...form,totalValue:tv,installments:inst,groupId:uid()});
+    onSave(isEdit
+      ?{...form,totalValue:tv,installments:inst,id:initialData.id}
+      :{...form,totalValue:tv,installments:inst,groupId:uid()});
   }
   return (
     <>
-      <div className="mhdr"><div className="mtitle">💳 Nova compra no crédito</div><button className="mclose" onClick={onClose}>✕</button></div>
+      <div className="mhdr"><div className="mtitle">{isEdit?"✏️ Editar lançamento":"💳 Nova compra no crédito"}</div><button className="mclose" onClick={onClose}>✕</button></div>
       <div className="fg"><label className="fl">Descrição</label><input className="fi" placeholder="Ex: Tênis Nike, iFood, Netflix…" value={form.name} onChange={e=>upd("name",e.target.value)} autoFocus/></div>
       <div className="fg"><label className="fl">Categoria</label>
         <div className="catgrid">{expenseCats.map(c=>(
@@ -501,7 +524,7 @@ function CreditPurchaseForm({banks,expenseCats,selectedBank,vm,vy,onSave,onClose
       </div>
       {inst>1&&monthly>0&&<div style={{background:"rgba(155,140,255,.1)",border:"1px solid rgba(155,140,255,.25)",borderRadius:9,padding:"8px 11px",marginBottom:10,fontSize:12,color:"var(--accent)",fontWeight:600}}>{inst}x de {fmt(monthly)} · A partir da fatura selecionada</div>}
       <div className="fg"><label className="fl">Data da compra</label><input className="fi" type="date" value={form.date} onChange={e=>upd("date",e.target.value)}/></div>
-      <button className="savebtn" onClick={save} disabled={!form.name||!tv}>Adicionar {inst>1?`(${inst}x de ${fmt(monthly)})`:`(${fmt(tv)})`}</button>
+      <button className="savebtn" onClick={save} disabled={!form.name||!tv}>{isEdit?"Salvar alterações":`Adicionar ${inst>1?`(${inst}x de ${fmt(monthly)})`:`(${fmt(tv)})`}`}</button>
     </>
   );
 }
@@ -586,24 +609,19 @@ function BulkPanel({type,banks,expenseCats,vy,vm,onConfirm,onClose}){
 }
 
 
-// ─── IMPORT MODAL (CSV + PDF fatura) ────────────────────────────────────────
+// ─── IMPORT MODAL (CSV + PDF + Imagem via IA) ───────────────────────────────
 
-// Carrega PDF.js dinamicamente
 async function loadPDFJS(){
   if(window.pdfjsLib) return window.pdfjsLib;
   return new Promise((resolve,reject)=>{
     const s=document.createElement("script");
     s.src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
-    s.onload=()=>{
-      window.pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
-      resolve(window.pdfjsLib);
-    };
-    s.onerror=()=>reject(new Error("PDF.js não pôde ser carregado"));
+    s.onload=()=>{window.pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";resolve(window.pdfjsLib);};
+    s.onerror=()=>reject(new Error("PDF.js não carregou"));
     document.head.appendChild(s);
   });
 }
 
-// Extrai texto do PDF preservando linhas por posição Y
 async function extractPDFText(file){
   const pdfjs=await loadPDFJS();
   const buf=await file.arrayBuffer();
@@ -613,50 +631,42 @@ async function extractPDFText(file){
     const page=await pdf.getPage(i);
     const content=await page.getTextContent();
     const byY={};
-    content.items.forEach(item=>{
-      const y=Math.round(item.transform[5]);
-      if(!byY[y]) byY[y]=[];
-      byY[y].push(item.str);
-    });
+    content.items.forEach(item=>{const y=Math.round(item.transform[5]);if(!byY[y])byY[y]=[];byY[y].push(item.str);});
     Object.keys(byY).sort((a,b)=>b-a).forEach(y=>{full+=byY[y].join(" ")+"\n";});
     full+="\n";
   }
   return full;
 }
 
+async function fileToBase64(file){
+  return new Promise((resolve,reject)=>{
+    const r=new FileReader();
+    r.onload=e=>resolve(e.target.result.split(",")[1]);
+    r.onerror=()=>reject(new Error("Erro ao ler arquivo"));
+    r.readAsDataURL(file);
+  });
+}
+
 function parseCSVLine(line){
-  const res=[]; let cur=""; let inQ=false;
-  for(let i=0;i<line.length;i++){
-    const c=line[i];
-    if(c==='"'){inQ=!inQ;}
-    else if(c===","&&!inQ){res.push(cur.trim());cur="";}
-    else cur+=c;
-  }
-  res.push(cur.trim());
-  return res;
+  const res=[];let cur="";let inQ=false;
+  for(let i=0;i<line.length;i++){const c=line[i];if(c==='"'){inQ=!inQ;}else if(c===","&&!inQ){res.push(cur.trim());cur="";}else cur+=c;}
+  res.push(cur.trim());return res;
 }
 
 function parseBRDate(s){
-  if(!s) return null;
-  s=s.replace(/['"]/g,"").trim();
-  const d1=s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-  if(d1) return `${d1[3]}-${d1[2]}-${d1[1]}`;
-  const d2=s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if(d2) return s;
-  const d3=s.match(/^(\d{2})\/(\d{2})\/(\d{2})$/);
-  if(d3) return `20${d3[3]}-${d3[2]}-${d3[1]}`;
+  if(!s)return null;s=s.replace(/['"]/g,"").trim();
+  const d1=s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);if(d1)return `${d1[3]}-${d1[2]}-${d1[1]}`;
+  const d2=s.match(/^(\d{4})-(\d{2})-(\d{2})$/);if(d2)return s;
+  const d3=s.match(/^(\d{2})\/(\d{2})\/(\d{2})$/);if(d3)return `20${d3[3]}-${d3[2]}-${d3[1]}`;
   return null;
 }
 
-// Parse de data incluindo meses abreviados em português (para PDFs)
 function parseBRDateFull(s,vy){
-  if(!s) return null;
-  s=s.trim();
+  if(!s)return null;s=s.trim();
   const months={JAN:"01",FEV:"02",MAR:"03",ABR:"04",MAI:"05",JUN:"06",JUL:"07",AGO:"08",SET:"09",OUT:"10",NOV:"11",DEZ:"12"};
-  const m1=s.match(/^(\d{2})\/(\d{2})(?:\/(\d{2,4}))?$/);
+  const m1=s.match(/^(\d{2})[\/\-](\d{2})(?:[\/\-](\d{2,4}))?$/);
   if(m1){const y=m1[3]?(m1[3].length===2?"20"+m1[3]:m1[3]):String(vy);return `${y}-${m1[2]}-${m1[1]}`;}
-  const m2=s.match(/^(\d{2})[\/\-](\d{2})[\/\-](\d{4})$/);
-  if(m2) return `${m2[3]}-${m2[2]}-${m2[1]}`;
+  const m2=s.match(/^(\d{2})[\/\-](\d{2})[\/\-](\d{4})$/);if(m2)return `${m2[3]}-${m2[2]}-${m2[1]}`;
   const m3=s.match(/^(\d{2})\s+(JAN|FEV|MAR|ABR|MAI|JUN|JUL|AGO|SET|OUT|NOV|DEZ)(?:\s+(\d{2,4}))?$/i);
   if(m3){const y=m3[3]?(m3[3].length===2?"20"+m3[3]:m3[3]):String(vy);return `${y}-${months[m3[2].toUpperCase()]}-${m3[1]}`;}
   return parseBRDate(s)||null;
@@ -665,54 +675,59 @@ function parseBRDateFull(s,vy){
 function guessCategory(desc,expenseCats){
   const d=desc.toLowerCase();
   const keywords={
-    "alimentação":["ifood","rappi","uber eats","mcdonalds","mc donalds","burger","pizza","restaurante","lanchonete","padaria","mercado","supermercado","hortifruti","pao de acucar","extra","carrefour","atacadao","atacado","comida","sushi","hamburguer","açougue"],
+    "alimentação":["ifood","rappi","uber eats","mcdonalds","burger","pizza","restaurante","lanchonete","padaria","mercado","supermercado","carrefour","atacadao","comida","sushi"],
     "gasolina":["posto","shell","petrobras","ipiranga","vibra","gasolina","combustivel","br mania","ale","raizen"],
-    "transporte":["uber","99app","taxi","onibus","metro","passagem","bilhete","embarque","transfer","estacionamento","moto","99 tecnologia"],
-    "farmácia":["drogaria","farmacia","droga","ultrafarma","pacheco","raia","drogasil","manipulacao","panvel"],
-    "saúde":["hospital","clinica","medico","consulta","exame","laboratorio","odonto","dentista","plano saude","unimed","amil","hapvida"],
-    "assinaturas":["netflix","spotify","amazon prime","youtube","adobe","microsoft","apple","google","disney","hbo","paramount","globoplay","deezer","icloud","canva","chatgpt","openai"],
-    "lazer":["cinema","teatro","show","evento","ingresso","ticket","sympla","bileto","boliche","parque","bar ","balada"],
-    "compras online":["amazon","shopee","aliexpress","americanas","magazine luiza","submarino","mercado livre","shein","magalu"],
-    "roupa / tênis":["nike","adidas","puma","vans","converse","hering","riachuelo","c&a","renner","marisa","zara","farm","arezzo"],
-    "moradia":["aluguel","condominio","iptu","agua","luz","energia","gas","enel","sabesp","comgas","net","claro residencial","tim residencial","vivo fibra"],
-    "cursos online":["udemy","coursera","alura","rocketseat","origamid","dio.me","hotmart","eduzz","monetizze"],
-    "carro / seguro / ipva":["seguro auto","ipva","dpvat","detran","revisao","mecanico","borracharia","lavagem","porto seguro auto","suhai","bradesco auto"],
-    "corte de cabelo":["barbearia","salao","hair","cabelo","barba","beauty"],
+    "transporte":["uber","99app","taxi","onibus","metro","passagem","embarque","estacionamento","99 tecnologia"],
+    "farmácia":["drogaria","farmacia","droga","ultrafarma","pacheco","raia","drogasil","panvel"],
+    "saúde":["hospital","clinica","medico","consulta","exame","laboratorio","odonto","dentista","unimed","amil","hapvida"],
+    "assinaturas":["netflix","spotify","amazon prime","youtube","adobe","microsoft","apple","google","disney","hbo","globoplay","deezer","icloud","canva","chatgpt","openai"],
+    "lazer":["cinema","teatro","show","evento","ingresso","ticket","sympla","boliche","parque"],
+    "compras online":["amazon","shopee","aliexpress","americanas","magazine luiza","mercado livre","shein","magalu"],
+    "roupa / tênis":["nike","adidas","puma","vans","converse","hering","riachuelo","c&a","renner","zara","farm","arezzo"],
+    "moradia":["aluguel","condominio","iptu","energia","enel","sabesp","comgas"],
+    "cursos online":["udemy","coursera","alura","rocketseat","hotmart","eduzz"],
+    "carro / seguro / ipva":["seguro auto","ipva","detran","mecanico","borracharia","lavagem","porto seguro auto"],
+    "corte de cabelo":["barbearia","salao","hair","cabelo","barba"],
   };
   for(const [cat,keys] of Object.entries(keywords)){
     if(keys.some(k=>d.includes(k))){
       const found=expenseCats.find(c=>c.name.toLowerCase()===cat.toLowerCase()||c.name.toLowerCase().startsWith(cat.split("/")[0].trim().toLowerCase()));
-      if(found) return found.name;
+      if(found)return found.name;
     }
   }
   return expenseCats[expenseCats.length-1]?.name||"Outros";
 }
 
 function ImportModal({banks,expenseCats,importType,defaultBank,vm,vy,onClose,onImport}){
-  const [step,setStep]=useState("upload"); // upload | loading | preview
+  const [step,setStep]=useState("upload");
   const [fileError,setFileError]=useState("");
   const [preview,setPreview]=useState([]);
   const [selBank,setSelBank]=useState(defaultBank||banks[0]?.name||"");
   const [editCats,setEditCats]=useState({});
+  const [loadingMsg,setLoadingMsg]=useState("Lendo arquivo…");
   const inputRef=React.useRef();
   const todayStr=`${vy}-${String(vm+1).padStart(2,"0")}-${String(new Date().getDate()).padStart(2,"0")}`;
+  const isImage=(type)=>["image/jpeg","image/jpg","image/png","image/gif","image/webp","image/heic"].includes(type?.toLowerCase())||false;
 
   async function handleFile(file){
-    if(!file) return;
+    if(!file)return;
     const ext=file.name.split(".").pop().toLowerCase();
-    if(!["csv","txt","ofx","pdf"].includes(ext)){setFileError("Formato não suportado. Use CSV, TXT, OFX ou PDF.");return;}
-    setFileError("");
-    setStep("loading");
-    if(ext==="pdf"){
-      try{
-        const text=await extractPDFText(file);
-        parsePDFText(text);
-      }catch(err){
-        setFileError("Erro ao ler o PDF: "+(err.message||"formato não reconhecido")+". Tente exportar como CSV.");
-        setStep("upload");
-      }
+    const imgExts=["jpg","jpeg","png","gif","webp","heic"];
+    if(!["csv","txt","ofx","pdf",...imgExts].includes(ext)){setFileError("Formato não suportado. Use CSV, PDF ou uma foto (JPG, PNG).");return;}
+    setFileError("");setStep("loading");
+    if(imgExts.includes(ext)){
+      setLoadingMsg("Analisando imagem com IA… pode levar alguns segundos");
+      try{await handleImageFile(file);}
+      catch(err){setFileError("Erro ao processar imagem: "+(err.message||"tente novamente"));setStep("upload");}
       return;
     }
+    if(ext==="pdf"){
+      setLoadingMsg("Lendo PDF…");
+      try{const text=await extractPDFText(file);parsePDFText(text);}
+      catch(err){setFileError("Erro ao ler PDF: "+err.message+". Tente exportar como CSV.");setStep("upload");}
+      return;
+    }
+    setLoadingMsg("Processando…");
     const reader=new FileReader();
     reader.onload=(e)=>parseCSV(e.target.result);
     reader.onerror=()=>{setFileError("Erro ao ler o arquivo.");setStep("upload");};
@@ -720,15 +735,39 @@ function ImportModal({banks,expenseCats,importType,defaultBank,vm,vy,onClose,onI
   }
 
   function buildEntry(date,desc,val){
-    const dateStr=date||todayStr;
-    const category=guessCategory(desc,expenseCats);
     const absVal=Math.abs(val);
-    if(importType==="credit") return {id:uid(),name:desc,category,bank:selBank,totalValue:absVal,monthlyValue:absVal,installments:1,installmentNum:1,date:dateStr,monthYear:`${vy}-${vm}`,groupId:uid()};
-    if(importType==="expense") return {id:uid(),category,description:desc,value:absVal,date:dateStr,bank:selBank,method:"PIX",essential:false};
-    return {id:uid(),name:desc,value:absVal,date:dateStr};
+    if(importType==="credit")return{id:uid(),name:desc,category:guessCategory(desc,expenseCats),bank:selBank,totalValue:absVal,monthlyValue:absVal,installments:1,installmentNum:1,date,monthYear:`${vy}-${vm}`,groupId:uid()};
+    if(importType==="expense")return{id:uid(),category:guessCategory(desc,expenseCats),description:desc,value:absVal,date,bank:selBank,method:"PIX",essential:false};
+    return{id:uid(),name:desc,value:absVal,date};
   }
 
-  // ── Parser CSV ──
+  async function handleImageFile(file){
+    const mediaType=file.type||"image/jpeg";
+    const base64=await fileToBase64(file);
+    const resp=await fetch("https://api.anthropic.com/v1/messages",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({
+        model:"claude-sonnet-4-20250514",
+        max_tokens:1500,
+        messages:[{role:"user",content:[
+          {type:"image",source:{type:"base64",media_type:mediaType,data:base64}},
+          {type:"text",text:`Analise esta imagem de extrato ou fatura bancária. Extraia TODAS as transações individuais visíveis. Retorne APENAS um array JSON válido, sem markdown, sem explicações, no formato: [{"date":"DD/MM/YYYY","description":"nome do estabelecimento ou descrição","value":99.90}]. Use valor numérico positivo. Ignore totais, saldos, limites, cabeçalhos e rodapés. Se não encontrar transações, retorne [].`}
+        ]}]
+      })
+    });
+    if(!resp.ok)throw new Error(`API error ${resp.status}`);
+    const data=await resp.json();
+    const text=data.content?.find(c=>c.type==="text")?.text||"[]";
+    let transactions=[];
+    try{transactions=JSON.parse(text.replace(/```json?|```/g,"").trim());}
+    catch(_){throw new Error("Não foi possível interpretar a resposta da IA");}
+    if(!transactions.length){setFileError("Nenhuma transação encontrada na imagem. Tente uma foto mais nítida ou exporte como CSV.");setStep("upload");return;}
+    const rows=transactions.map(t=>buildEntry(parseBRDateFull(String(t.date||""),vy)||todayStr,String(t.description||t.desc||"Importado"),Math.abs(parseFloat(String(t.value||"0").replace(",",".")))||0));
+    setPreview(rows.filter(r=>(r.value||r.monthlyValue||0)>0));
+    setStep("preview");
+  }
+
   function parseCSV(text){
     const lines=text.trim().split(/\r?\n/).filter(l=>l.trim());
     if(lines.length<2){setFileError("Arquivo vazio ou inválido.");setStep("upload");return;}
@@ -737,60 +776,44 @@ function ImportModal({banks,expenseCats,importType,defaultBank,vm,vy,onClose,onI
     let dateIdx=headers.findIndex(h=>/data|date|dt\b/.test(h));
     let descIdx=headers.findIndex(h=>/títul|titulo|descri|memo|lancam|estabele|histor|narrat|lançam/.test(h));
     let valIdx=headers.findIndex(h=>/^valor$|^value$|^amount$|montante|debito|credito/.test(h));
-    if(valIdx===-1) valIdx=headers.findIndex(h=>/valor|value|amount/.test(h));
-    if(dateIdx===-1) dateIdx=0;
-    if(descIdx===-1) descIdx=headers.length>2?1:0;
-    if(valIdx===-1){setFileError("Coluna de valor não encontrada. Verifique o formato do arquivo.");setStep("upload");return;}
+    if(valIdx===-1)valIdx=headers.findIndex(h=>/valor|value|amount/.test(h));
+    if(dateIdx===-1)dateIdx=0;
+    if(descIdx===-1)descIdx=headers.length>2?1:0;
+    if(valIdx===-1){setFileError("Coluna de valor não encontrada.");setStep("upload");return;}
     const rows=[];
     for(let i=1;i<lines.length;i++){
       const cols=lines[i].split(sep).map(c=>c.replace(/['"]/g,"").trim());
-      if(cols.length<=valIdx) continue;
-      const dateRaw=cols[dateIdx]||"";
-      const desc=cols[descIdx]||`Item ${i}`;
-      const valRaw=cols[valIdx]||"0";
-      const valClean=valRaw.replace(/R\$\s*/gi,"").replace(/\./g,"").replace(",",".");
+      if(cols.length<=valIdx)continue;
+      const dateRaw=cols[dateIdx]||"";const desc=cols[descIdx]||`Item ${i}`;
+      const valClean=(cols[valIdx]||"0").replace(/R\$\s*/gi,"").replace(/\./g,"").replace(",",".");
       const val=parseFloat(valClean);
-      if(isNaN(val)||val===0) continue;
-      const dateStr=parseBRDateFull(dateRaw,vy)||todayStr;
-      rows.push(buildEntry(dateStr,desc,val));
+      if(isNaN(val)||val===0)continue;
+      rows.push(buildEntry(parseBRDateFull(dateRaw,vy)||todayStr,desc,val));
     }
-    if(!rows.length){setFileError("Nenhuma transação encontrada. Verifique se as colunas estão corretas.");setStep("upload");return;}
-    setPreview(rows);
-    setStep("preview");
+    if(!rows.length){setFileError("Nenhuma transação encontrada.");setStep("upload");return;}
+    setPreview(rows);setStep("preview");
   }
 
-  // ── Parser PDF (texto extraído) ──
   function parsePDFText(text){
     const lines=text.split("\n").map(l=>l.trim()).filter(l=>l.length>2);
     const rows=[];
-    // Patterns para capturar linha com data + descrição + valor
-    // Suporta: DD/MM, DD/MM/YYYY, DD MMM, DD MMM YYYY
     const datePat=/\b(\d{2}[\/\-]\d{2}(?:[\/\-]\d{2,4})?|\d{2}\s+(?:JAN|FEV|MAR|ABR|MAI|JUN|JUL|AGO|SET|OUT|NOV|DEZ)(?:\s+\d{2,4})?)\b/i;
-    // Valor no fim da linha, com ou sem R$, suporta negativos e parcelas (1/3)
-    const valPat=/(?:R\$\s*)?(-?\s*\d{1,3}(?:\.\d{3})*,\d{2}|-?\s*\d+,\d{2})\s*$/;
-    const skipPat=/total|saldo|limite|fatura|pagamento|vencimento|cpf|cnpj|obrigado|extrato|banco|agência|conta|página|page|\*{3}/i;
-
+    const valPat=/(-?\s*\d{1,3}(?:\.\d{3})*,\d{2}|-?\s*\d+,\d{2})\s*$/;
+    const skipPat=/total|saldo|limite|fatura|pagamento|vencimento|cpf|cnpj|obrigado|extrato|banco|agência|conta|página|\*{3}/i;
     for(let i=0;i<lines.length;i++){
-      const line=lines[i];
-      if(skipPat.test(line)) continue;
-      const dateMatch=line.match(datePat);
-      const valMatch=line.match(valPat);
-      if(!dateMatch||!valMatch) continue;
+      const line=lines[i];if(skipPat.test(line))continue;
+      const dateMatch=line.match(datePat);const valMatch=line.match(valPat);
+      if(!dateMatch||!valMatch)continue;
       const dateStr=parseBRDateFull(dateMatch[1],vy)||todayStr;
-      const valStr=valMatch[1].replace(/\s/g,"").replace(/\./g,"").replace(",",".");
-      const val=parseFloat(valStr);
-      if(isNaN(val)||val===0) continue;
+      const val=parseFloat(valMatch[1].replace(/\s/g,"").replace(/\./g,"").replace(",","."));
+      if(isNaN(val)||val===0)continue;
       let desc=line.replace(dateMatch[0],"").replace(valMatch[0],"").replace(/R\$/g,"").replace(/\s{2,}/g," ").trim();
-      // Se descrição muito curta, pega próxima linha como complemento
-      if(desc.length<3&&i+1<lines.length&&!lines[i+1].match(datePat)){
-        desc=lines[i+1].replace(/\s{2,}/g," ").trim()||desc;
-      }
-      if(!desc||desc.length<2) desc="Importado PDF";
+      if(desc.length<3&&i+1<lines.length&&!lines[i+1].match(datePat))desc=lines[i+1].trim()||desc;
+      if(!desc||desc.length<2)desc="Importado PDF";
       rows.push(buildEntry(dateStr,desc,val));
     }
-    if(!rows.length){setFileError("Nenhuma transação reconhecida no PDF. O layout deste banco pode não ser suportado — tente exportar como CSV.");setStep("upload");return;}
-    setPreview(rows);
-    setStep("preview");
+    if(!rows.length){setFileError("Nenhuma transação reconhecida no PDF. Tente exportar como CSV.");setStep("upload");return;}
+    setPreview(rows);setStep("preview");
   }
 
   function confirm(){
@@ -810,11 +833,9 @@ function ImportModal({banks,expenseCats,importType,defaultBank,vm,vy,onClose,onI
 
       {step==="upload"&&(
         <>
-          <div style={{background:"rgba(99,102,241,.08)",border:"1px solid rgba(99,102,241,.25)",borderRadius:12,padding:"14px 16px",marginBottom:14,fontSize:12,color:"var(--text2)",lineHeight:1.7}}>
-            <strong style={{color:"var(--accent)"}}>Como funciona:</strong><br/>
-            Exporte o extrato ou fatura no app do banco e faça upload aqui. O sistema detecta as colunas e categorias automaticamente.
+          <div style={{background:"rgba(99,102,241,.08)",border:"1px solid rgba(99,102,241,.25)",borderRadius:12,padding:"12px 14px",marginBottom:14,fontSize:12,color:"var(--text2)",lineHeight:1.7}}>
+            <strong style={{color:"var(--accent)"}}>Aceita:</strong> CSV, PDF, TXT, OFX e <strong style={{color:"var(--accent)"}}>fotos/prints</strong> de extrato — a IA lê a imagem e extrai os lançamentos automaticamente.
           </div>
-
           {importType==="credit"&&(
             <div className="fg">
               <label className="fl">Cartão / banco</label>
@@ -823,48 +844,44 @@ function ImportModal({banks,expenseCats,importType,defaultBank,vm,vy,onClose,onI
               </select>
             </div>
           )}
-
           <div
             onClick={()=>inputRef.current?.click()}
             onDragOver={e=>{e.preventDefault();e.currentTarget.style.borderColor="var(--accent)";}}
             onDragLeave={e=>{e.currentTarget.style.borderColor="var(--border2)";}}
             onDrop={e=>{e.preventDefault();e.currentTarget.style.borderColor="var(--border2)";handleFile(e.dataTransfer.files[0]);}}
-            style={{border:"2px dashed var(--border2)",borderRadius:14,padding:"36px 20px",textAlign:"center",cursor:"pointer",marginBottom:14,transition:"border-color .2s"}}>
-            <div style={{fontSize:36,marginBottom:10}}>📄</div>
-            <div style={{fontSize:13,fontWeight:600,color:"var(--text)",marginBottom:4}}>Clique ou arraste o arquivo aqui</div>
-            <div style={{fontSize:11,color:"var(--muted)",marginBottom:8}}>CSV, TXT, OFX · ou PDF da fatura</div>
+            style={{border:"2px dashed var(--border2)",borderRadius:14,padding:"32px 16px",textAlign:"center",cursor:"pointer",marginBottom:14,transition:"border-color .2s"}}>
+            <div style={{fontSize:32,marginBottom:10}}>📸</div>
+            <div style={{fontSize:13,fontWeight:700,color:"var(--text)",marginBottom:4}}>Clique ou arraste o arquivo aqui</div>
+            <div style={{fontSize:11,color:"var(--muted)",marginBottom:10}}>Foto, print, CSV ou PDF</div>
             <div style={{display:"flex",justifyContent:"center",gap:6,flexWrap:"wrap"}}>
-              {["CSV","TXT","OFX","PDF"].map(f=>(
+              {["📷 Foto","🖼 Print","PDF","CSV","TXT","OFX"].map(f=>(
                 <span key={f} style={{fontSize:10,fontWeight:700,background:"var(--card2)",border:"1px solid var(--border2)",borderRadius:6,padding:"2px 8px",color:"var(--text2)"}}>{f}</span>
               ))}
             </div>
-            <input ref={inputRef} type="file" accept=".csv,.txt,.ofx,.pdf" style={{display:"none"}} onChange={e=>handleFile(e.target.files[0])}/>
+            <input ref={inputRef} type="file" accept=".csv,.txt,.ofx,.pdf,.jpg,.jpeg,.png,.gif,.webp,.heic,image/*" style={{display:"none"}} onChange={e=>handleFile(e.target.files[0])}/>
           </div>
-
           {fileError&&<div style={{background:"var(--red-dim)",border:"1px solid rgba(239,68,68,.3)",borderRadius:10,padding:"10px 12px",fontSize:12,color:"var(--red)",marginBottom:12}}>{fileError}</div>}
-
-          <div style={{background:"var(--card2)",borderRadius:10,padding:"12px 14px",fontSize:11,color:"var(--muted)",lineHeight:1.7}}>
-            <strong style={{color:"var(--text2)",display:"block",marginBottom:4}}>Como exportar por banco:</strong>
+          <div style={{background:"var(--card2)",borderRadius:10,padding:"10px 12px",fontSize:11,color:"var(--muted)",lineHeight:1.7}}>
+            <strong style={{color:"var(--text2)",display:"block",marginBottom:4}}>Como exportar:</strong>
             <span style={{color:"var(--accent)"}}>Nubank:</span> App → Fatura → Exportar CSV<br/>
-            <span style={{color:"var(--accent)"}}>Santander:</span> App → Extrato → Exportar CSV ou PDF<br/>
-            <span style={{color:"var(--accent)"}}>C6:</span> App → Cartão → Exportar fatura PDF/CSV<br/>
-            <span style={{color:"var(--accent)"}}>Porto:</span> Portal online → Extrato → Download CSV
+            <span style={{color:"var(--accent)"}}>Santander/C6/Porto:</span> App → Extrato → Exportar PDF ou CSV<br/>
+            <span style={{color:"var(--accent)"}}>Foto/print:</span> Tire uma foto da tela ou do extrato impresso — a IA extrai os dados
           </div>
         </>
       )}
 
       {step==="loading"&&(
         <div style={{textAlign:"center",padding:"48px 0",color:"var(--muted)"}}>
-          <div style={{fontSize:32,marginBottom:12}}>⏳</div>
-          <div style={{fontSize:13,fontWeight:600,color:"var(--text)",marginBottom:4}}>Lendo o arquivo…</div>
-          <div style={{fontSize:11,color:"var(--muted)"}}>PDFs grandes podem levar alguns segundos</div>
+          <div style={{fontSize:36,marginBottom:14}}>⏳</div>
+          <div style={{fontSize:13,fontWeight:700,color:"var(--text)",marginBottom:6}}>{loadingMsg}</div>
+          <div style={{fontSize:11,color:"var(--muted)"}}>Aguarde, processando seu arquivo…</div>
         </div>
       )}
 
       {step==="preview"&&(
         <>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
-            <span style={{fontSize:12,color:"var(--text2)",fontWeight:600}}>{preview.length} transação(ões) detectada(s)</span>
+            <span style={{fontSize:12,color:"var(--text2)",fontWeight:700}}>{preview.length} transação(ões) detectada(s)</span>
             <button onClick={()=>{setStep("upload");setPreview([]);setEditCats({});}} style={{background:"none",border:"none",color:"var(--accent)",fontSize:12,cursor:"pointer",fontFamily:"'Plus Jakarta Sans',sans-serif"}}>← Trocar arquivo</button>
           </div>
           <div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:14,maxHeight:"50vh",overflowY:"auto"}}>
@@ -891,7 +908,7 @@ function ImportModal({banks,expenseCats,importType,defaultBank,vm,vy,onClose,onI
           </div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:9}}>
             <button onClick={()=>{setStep("upload");setPreview([]);setEditCats({});}} style={{background:"var(--surface)",border:"1px solid var(--border)",color:"var(--muted)",fontFamily:"'Sora',sans-serif",fontSize:13,fontWeight:600,borderRadius:10,padding:12,cursor:"pointer"}}>← Voltar</button>
-            <button className="savebtn" style={{margin:0}} onClick={confirm}>Confirmar {preview.length} itens</button>
+            <button className="savebtn" style={{margin:0}} onClick={confirm} disabled={preview.length===0}>Confirmar {preview.length} itens</button>
           </div>
         </>
       )}
@@ -1352,6 +1369,27 @@ function AppInner({session}){
           .desktop-sidebar{display:none;}
           .desktop-main{width:100%;}
         }
+
+        /* ── TEMA FIXO: cores hardcoded para garantir legibilidade ── */
+        .dark .modal-surface{background:#1e1e2e;border-top:1.5px solid rgba(255,255,255,.15);}
+        .light .modal-surface{background:#ffffff;border-top:1.5px solid rgba(0,0,0,.1);}
+        .dark .fl{color:#c0c0e0;font-size:11px;font-weight:700;margin-bottom:6px;display:block;}
+        .light .fl{color:#333355;font-size:11px;font-weight:700;margin-bottom:6px;display:block;}
+        .dark .fi{background:#12121e !important;border:1.5px solid rgba(255,255,255,.22) !important;color:#f0f0ff !important;font-size:13px;border-radius:10px;padding:11px 13px;}
+        .light .fi{background:#ededf5 !important;border:1.5px solid rgba(0,0,0,.25) !important;color:#0f0f1a !important;font-size:13px;border-radius:10px;padding:11px 13px;}
+        .dark .fi::placeholder{color:#505070;}
+        .light .fi::placeholder{color:#9090b0;}
+        .dark .catopt{background:#12121e;border:1.5px solid rgba(255,255,255,.2);color:#d0d0f0;font-size:11px;font-weight:700;}
+        .light .catopt{background:#e8e8f2;border:1.5px solid rgba(0,0,0,.2);color:#1a1a44;font-size:11px;font-weight:700;}
+        .dark .catopt.selected,.dark .catopt:focus{border-color:var(--wine);background:rgba(239,68,68,.2);}
+        .light .catopt.selected,.light .catopt:focus{border-color:var(--wine);background:rgba(220,38,38,.1);}
+        .dark .savebtn{background:linear-gradient(135deg,#6366f1,#8b5cf6);}
+        .light .savebtn{background:linear-gradient(135deg,#4f46e5,#7c3aed);}
+        .dark .mhdr .mtitle{color:#f0f0ff;}
+        .light .mhdr .mtitle{color:#0f0f1a;}
+        .dark .mclose{color:#f0f0ff;}
+        .light .mclose{color:#0f0f1a;}
+        .fab{background:#6366f1 !important;color:#fff !important;}
       `}</style>
 
       <div className={`${theme}`} style={{minHeight:"100vh",background:"var(--bg)",color:"var(--text)"}}>
