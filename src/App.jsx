@@ -610,7 +610,7 @@ function BulkPanel({type,banks,expenseCats,vy,vm,onConfirm,onClose}){
 }
 
 
-// ─── IMPORT MODAL (CSV + PDF + Imagem via IA) ───────────────────────────────
+// ─── IMPORT MODAL (CSV + PDF + Imagem via IA — múltiplos arquivos) ─────────
 
 async function loadPDFJS(){
   if(window.pdfjsLib) return window.pdfjsLib;
@@ -631,10 +631,19 @@ async function extractPDFText(file){
   for(let i=1;i<=pdf.numPages;i++){
     const page=await pdf.getPage(i);
     const content=await page.getTextContent();
+    // Agrupar por linha (Y position)
     const byY={};
-    content.items.forEach(item=>{const y=Math.round(item.transform[5]);if(!byY[y])byY[y]=[];byY[y].push(item.str);});
-    Object.keys(byY).sort((a,b)=>b-a).forEach(y=>{full+=byY[y].join(" ")+"\n";});
-    full+="\n";
+    content.items.forEach(item=>{
+      const y=Math.round(item.transform[5]);
+      if(!byY[y])byY[y]=[];
+      byY[y].push({x:Math.round(item.transform[4]),str:item.str});
+    });
+    // Ordenar por Y desc (top→bottom) e X asc (left→right)
+    Object.keys(byY).sort((a,b)=>b-a).forEach(y=>{
+      const lineItems=byY[y].sort((a,b)=>a.x-b.x);
+      full+=lineItems.map(i=>i.str).join(" ")+"\n";
+    });
+    full+="\n---PÁGINA---\n";
   }
   return full;
 }
@@ -648,45 +657,94 @@ async function fileToBase64(file){
   });
 }
 
-function parseCSVLine(line){
-  const res=[];let cur="";let inQ=false;
-  for(let i=0;i<line.length;i++){const c=line[i];if(c==='"'){inQ=!inQ;}else if(c===","&&!inQ){res.push(cur.trim());cur="";}else cur+=c;}
-  res.push(cur.trim());return res;
+// Prompt base para IA extrair transações
+const AI_PROMPT=`Analise este extrato ou fatura bancária e extraia TODAS as transações individuais de compra/débito.
+Retorne APENAS um array JSON válido, sem markdown, sem explicações, no formato:
+[{"date":"DD/MM/YYYY","description":"nome do estabelecimento","value":99.90}]
+Regras importantes:
+- value deve ser NUMÉRICO POSITIVO (sem R$, sem sinal)
+- date no formato DD/MM/YYYY
+- Inclua TODAS as transações, mesmo as pequenas
+- IGNORE: totais, saldos, limites, pagamentos de fatura, cabeçalhos, rodapés, taxas de IOF se já embutidas
+- Se uma compra for parcelada (ex: "2/6"), inclua apenas o valor DA PARCELA, não o total
+- Se não houver transações, retorne []`;
+
+async function callClaudeText(text){
+  const resp=await fetch("https://api.anthropic.com/v1/messages",{
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({
+      model:"claude-sonnet-4-20250514",
+      max_tokens:2000,
+      messages:[{role:"user",content:`${AI_PROMPT}\n\nEXTRATO:\n${text.slice(0,8000)}`}]
+    })
+  });
+  if(!resp.ok) throw new Error(`API ${resp.status}`);
+  const data=await resp.json();
+  const txt=data.content?.find(c=>c.type==="text")?.text||"[]";
+  return JSON.parse(txt.replace(/```json?|```/g,"").trim());
 }
 
-function parseBRDate(s){
-  if(!s)return null;s=s.replace(/['"]/g,"").trim();
-  const d1=s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);if(d1)return `${d1[3]}-${d1[2]}-${d1[1]}`;
-  const d2=s.match(/^(\d{4})-(\d{2})-(\d{2})$/);if(d2)return s;
-  const d3=s.match(/^(\d{2})\/(\d{2})\/(\d{2})$/);if(d3)return `20${d3[3]}-${d3[2]}-${d3[1]}`;
-  return null;
+async function callClaudeImage(base64,mediaType){
+  const resp=await fetch("https://api.anthropic.com/v1/messages",{
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({
+      model:"claude-sonnet-4-20250514",
+      max_tokens:2000,
+      messages:[{role:"user",content:[
+        {type:"image",source:{type:"base64",media_type:mediaType,data:base64}},
+        {type:"text",text:AI_PROMPT}
+      ]}]
+    })
+  });
+  if(!resp.ok) throw new Error(`API ${resp.status}`);
+  const data=await resp.json();
+  const txt=data.content?.find(c=>c.type==="text")?.text||"[]";
+  return JSON.parse(txt.replace(/```json?|```/g,"").trim());
 }
 
 function parseBRDateFull(s,vy){
-  if(!s)return null;s=s.trim();
+  if(!s)return null;
+  s=String(s).trim();
   const months={JAN:"01",FEV:"02",MAR:"03",ABR:"04",MAI:"05",JUN:"06",JUL:"07",AGO:"08",SET:"09",OUT:"10",NOV:"11",DEZ:"12"};
   const m1=s.match(/^(\d{2})[\/\-](\d{2})(?:[\/\-](\d{2,4}))?$/);
-  if(m1){const y=m1[3]?(m1[3].length===2?"20"+m1[3]:m1[3]):String(vy);return `${y}-${m1[2]}-${m1[1]}`;}
-  const m2=s.match(/^(\d{2})[\/\-](\d{2})[\/\-](\d{4})$/);if(m2)return `${m2[3]}-${m2[2]}-${m2[1]}`;
+  if(m1){const y=m1[3]?(m1[3].length===2?"20"+m1[3]:m1[3]):String(vy);return `${y}-${m1[2].padStart(2,"0")}-${m1[1].padStart(2,"0")}`;}
+  const m2=s.match(/^(\d{4})[\/\-](\d{2})[\/\-](\d{2})$/);
+  if(m2)return `${m2[1]}-${m2[2]}-${m2[3]}`;
   const m3=s.match(/^(\d{2})\s+(JAN|FEV|MAR|ABR|MAI|JUN|JUL|AGO|SET|OUT|NOV|DEZ)(?:\s+(\d{2,4}))?$/i);
-  if(m3){const y=m3[3]?(m3[3].length===2?"20"+m3[3]:m3[3]):String(vy);return `${y}-${months[m3[2].toUpperCase()]}-${m3[1]}`;}
-  return parseBRDate(s)||null;
+  if(m3){const y=m3[3]?(m3[3].length===2?"20"+m3[3]:m3[3]):String(vy);return `${y}-${months[m3[2].toUpperCase()]}-${m3[1].padStart(2,"0")}`;}
+  const m4=s.match(/(\d{2})[\/\-](\d{2})[\/\-](\d{4})/);
+  if(m4)return `${m4[3]}-${m4[2]}-${m4[1]}`;
+  return null;
+}
+
+function parseValue(v){
+  if(typeof v==="number") return Math.abs(v);
+  const s=String(v).replace(/R\$\s*/gi,"").replace(/\s/g,"").trim();
+  // Formato BR: 1.234,56
+  if(/^\d{1,3}(\.\d{3})*,\d{2}$/.test(s)) return Math.abs(parseFloat(s.replace(/\./g,"").replace(",",".")));
+  // Formato US: 1,234.56
+  if(/^\d{1,3}(,\d{3})*\.\d{2}$/.test(s)) return Math.abs(parseFloat(s.replace(/,/g,"")));
+  // Só vírgula: 34,90
+  if(/^\d+,\d{2}$/.test(s)) return Math.abs(parseFloat(s.replace(",",".")));
+  return Math.abs(parseFloat(s.replace(",","."))||0);
 }
 
 function guessCategory(desc,expenseCats){
-  const d=desc.toLowerCase();
+  const d=(desc||"").toLowerCase();
   const keywords={
-    "alimentação":["ifood","rappi","uber eats","mcdonalds","burger","pizza","restaurante","lanchonete","padaria","mercado","supermercado","carrefour","atacadao","comida","sushi"],
+    "alimentação":["ifood","rappi","uber eats","mcdonalds","burger","pizza","restaurante","lanchonete","padaria","mercado","supermercado","carrefour","atacadao","comida","sushi","acai","cafe"],
     "gasolina":["posto","shell","petrobras","ipiranga","vibra","gasolina","combustivel","br mania","ale","raizen"],
-    "transporte":["uber","99app","taxi","onibus","metro","passagem","embarque","estacionamento","99 tecnologia"],
-    "farmácia":["drogaria","farmacia","droga","ultrafarma","pacheco","raia","drogasil","panvel"],
+    "transporte":["uber","99app","taxi","onibus","metro","passagem","embarque","estacionamento","99 tecnologia","cabify"],
+    "farmácia":["drogaria","farmacia","droga","ultrafarma","pacheco","raia","drogasil","panvel","ultrafarma"],
     "saúde":["hospital","clinica","medico","consulta","exame","laboratorio","odonto","dentista","unimed","amil","hapvida"],
-    "assinaturas":["netflix","spotify","amazon prime","youtube","adobe","microsoft","apple","google","disney","hbo","globoplay","deezer","icloud","canva","chatgpt","openai"],
-    "lazer":["cinema","teatro","show","evento","ingresso","ticket","sympla","boliche","parque"],
-    "compras online":["amazon","shopee","aliexpress","americanas","magazine luiza","mercado livre","shein","magalu"],
+    "assinaturas":["netflix","spotify","amazon prime","youtube","adobe","microsoft","apple","google","disney","hbo","globoplay","deezer","icloud","canva","chatgpt","openai","claude"],
+    "lazer":["cinema","teatro","show","evento","ingresso","ticket","sympla","boliche","parque","bar ","balada","role"],
+    "compras online":["amazon","shopee","aliexpress","americanas","magazine luiza","mercado livre","shein","magalu","shopee"],
     "roupa / tênis":["nike","adidas","puma","vans","converse","hering","riachuelo","c&a","renner","zara","farm","arezzo"],
-    "moradia":["aluguel","condominio","iptu","energia","enel","sabesp","comgas"],
-    "cursos online":["udemy","coursera","alura","rocketseat","hotmart","eduzz"],
+    "moradia":["aluguel","condominio","iptu","energia","enel","sabesp","comgas","net","claro","tim","vivo"],
+    "cursos online":["udemy","coursera","alura","rocketseat","hotmart","eduzz","origamid"],
     "carro / seguro / ipva":["seguro auto","ipva","detran","mecanico","borracharia","lavagem","porto seguro auto"],
     "corte de cabelo":["barbearia","salao","hair","cabelo","barba"],
   };
@@ -699,122 +757,119 @@ function guessCategory(desc,expenseCats){
   return expenseCats[expenseCats.length-1]?.name||"Outros";
 }
 
+function transactionsToEntries(transactions,importType,expenseCats,selBank,vm,vy,todayStr){
+  return transactions
+    .filter(t=>parseValue(t.value)>0)
+    .map(t=>({
+      id:uid(),
+      ...(importType==="credit"?{
+        name:String(t.description||t.desc||"Importado"),
+        category:guessCategory(t.description||t.desc||"",expenseCats),
+        bank:selBank,
+        totalValue:parseValue(t.value),
+        monthlyValue:parseValue(t.value),
+        installments:1,installmentNum:1,
+        date:parseBRDateFull(String(t.date||""),vy)||todayStr,
+        monthYear:`${vy}-${vm}`,
+        groupId:uid(),
+      }:importType==="expense"?{
+        category:guessCategory(t.description||t.desc||"",expenseCats),
+        description:String(t.description||t.desc||"Importado"),
+        value:parseValue(t.value),
+        date:parseBRDateFull(String(t.date||""),vy)||todayStr,
+        bank:selBank,method:"PIX",essential:false,
+      }:{
+        name:String(t.description||t.desc||"Importado"),
+        value:parseValue(t.value),
+        date:parseBRDateFull(String(t.date||""),vy)||todayStr,
+      })
+    }));
+}
+
 function ImportModal({banks,expenseCats,importType,defaultBank,vm,vy,onClose,onImport}){
   const [step,setStep]=useState("upload");
   const [fileError,setFileError]=useState("");
   const [preview,setPreview]=useState([]);
   const [selBank,setSelBank]=useState(defaultBank||banks[0]?.name||"");
   const [editCats,setEditCats]=useState({});
-  const [loadingMsg,setLoadingMsg]=useState("Lendo arquivo…");
+  const [loadingMsg,setLoadingMsg]=useState("");
+  const [loadingDetail,setLoadingDetail]=useState("");
   const inputRef=React.useRef();
   const todayStr=`${vy}-${String(vm+1).padStart(2,"0")}-${String(new Date().getDate()).padStart(2,"0")}`;
-  const isImage=(type)=>["image/jpeg","image/jpg","image/png","image/gif","image/webp","image/heic"].includes(type?.toLowerCase())||false;
 
-  async function handleFile(file){
-    if(!file)return;
-    const ext=file.name.split(".").pop().toLowerCase();
-    const imgExts=["jpg","jpeg","png","gif","webp","heic"];
-    if(!["csv","txt","ofx","pdf",...imgExts].includes(ext)){setFileError("Formato não suportado. Use CSV, PDF ou uma foto (JPG, PNG).");return;}
+  const IMG_EXTS=["jpg","jpeg","png","gif","webp","heic","jfif"];
+
+  async function handleFiles(fileList){
+    const files=Array.from(fileList);
+    if(!files.length)return;
     setFileError("");setStep("loading");
-    if(imgExts.includes(ext)){
-      setLoadingMsg("Analisando imagem com IA… pode levar alguns segundos");
-      try{await handleImageFile(file);}
-      catch(err){setFileError("Erro ao processar imagem: "+(err.message||"tente novamente"));setStep("upload");}
-      return;
+    const allEntries=[];
+    for(let i=0;i<files.length;i++){
+      const file=files[i];
+      const ext=file.name.split(".").pop().toLowerCase();
+      setLoadingMsg(`Processando arquivo ${i+1} de ${files.length}…`);
+      setLoadingDetail(file.name);
+      try{
+        let transactions=[];
+        if(IMG_EXTS.includes(ext)||file.type.startsWith("image/")){
+          setLoadingMsg(`Analisando imagem ${i+1}/${files.length} com IA…`);
+          const b64=await fileToBase64(file);
+          const mt=file.type||"image/jpeg";
+          transactions=await callClaudeImage(b64,mt);
+        } else if(ext==="pdf"){
+          setLoadingMsg(`Lendo PDF ${i+1}/${files.length}…`);
+          const text=await extractPDFText(file);
+          setLoadingMsg(`Interpretando PDF ${i+1}/${files.length} com IA…`);
+          transactions=await callClaudeText(text);
+        } else {
+          // CSV / TXT / OFX
+          setLoadingMsg(`Lendo CSV ${i+1}/${files.length}…`);
+          transactions=await new Promise((res,rej)=>{
+            const r=new FileReader();
+            r.onload=e=>{
+              try{res(parseCSVtoTransactions(e.target.result));}
+              catch(err){rej(err);}
+            };
+            r.onerror=()=>rej(new Error("Erro ao ler arquivo"));
+            r.readAsText(file,"UTF-8");
+          });
+        }
+        const entries=transactionsToEntries(transactions,importType,expenseCats,selBank,vm,vy,todayStr);
+        allEntries.push(...entries);
+      } catch(err){
+        console.error("Erro ao processar",file.name,err);
+        setFileError(`Erro em "${file.name}": ${err.message}. Outros arquivos foram processados normalmente.`);
+      }
     }
-    if(ext==="pdf"){
-      setLoadingMsg("Lendo PDF…");
-      try{const text=await extractPDFText(file);parsePDFText(text);}
-      catch(err){setFileError("Erro ao ler PDF: "+err.message+". Tente exportar como CSV.");setStep("upload");}
-      return;
+    if(!allEntries.length){
+      setFileError("Nenhuma transação encontrada. Verifique se o arquivo é legível e tente novamente.");
+      setStep("upload");return;
     }
-    setLoadingMsg("Processando…");
-    const reader=new FileReader();
-    reader.onload=(e)=>parseCSV(e.target.result);
-    reader.onerror=()=>{setFileError("Erro ao ler o arquivo.");setStep("upload");};
-    reader.readAsText(file,"UTF-8");
-  }
-
-  function buildEntry(date,desc,val){
-    const absVal=Math.abs(val);
-    if(importType==="credit")return{id:uid(),name:desc,category:guessCategory(desc,expenseCats),bank:selBank,totalValue:absVal,monthlyValue:absVal,installments:1,installmentNum:1,date,monthYear:`${vy}-${vm}`,groupId:uid()};
-    if(importType==="expense")return{id:uid(),category:guessCategory(desc,expenseCats),description:desc,value:absVal,date,bank:selBank,method:"PIX",essential:false};
-    return{id:uid(),name:desc,value:absVal,date};
-  }
-
-  async function handleImageFile(file){
-    const mediaType=file.type||"image/jpeg";
-    const base64=await fileToBase64(file);
-    const resp=await fetch("https://api.anthropic.com/v1/messages",{
-      method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({
-        model:"claude-sonnet-4-20250514",
-        max_tokens:1500,
-        messages:[{role:"user",content:[
-          {type:"image",source:{type:"base64",media_type:mediaType,data:base64}},
-          {type:"text",text:`Analise esta imagem de extrato ou fatura bancária. Extraia TODAS as transações individuais visíveis. Retorne APENAS um array JSON válido, sem markdown, sem explicações, no formato: [{"date":"DD/MM/YYYY","description":"nome do estabelecimento ou descrição","value":99.90}]. Use valor numérico positivo. Ignore totais, saldos, limites, cabeçalhos e rodapés. Se não encontrar transações, retorne [].`}
-        ]}]
-      })
-    });
-    if(!resp.ok)throw new Error(`API error ${resp.status}`);
-    const data=await resp.json();
-    const text=data.content?.find(c=>c.type==="text")?.text||"[]";
-    let transactions=[];
-    try{transactions=JSON.parse(text.replace(/```json?|```/g,"").trim());}
-    catch(_){throw new Error("Não foi possível interpretar a resposta da IA");}
-    if(!transactions.length){setFileError("Nenhuma transação encontrada na imagem. Tente uma foto mais nítida ou exporte como CSV.");setStep("upload");return;}
-    const rows=transactions.map(t=>buildEntry(parseBRDateFull(String(t.date||""),vy)||todayStr,String(t.description||t.desc||"Importado"),Math.abs(parseFloat(String(t.value||"0").replace(",",".")))||0));
-    setPreview(rows.filter(r=>(r.value||r.monthlyValue||0)>0));
+    setPreview(allEntries);
     setStep("preview");
   }
 
-  function parseCSV(text){
+  function parseCSVtoTransactions(text){
     const lines=text.trim().split(/\r?\n/).filter(l=>l.trim());
-    if(lines.length<2){setFileError("Arquivo vazio ou inválido.");setStep("upload");return;}
+    if(lines.length<2)return[];
     const sep=lines[0].includes(";")?";":",";
     const headers=lines[0].split(sep).map(h=>h.replace(/['"]/g,"").trim().toLowerCase());
     let dateIdx=headers.findIndex(h=>/data|date|dt\b/.test(h));
     let descIdx=headers.findIndex(h=>/títul|titulo|descri|memo|lancam|estabele|histor|narrat|lançam/.test(h));
-    let valIdx=headers.findIndex(h=>/^valor$|^value$|^amount$|montante|debito|credito/.test(h));
-    if(valIdx===-1)valIdx=headers.findIndex(h=>/valor|value|amount/.test(h));
+    let valIdx=headers.findIndex(h=>/^valor$|^value$|^amount$|montante/.test(h));
+    if(valIdx===-1)valIdx=headers.findIndex(h=>/valor|value|amount|debito/.test(h));
     if(dateIdx===-1)dateIdx=0;
-    if(descIdx===-1)descIdx=headers.length>2?1:0;
-    if(valIdx===-1){setFileError("Coluna de valor não encontrada.");setStep("upload");return;}
+    if(descIdx===-1)descIdx=1;
+    if(valIdx===-1)throw new Error("Coluna de valor não encontrada");
     const rows=[];
     for(let i=1;i<lines.length;i++){
       const cols=lines[i].split(sep).map(c=>c.replace(/['"]/g,"").trim());
       if(cols.length<=valIdx)continue;
-      const dateRaw=cols[dateIdx]||"";const desc=cols[descIdx]||`Item ${i}`;
-      const valClean=(cols[valIdx]||"0").replace(/R\$\s*/gi,"").replace(/\./g,"").replace(",",".");
-      const val=parseFloat(valClean);
-      if(isNaN(val)||val===0)continue;
-      rows.push(buildEntry(parseBRDateFull(dateRaw,vy)||todayStr,desc,val));
+      const val=parseValue(cols[valIdx]);
+      if(!val)continue;
+      rows.push({date:cols[dateIdx]||"",description:cols[descIdx]||`Item ${i}`,value:val});
     }
-    if(!rows.length){setFileError("Nenhuma transação encontrada.");setStep("upload");return;}
-    setPreview(rows);setStep("preview");
-  }
-
-  function parsePDFText(text){
-    const lines=text.split("\n").map(l=>l.trim()).filter(l=>l.length>2);
-    const rows=[];
-    const datePat=/\b(\d{2}[\/\-]\d{2}(?:[\/\-]\d{2,4})?|\d{2}\s+(?:JAN|FEV|MAR|ABR|MAI|JUN|JUL|AGO|SET|OUT|NOV|DEZ)(?:\s+\d{2,4})?)\b/i;
-    const valPat=/(-?\s*\d{1,3}(?:\.\d{3})*,\d{2}|-?\s*\d+,\d{2})\s*$/;
-    const skipPat=/total|saldo|limite|fatura|pagamento|vencimento|cpf|cnpj|obrigado|extrato|banco|agência|conta|página|\*{3}/i;
-    for(let i=0;i<lines.length;i++){
-      const line=lines[i];if(skipPat.test(line))continue;
-      const dateMatch=line.match(datePat);const valMatch=line.match(valPat);
-      if(!dateMatch||!valMatch)continue;
-      const dateStr=parseBRDateFull(dateMatch[1],vy)||todayStr;
-      const val=parseFloat(valMatch[1].replace(/\s/g,"").replace(/\./g,"").replace(",","."));
-      if(isNaN(val)||val===0)continue;
-      let desc=line.replace(dateMatch[0],"").replace(valMatch[0],"").replace(/R\$/g,"").replace(/\s{2,}/g," ").trim();
-      if(desc.length<3&&i+1<lines.length&&!lines[i+1].match(datePat))desc=lines[i+1].trim()||desc;
-      if(!desc||desc.length<2)desc="Importado PDF";
-      rows.push(buildEntry(dateStr,desc,val));
-    }
-    if(!rows.length){setFileError("Nenhuma transação reconhecida no PDF. Tente exportar como CSV.");setStep("upload");return;}
-    setPreview(rows);setStep("preview");
+    return rows;
   }
 
   function confirm(){
@@ -824,6 +879,7 @@ function ImportModal({banks,expenseCats,importType,defaultBank,vm,vy,onClose,onI
 
   const catMap=Object.fromEntries(expenseCats.map(c=>[c.name,c]));
   const typeLabel={expense:"Gastos (Débito/PIX)",income:"Entradas",credit:"Lançamentos no crédito"};
+  const totalValue=preview.reduce((s,p)=>s+(p.value||p.monthlyValue||0),0);
 
   return (
     <>
@@ -834,9 +890,10 @@ function ImportModal({banks,expenseCats,importType,defaultBank,vm,vy,onClose,onI
 
       {step==="upload"&&(
         <>
-          <div style={{background:"rgba(99,102,241,.08)",border:"1px solid rgba(99,102,241,.25)",borderRadius:12,padding:"12px 14px",marginBottom:14,fontSize:12,color:"var(--text2)",lineHeight:1.7}}>
-            <strong style={{color:"var(--accent)"}}>Aceita:</strong> CSV, PDF, TXT, OFX e <strong style={{color:"var(--accent)"}}>fotos/prints</strong> de extrato — a IA lê a imagem e extrai os lançamentos automaticamente.
+          <div style={{background:"rgba(99,102,241,.08)",border:"1px solid rgba(99,102,241,.25)",borderRadius:12,padding:"12px 14px",marginBottom:14,fontSize:12,lineHeight:1.7}}>
+            <strong style={{color:"var(--accent)"}}>Aceita múltiplos arquivos:</strong> selecione várias fotos, PDFs ou CSVs de uma vez. A IA lê cada um e combina tudo no preview.
           </div>
+
           {importType==="credit"&&(
             <div className="fg">
               <label className="fl">Cartão / banco</label>
@@ -845,70 +902,93 @@ function ImportModal({banks,expenseCats,importType,defaultBank,vm,vy,onClose,onI
               </select>
             </div>
           )}
+
           <div
             onClick={()=>inputRef.current?.click()}
             onDragOver={e=>{e.preventDefault();e.currentTarget.style.borderColor="var(--accent)";}}
             onDragLeave={e=>{e.currentTarget.style.borderColor="var(--border2)";}}
-            onDrop={e=>{e.preventDefault();e.currentTarget.style.borderColor="var(--border2)";handleFile(e.dataTransfer.files[0]);}}
+            onDrop={e=>{e.preventDefault();e.currentTarget.style.borderColor="var(--border2)";handleFiles(e.dataTransfer.files);}}
             style={{border:"2px dashed var(--border2)",borderRadius:14,padding:"32px 16px",textAlign:"center",cursor:"pointer",marginBottom:14,transition:"border-color .2s"}}>
             <div style={{fontSize:32,marginBottom:10}}>📸</div>
-            <div style={{fontSize:13,fontWeight:700,color:"var(--text)",marginBottom:4}}>Clique ou arraste o arquivo aqui</div>
-            <div style={{fontSize:11,color:"var(--muted)",marginBottom:10}}>Foto, print, CSV ou PDF</div>
+            <div style={{fontSize:13,fontWeight:700,color:"var(--text)",marginBottom:4}}>Clique ou arraste aqui</div>
+            <div style={{fontSize:11,color:"var(--muted)",marginBottom:10}}>Fotos, prints, CSV ou PDF — pode selecionar vários de uma vez</div>
             <div style={{display:"flex",justifyContent:"center",gap:6,flexWrap:"wrap"}}>
-              {["📷 Foto","🖼 Print","PDF","CSV","TXT","OFX"].map(f=>(
-                <span key={f} style={{fontSize:10,fontWeight:700,background:"var(--card2)",border:"1px solid var(--border2)",borderRadius:6,padding:"2px 8px",color:"var(--text2)"}}>{f}</span>
+              {["📷 Fotos","🖼 Prints","PDF","CSV","TXT"].map(f=>(
+                <span key={f} style={{fontSize:10,fontWeight:700,background:"var(--card2)",border:"1px solid var(--border2)",borderRadius:6,padding:"2px 8px"}}>{f}</span>
               ))}
             </div>
-            <input ref={inputRef} type="file" accept=".csv,.txt,.ofx,.pdf,.jpg,.jpeg,.png,.gif,.webp,.heic,image/*" style={{display:"none"}} onChange={e=>handleFile(e.target.files[0])}/>
+            <input ref={inputRef} type="file" multiple accept=".csv,.txt,.ofx,.pdf,.jpg,.jpeg,.png,.gif,.webp,.heic,image/*" style={{display:"none"}} onChange={e=>handleFiles(e.target.files)}/>
           </div>
+
           {fileError&&<div style={{background:"var(--red-dim)",border:"1px solid rgba(239,68,68,.3)",borderRadius:10,padding:"10px 12px",fontSize:12,color:"var(--red)",marginBottom:12}}>{fileError}</div>}
+
           <div style={{background:"var(--card2)",borderRadius:10,padding:"10px 12px",fontSize:11,color:"var(--muted)",lineHeight:1.7}}>
-            <strong style={{color:"var(--text2)",display:"block",marginBottom:4}}>Como exportar:</strong>
+            <strong style={{color:"var(--text2)",display:"block",marginBottom:4}}>Como exportar por banco:</strong>
             <span style={{color:"var(--accent)"}}>Nubank:</span> App → Fatura → Exportar CSV<br/>
-            <span style={{color:"var(--accent)"}}>Santander/C6/Porto:</span> App → Extrato → Exportar PDF ou CSV<br/>
-            <span style={{color:"var(--accent)"}}>Foto/print:</span> Tire uma foto da tela ou do extrato impresso — a IA extrai os dados
+            <span style={{color:"var(--accent)"}}>Santander/C6/Porto:</span> App → Extrato → PDF ou CSV<br/>
+            <span style={{color:"var(--accent)"}}>Foto/print:</span> A IA lê automaticamente — quanto mais nítido, mais preciso
           </div>
         </>
       )}
 
       {step==="loading"&&(
-        <div style={{textAlign:"center",padding:"48px 0",color:"var(--muted)"}}>
+        <div style={{textAlign:"center",padding:"48px 20px",color:"var(--muted)"}}>
           <div style={{fontSize:36,marginBottom:14}}>⏳</div>
           <div style={{fontSize:13,fontWeight:700,color:"var(--text)",marginBottom:6}}>{loadingMsg}</div>
-          <div style={{fontSize:11,color:"var(--muted)"}}>Aguarde, processando seu arquivo…</div>
+          <div style={{fontSize:11,color:"var(--muted)"}}>{loadingDetail}</div>
         </div>
       )}
 
       {step==="preview"&&(
         <>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
-            <span style={{fontSize:12,color:"var(--text2)",fontWeight:700}}>{preview.length} transação(ões) detectada(s)</span>
-            <button onClick={()=>{setStep("upload");setPreview([]);setEditCats({});}} style={{background:"none",border:"none",color:"var(--accent)",fontSize:12,cursor:"pointer",fontFamily:"'Plus Jakarta Sans',sans-serif"}}>← Trocar arquivo</button>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+            <span style={{fontSize:12,fontWeight:700}}>{preview.length} transação(ões)</span>
+            <div style={{textAlign:"right"}}>
+              <div style={{fontSize:13,fontWeight:800,color:"var(--wine)"}}>{fmt(totalValue)}</div>
+              <div style={{fontSize:10,color:"var(--muted)"}}>total importado</div>
+            </div>
           </div>
-          <div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:14,maxHeight:"50vh",overflowY:"auto"}}>
+
+          <button onClick={()=>{setStep("upload");setPreview([]);setEditCats({});}}
+            style={{background:"none",border:"none",color:"var(--accent)",fontSize:11,cursor:"pointer",fontFamily:"'Plus Jakarta Sans',sans-serif",padding:"0 0 10px",display:"block"}}>
+            ← Adicionar mais arquivos
+          </button>
+
+          <div style={{display:"flex",flexDirection:"column",gap:5,marginBottom:14,maxHeight:"48vh",overflowY:"auto"}}>
             {preview.map((p,i)=>{
               const cat=catMap[editCats[i]||p.category]||{icon:"📌",color:"#888"};
               const d=(p.date||"").slice(5).split("-").reverse().join("/");
               return (
-                <div key={i} style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:10,padding:"9px 11px",display:"flex",alignItems:"center",gap:9}}>
-                  <div style={{width:30,height:30,borderRadius:8,background:cat.color+"33",display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,flexShrink:0}}>{cat.icon}</div>
+                <div key={i} style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:10,padding:"8px 10px",display:"flex",alignItems:"center",gap:8}}>
+                  <div style={{width:28,height:28,borderRadius:7,background:cat.color+"33",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,flexShrink:0}}>{cat.icon}</div>
                   <div style={{flex:1,minWidth:0}}>
                     <div style={{fontSize:12,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.name||p.description}</div>
                     <div style={{fontSize:10,color:"var(--muted)",marginTop:1,display:"flex",gap:4,alignItems:"center",flexWrap:"wrap"}}>
                       <span>{d}</span>
                       <select value={editCats[i]||p.category} onChange={e=>setEditCats(ec=>({...ec,[i]:e.target.value}))}
-                        style={{fontSize:10,background:"var(--card2)",border:"1px solid var(--border2)",color:"var(--text2)",borderRadius:6,padding:"2px 4px",fontFamily:"'Plus Jakarta Sans',sans-serif",cursor:"pointer"}}>
+                        style={{fontSize:10,background:"var(--card2)",border:"1px solid var(--border2)",color:"var(--text2)",borderRadius:5,padding:"1px 3px",fontFamily:"'Plus Jakarta Sans',sans-serif",cursor:"pointer"}}>
                         {expenseCats.map(c=><option key={c.name} value={c.name}>{c.icon} {c.name}</option>)}
                       </select>
                     </div>
                   </div>
-                  <div style={{fontSize:12,fontWeight:700,color:importType==="income"?"var(--green)":"var(--wine)",flexShrink:0}}>{importType==="income"?"+":"-"}{fmt(p.value||p.monthlyValue||0)}</div>
+                  <div style={{display:"flex",alignItems:"center",gap:6}}>
+                    <div style={{fontSize:12,fontWeight:700,color:"var(--wine)"}}>{fmt(p.value||p.monthlyValue||0)}</div>
+                    <button onClick={()=>setPreview(pv=>pv.filter((_,j)=>j!==i))}
+                      style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:12,padding:"2px 3px",flexShrink:0}}>✕</button>
+                  </div>
                 </div>
               );
             })}
           </div>
+
+          <div style={{background:"var(--card2)",borderRadius:10,padding:"8px 12px",marginBottom:10,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span style={{fontSize:11,color:"var(--muted)"}}>Total a confirmar</span>
+            <span style={{fontSize:14,fontWeight:800,color:"var(--wine)"}}>{fmt(totalValue)}</span>
+          </div>
+
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:9}}>
-            <button onClick={()=>{setStep("upload");setPreview([]);setEditCats({});}} style={{background:"var(--surface)",border:"1px solid var(--border)",color:"var(--muted)",fontFamily:"'Sora',sans-serif",fontSize:13,fontWeight:600,borderRadius:10,padding:12,cursor:"pointer"}}>← Voltar</button>
+            <button onClick={()=>{setStep("upload");setPreview([]);setEditCats({});}}
+              style={{background:"var(--surface)",border:"1px solid var(--border)",color:"var(--muted)",fontFamily:"'Sora',sans-serif",fontSize:13,fontWeight:600,borderRadius:10,padding:12,cursor:"pointer"}}>← Voltar</button>
             <button className="savebtn" style={{margin:0}} onClick={confirm} disabled={preview.length===0}>Confirmar {preview.length} itens</button>
           </div>
         </>
