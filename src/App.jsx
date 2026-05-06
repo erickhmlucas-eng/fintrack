@@ -240,6 +240,7 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
   const [editingPurchase,setEditingPurchase]=useState(null);
   const [closingInvoice,setClosingInvoice]=useState(false);
   const [nextCreditData,setNextCreditData]=useState(null);
+  const [viewingHistory,setViewingHistory]=useState(false); // toggle histórico
   const catMap=Object.fromEntries(expenseCats.map(c=>[c.name,c]));
 
   const nm=vm===11?0:vm+1, ny=vm===11?vy+1:vy;
@@ -247,19 +248,26 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
   const invoiceId=`invoice_${selectedBank}_${vy}_${vm}`;
   const invoiceAlreadyClosed=(monthData.fixed||[]).some(f=>f.id===invoiceId);
 
-  // Quando fatura está fechada, carregar dados do próximo mês automaticamente
+  // Reset viewingHistory quando trocar de banco ou mês
+  useEffect(()=>{setViewingHistory(false);},[selectedBank,vm,vy]);
+
+  // Carregar dados do próximo mês UMA VEZ quando fatura fecha
   useEffect(()=>{
     if(invoiceAlreadyClosed){
       dbGet(creditKey(ny,nm)).then(d=>setNextCreditData(d||EMPTY_CREDIT()));
     } else {
       setNextCreditData(null);
+      setViewingHistory(false);
     }
-  },[invoiceAlreadyClosed,selectedBank,nm,ny]);
+  },[invoiceAlreadyClosed,nm,ny]); // removido selectedBank — não re-fetch ao trocar banco
 
-  // Usar dados do próximo mês quando fatura atual está fechada
-  const activeCreditData=invoiceAlreadyClosed&&nextCreditData ? nextCreditData : creditData;
-  const activeMonth=invoiceAlreadyClosed ? nm : vm;
-  const activeYear=invoiceAlreadyClosed ? ny : vy;
+  // viewingHistory=true → mostra fatura fechada (mês atual)
+  // viewingHistory=false → mostra ciclo ativo (próximo mês se fechado)
+  const activeCreditData = viewingHistory ? creditData
+    : (invoiceAlreadyClosed && nextCreditData) ? nextCreditData
+    : creditData;
+  const activeMonth = viewingHistory ? vm : (invoiceAlreadyClosed ? nm : vm);
+  const activeYear  = viewingHistory ? vy : (invoiceAlreadyClosed ? ny : vy);
 
   const bank=banks?.find(b=>b.name===selectedBank)||banks?.[0];
   const purchases=(activeCreditData?.purchases)||[];
@@ -296,8 +304,10 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
   }
 
   function addPurchase(purchase){
-    const [invoiceY, invoiceM]=purchase.invoiceMonth.split("-").map(Number);
-    const isCurrent=(invoiceY===vy&&invoiceM===vm);
+    const [invoiceY,invoiceM]=purchase.invoiceMonth.split("-").map(Number);
+    // Determinar em qual state/DB salvar baseado no mês alvo
+    const isNextMonthTarget=(invoiceY===ny&&invoiceM===nm);
+    const isCurrentMonthTarget=(invoiceY===vy&&invoiceM===vm);
 
     if(purchase.installments>1){
       const allParcels=[];
@@ -305,16 +315,22 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
         const totalM=invoiceM+i;
         const m=totalM%12, y=invoiceY+Math.floor(totalM/12);
         allParcels.push({
-          ...purchase,
-          id:uid(),
-          monthYear:`${y}-${m}`,
+          ...purchase,id:uid(),monthYear:`${y}-${m}`,
           monthlyValue:parseFloat((purchase.totalValue/purchase.installments).toFixed(2)),
           installmentNum:i+1,
           name:`${purchase.name} (${i+1}/${purchase.installments})`,
         });
       }
-      const curKey=`${vy}-${vm}`;
-      const curParcels=allParcels.filter(p=>p.monthYear===curKey);
+      // Salvar parcelas do mês correto no state imediatamente
+      const curParcels=allParcels.filter(p=>p.monthYear===`${vy}-${vm}`);
+      const nextParcels=allParcels.filter(p=>p.monthYear===`${ny}-${nm}`);
+      if(nextParcels.length>0&&invoiceAlreadyClosed){
+        setNextCreditData(d=>{
+          const updated={purchases:[...nextParcels,...(d?.purchases||[])]};
+          dbSet(creditKey(ny,nm),updated);
+          return updated;
+        });
+      }
       if(curParcels.length>0){
         setCreditData(d=>{
           const updated={purchases:[...curParcels,...(d.purchases||[])]};
@@ -322,9 +338,11 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
           return updated;
         });
       }
+      // Salvar outros meses só no DB
       const grouped={};
-      allParcels.forEach(p=>{if(!grouped[p.monthYear]) grouped[p.monthYear]=[];grouped[p.monthYear].push(p);});
+      allParcels.forEach(p=>{if(!grouped[p.monthYear])grouped[p.monthYear]=[];grouped[p.monthYear].push(p);});
       Object.entries(grouped).forEach(([key,ps])=>{
+        if(key===`${vy}-${vm}`||key===`${ny}-${nm}`) return; // já salvos acima
         const [y,m]=key.split("-").map(Number);
         dbGet(creditKey(y,m)).then(existing=>{
           const ex=existing||EMPTY_CREDIT();
@@ -333,13 +351,21 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
       });
     } else {
       const p={...purchase,id:uid(),monthYear:`${invoiceY}-${invoiceM}`,monthlyValue:purchase.totalValue,installmentNum:1};
-      if(isCurrent){
+      if(isNextMonthTarget&&invoiceAlreadyClosed){
+        // Fatura fechada → salva no próximo mês (state + DB) imediatamente
+        setNextCreditData(d=>{
+          const updated={purchases:[p,...(d?.purchases||[])]};
+          dbSet(creditKey(ny,nm),updated);
+          return updated;
+        });
+      } else if(isCurrentMonthTarget){
         setCreditData(d=>{
           const updated={purchases:[p,...(d.purchases||[])]};
           dbSet(creditKey(vy,vm),updated);
           return updated;
         });
       } else {
+        // Mês futuro — só DB
         dbGet(creditKey(invoiceY,invoiceM)).then(existing=>{
           const ex=existing||EMPTY_CREDIT();
           dbSet(creditKey(invoiceY,invoiceM),{purchases:[p,...(ex.purchases||[])]});
@@ -350,8 +376,7 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
   }
 
   function deletePurchase(id){
-    if(invoiceAlreadyClosed){
-      // Deletar do próximo mês
+    if(invoiceAlreadyClosed&&!viewingHistory){
       setNextCreditData(d=>{
         const updated={purchases:(d?.purchases||[]).filter(p=>p.id!==id)};
         dbSet(creditKey(ny,nm),updated);
@@ -370,7 +395,7 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
     const newMonthlyValue=updated.installments>1
       ?parseFloat((updated.totalValue/updated.installments).toFixed(2))
       :updated.totalValue;
-    if(invoiceAlreadyClosed){
+    if(invoiceAlreadyClosed&&!viewingHistory){
       setNextCreditData(d=>{
         const updated2={purchases:(d?.purchases||[]).map(p=>p.id===updated.id?{...p,...updated,monthlyValue:newMonthlyValue}:p)};
         dbSet(creditKey(ny,nm),updated2);
@@ -394,8 +419,32 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
 
   return (
     <div className="pg">
-      <div className="st">Cartões — {invoiceAlreadyClosed?`${MONTHS_FULL[nm]} ${activeYear} (fatura aberta)` : `${MONTHS_FULL[vm]} ${vy}`}</div>
+      {/* Título com toggle histórico */}
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8}}>
+        <div className="st">
+          {viewingHistory
+            ? `Histórico — ${MONTHS_FULL[vm]} ${vy}`
+            : invoiceAlreadyClosed
+            ? `Cartões — ${MONTHS_FULL[nm]} ${activeYear} (fatura aberta)`
+            : `Cartões — ${MONTHS_FULL[vm]} ${vy}`}
+        </div>
+        {invoiceAlreadyClosed&&(
+          <button onClick={()=>setViewingHistory(v=>!v)}
+            style={{background:viewingHistory?"rgba(99,102,241,.15)":"rgba(255,255,255,.06)",border:`1px solid ${viewingHistory?"var(--accent)":"var(--border2)"}`,color:viewingHistory?"var(--accent)":"var(--muted)",fontFamily:"'Plus Jakarta Sans',sans-serif",fontSize:11,fontWeight:700,borderRadius:20,padding:"4px 12px",cursor:"pointer",whiteSpace:"nowrap"}}>
+            {viewingHistory?`← Voltar para ${MONTHS_FULL[nm]}`:`📅 Ver fatura de ${MONTHS_FULL[vm]}`}
+          </button>
+        )}
+      </div>
 
+      {/* Banner modo histórico */}
+      {viewingHistory&&(
+        <div style={{background:"rgba(245,158,11,.08)",border:"1px solid rgba(245,158,11,.25)",borderRadius:10,padding:"9px 13px",fontSize:12,color:"var(--gold)"}}>
+          📋 Você está vendo a fatura de <strong>{MONTHS_FULL[vm]}/{vy}</strong> (fechada).
+          {" "}O valor total foi para Fixas de {MONTHS_FULL[nm]}.
+        </div>
+      )}
+
+      {/* Bank selector */}
       <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
         {banks.map(b=>{
           const tot=purchases.filter(p=>p.bank===b.name).reduce((s,p)=>s+p.monthlyValue,0);
@@ -408,6 +457,7 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
         })}
       </div>
 
+      {/* Limit card */}
       <div className="card">
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
           <div>
@@ -417,7 +467,9 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
             </div>
             <div style={{fontSize:11,color:invoiceAlreadyClosed?"var(--green)":"var(--muted)"}}>
               {invoiceAlreadyClosed
-                ?<span>✓ Fatura de <strong>{MONTHS_FULL[vm]}</strong> fechada — vendo <strong style={{color:"var(--accent)"}}>{MONTHS_FULL[nm]}</strong></span>
+                ?viewingHistory
+                  ?`Fatura de ${MONTHS_FULL[vm]} (fechada)`
+                  :<span>✓ Fatura de <strong>{MONTHS_FULL[vm]}</strong> fechada — vendo <strong style={{color:"var(--accent)"}}>{MONTHS_FULL[nm]}</strong></span>
                 :`Fatura em aberto — ${MONTHS_FULL[vm]}`}
             </div>
           </div>
@@ -437,24 +489,28 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
         </>}
       </div>
 
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
-        <button onClick={()=>setShowAddModal(true)}
-          style={{background:"var(--accent)",border:"none",color:"#fff",fontFamily:"'Sora',sans-serif",fontSize:12,fontWeight:700,borderRadius:11,padding:"12px 8px",cursor:"pointer"}}>
-          + Lançar compra
-        </button>
-        <button onClick={closeInvoice} disabled={!totalUsed||invoiceAlreadyClosed||closingInvoice}
-          style={{background:invoiceAlreadyClosed?"rgba(0,214,143,.1)":"var(--surface)",border:`1px solid ${invoiceAlreadyClosed?"var(--green)":"var(--border)"}`,color:invoiceAlreadyClosed?"var(--green)":"var(--muted)",fontFamily:"'Sora',sans-serif",fontSize:12,fontWeight:700,borderRadius:11,padding:"12px 8px",cursor:"pointer",opacity:(!totalUsed||invoiceAlreadyClosed)?0.5:1}}>
-          {invoiceAlreadyClosed?`✓ Fatura fechada`:`Fechar fatura → ${MONTHS_FULL[nm]}`}
-        </button>
-        <button onClick={()=>setShowImportModal(true)}
-          style={{background:"rgba(99,102,241,.1)",border:"1px solid rgba(99,102,241,.3)",color:"var(--accent)",fontFamily:"'Sora',sans-serif",fontSize:12,fontWeight:700,borderRadius:11,padding:"12px 8px",cursor:"pointer"}}>
-          📂 Importar fatura
-        </button>
-      </div>
+      {/* Actions — ocultar no histórico */}
+      {!viewingHistory&&(
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+          <button onClick={()=>setShowAddModal(true)}
+            style={{background:"var(--accent)",border:"none",color:"#fff",fontFamily:"'Sora',sans-serif",fontSize:12,fontWeight:700,borderRadius:11,padding:"12px 8px",cursor:"pointer"}}>
+            + Lançar compra
+          </button>
+          <button onClick={closeInvoice} disabled={!totalUsed||invoiceAlreadyClosed||closingInvoice}
+            style={{background:invoiceAlreadyClosed?"rgba(0,214,143,.1)":"var(--surface)",border:`1px solid ${invoiceAlreadyClosed?"var(--green)":"var(--border)"}`,color:invoiceAlreadyClosed?"var(--green)":"var(--muted)",fontFamily:"'Sora',sans-serif",fontSize:12,fontWeight:700,borderRadius:11,padding:"12px 8px",cursor:"pointer",opacity:(!totalUsed||invoiceAlreadyClosed)?0.5:1}}>
+            {invoiceAlreadyClosed?`✓ Fatura fechada`:`Fechar fatura → ${MONTHS_FULL[nm]}`}
+          </button>
+          <button onClick={()=>setShowImportModal(true)}
+            style={{background:"rgba(99,102,241,.1)",border:"1px solid rgba(99,102,241,.3)",color:"var(--accent)",fontFamily:"'Sora',sans-serif",fontSize:12,fontWeight:700,borderRadius:11,padding:"12px 8px",cursor:"pointer"}}>
+            📂 Importar fatura
+          </button>
+        </div>
+      )}
 
+      {/* Category breakdown */}
       {catBreak.length>0&&(
         <div className="card">
-          <div className="st" style={{marginBottom:10}}>Por categoria</div>
+          <div className="st" style={{marginBottom:10}}>Por categoria {viewingHistory&&`— ${MONTHS_FULL[vm]}`}</div>
           <div style={{display:"flex",justifyContent:"center",marginBottom:14}}>
             <Donut size={130} thick={22} data={catBreak.map(c=>({color:c.color,value:c.val}))} label={fmt(totalUsed)} sublabel={selectedBank}/>
           </div>
@@ -472,9 +528,10 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
         </div>
       )}
 
+      {/* Purchases list */}
       {bankPurchases.length>0&&(
         <div>
-          <div className="st" style={{marginBottom:8}}>Lançamentos ({bankPurchases.length})</div>
+          <div className="st" style={{marginBottom:8}}>Lançamentos ({bankPurchases.length}){viewingHistory&&` — ${MONTHS_FULL[vm]}`}</div>
           <div className="txlist">
             {bankPurchases.map(p=>{
               const cat=catMap[p.category]||{icon:"📌",color:"#888"};
@@ -487,8 +544,10 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
                     <div style={{fontSize:9,color:"var(--muted)",marginTop:2}}>{d} · {p.category}{p.installments>1&&` · parcela ${p.installmentNum}/${p.installments}`}</div>
                   </div>
                   <div style={{fontSize:12,fontWeight:700,color:"var(--wine)",flexShrink:0}}>-{fmt(p.monthlyValue)}</div>
-                  <button onClick={()=>setEditingPurchase(p)} style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:13,padding:"5px 4px",flexShrink:0}}>✏️</button>
-                  <button onClick={()=>deletePurchase(p.id)} style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:13,padding:"5px 4px",flexShrink:0}}>✕</button>
+                  {!viewingHistory&&<>
+                    <button onClick={()=>setEditingPurchase(p)} style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:13,padding:"5px 4px",flexShrink:0}}>✏️</button>
+                    <button onClick={()=>deletePurchase(p.id)} style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:13,padding:"5px 4px",flexShrink:0}}>✕</button>
+                  </>}
                 </div>
               );
             })}
@@ -496,7 +555,13 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
         </div>
       )}
 
-      {bankPurchases.length===0&&<div className="empty">Nenhum lançamento de crédito em {MONTHS_FULL[vm]}.<br/>Toque em <strong style={{color:"var(--accent)"}}>+ Lançar compra</strong> para adicionar.</div>}
+      {bankPurchases.length===0&&(
+        <div className="empty">
+          {viewingHistory
+            ?`Nenhum lançamento em ${MONTHS_FULL[vm]}.`
+            :`Nenhum lançamento de crédito em ${MONTHS_FULL[activeMonth]}.\nToque em `}{!viewingHistory&&<strong style={{color:"var(--accent)"}}>+ Lançar compra</strong>}{!viewingHistory&&" para adicionar."}
+        </div>
+      )}
 
       {showAddModal&&(
         <Modal onClose={()=>setShowAddModal(false)} tall>
@@ -505,19 +570,27 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
       )}
       {showImportModal&&(
         <Modal onClose={()=>setShowImportModal(false)} tall>
-          <ImportModal banks={banks} expenseCats={expenseCats} importType="credit" defaultBank={selectedBank} vm={vm} vy={vy} onClose={()=>setShowImportModal(false)} onImport={(type,entries)=>{setCreditData(d=>{const updated={purchases:[...entries,...(d.purchases||[])]};dbSet(creditKey(vy,vm),updated);return updated;});setShowImportModal(false);}}/>
+          <ImportModal banks={banks} expenseCats={expenseCats} importType="credit" defaultBank={selectedBank} vm={activeMonth} vy={activeYear} onClose={()=>setShowImportModal(false)} onImport={(type,entries)=>{
+            if(invoiceAlreadyClosed){
+              setNextCreditData(d=>{const updated={purchases:[...entries,...(d?.purchases||[])]};dbSet(creditKey(ny,nm),updated);return updated;});
+            } else {
+              setCreditData(d=>{const updated={purchases:[...entries,...(d.purchases||[])]};dbSet(creditKey(vy,vm),updated);return updated;});
+            }
+            setShowImportModal(false);
+          }}/>
         </Modal>
       )}
       {editingPurchase&&(
         <Modal onClose={()=>setEditingPurchase(null)} tall>
-          <CreditPurchaseForm banks={banks} expenseCats={expenseCats} selectedBank={selectedBank} vm={vm} vy={vy}
+          <CreditPurchaseForm banks={banks} expenseCats={expenseCats} selectedBank={selectedBank} vm={activeMonth} vy={activeYear}
             onSave={savePurchaseEdit} onClose={()=>setEditingPurchase(null)}
-            defaultInvoiceMonth={`${vy}-${vm}`} initialData={editingPurchase} isEdit/>
+            defaultInvoiceMonth={`${activeYear}-${activeMonth}`} initialData={editingPurchase} isEdit/>
         </Modal>
       )}
     </div>
   );
 }
+
 
 function CreditPurchaseForm({banks,expenseCats,selectedBank,vm,vy,onSave,onClose,defaultInvoiceMonth,initialData,isEdit}){
   const dd=`${vy}-${String(vm+1).padStart(2,"0")}-${String(today.getDate()).padStart(2,"0")}`;
