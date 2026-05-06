@@ -610,7 +610,7 @@ function BulkPanel({type,banks,expenseCats,vy,vm,onConfirm,onClose}){
 }
 
 
-// ─── IMPORT MODAL (CSV + PDF + Imagem via IA — múltiplos arquivos) ─────────
+// ─── IMPORT MODAL (CSV/PDF regex + Imagem via IA) ───────────────────────────
 
 async function loadPDFJS(){
   if(window.pdfjsLib) return window.pdfjsLib;
@@ -631,19 +631,17 @@ async function extractPDFText(file){
   for(let i=1;i<=pdf.numPages;i++){
     const page=await pdf.getPage(i);
     const content=await page.getTextContent();
-    // Agrupar por linha (Y position)
     const byY={};
     content.items.forEach(item=>{
       const y=Math.round(item.transform[5]);
       if(!byY[y])byY[y]=[];
       byY[y].push({x:Math.round(item.transform[4]),str:item.str});
     });
-    // Ordenar por Y desc (top→bottom) e X asc (left→right)
     Object.keys(byY).sort((a,b)=>b-a).forEach(y=>{
       const lineItems=byY[y].sort((a,b)=>a.x-b.x);
       full+=lineItems.map(i=>i.str).join(" ")+"\n";
     });
-    full+="\n---PÁGINA---\n";
+    full+="\n";
   }
   return full;
 }
@@ -657,98 +655,68 @@ async function fileToBase64(file){
   });
 }
 
-// Prompt base para IA extrair transações
-const AI_PROMPT=`Analise este extrato ou fatura bancária e extraia TODAS as transações individuais de compra/débito.
-Retorne APENAS um array JSON válido, sem markdown, sem explicações, no formato:
-[{"date":"DD/MM/YYYY","description":"nome do estabelecimento","value":99.90}]
-Regras importantes:
-- value deve ser NUMÉRICO POSITIVO (sem R$, sem sinal)
-- date no formato DD/MM/YYYY
-- Inclua TODAS as transações, mesmo as pequenas
-- IGNORE: totais, saldos, limites, pagamentos de fatura, cabeçalhos, rodapés, taxas de IOF se já embutidas
-- Se uma compra for parcelada (ex: "2/6"), inclua apenas o valor DA PARCELA, não o total
-- Se não houver transações, retorne []`;
-
-async function callClaudeText(text){
-  const resp=await fetch("https://api.anthropic.com/v1/messages",{
-    method:"POST",
-    headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({
-      model:"claude-sonnet-4-20250514",
-      max_tokens:2000,
-      messages:[{role:"user",content:`${AI_PROMPT}\n\nEXTRATO:\n${text.slice(0,8000)}`}]
-    })
-  });
-  if(!resp.ok) throw new Error(`API ${resp.status}`);
-  const data=await resp.json();
-  const txt=data.content?.find(c=>c.type==="text")?.text||"[]";
-  return JSON.parse(txt.replace(/```json?|```/g,"").trim());
-}
-
 async function callClaudeImage(base64,mediaType){
+  const prompt=`Analise esta imagem de extrato ou fatura bancária. Extraia TODAS as transações individuais.
+Retorne APENAS um array JSON válido, sem markdown: [{"date":"DD/MM/YYYY","description":"estabelecimento","value":99.90}]
+Regras: value numérico positivo, inclua TODAS as compras, ignore totais/saldos/cabeçalhos, para parcelas use o valor da parcela.`;
   const resp=await fetch("https://api.anthropic.com/v1/messages",{
     method:"POST",
     headers:{"Content-Type":"application/json"},
     body:JSON.stringify({
-      model:"claude-sonnet-4-20250514",
-      max_tokens:2000,
+      model:"claude-sonnet-4-20250514",max_tokens:2000,
       messages:[{role:"user",content:[
         {type:"image",source:{type:"base64",media_type:mediaType,data:base64}},
-        {type:"text",text:AI_PROMPT}
+        {type:"text",text:prompt}
       ]}]
     })
   });
-  if(!resp.ok) throw new Error(`API ${resp.status}`);
+  if(!resp.ok){const err=await resp.text();throw new Error(`API ${resp.status}: ${err.slice(0,100)}`);}
   const data=await resp.json();
   const txt=data.content?.find(c=>c.type==="text")?.text||"[]";
   return JSON.parse(txt.replace(/```json?|```/g,"").trim());
 }
 
-function parseBRDateFull(s,vy){
-  if(!s)return null;
-  s=String(s).trim();
-  const months={JAN:"01",FEV:"02",MAR:"03",ABR:"04",MAI:"05",JUN:"06",JUL:"07",AGO:"08",SET:"09",OUT:"10",NOV:"11",DEZ:"12"};
-  const m1=s.match(/^(\d{2})[\/\-](\d{2})(?:[\/\-](\d{2,4}))?$/);
-  if(m1){const y=m1[3]?(m1[3].length===2?"20"+m1[3]:m1[3]):String(vy);return `${y}-${m1[2].padStart(2,"0")}-${m1[1].padStart(2,"0")}`;}
-  const m2=s.match(/^(\d{4})[\/\-](\d{2})[\/\-](\d{2})$/);
-  if(m2)return `${m2[1]}-${m2[2]}-${m2[3]}`;
-  const m3=s.match(/^(\d{2})\s+(JAN|FEV|MAR|ABR|MAI|JUN|JUL|AGO|SET|OUT|NOV|DEZ)(?:\s+(\d{2,4}))?$/i);
-  if(m3){const y=m3[3]?(m3[3].length===2?"20"+m3[3]:m3[3]):String(vy);return `${y}-${months[m3[2].toUpperCase()]}-${m3[1].padStart(2,"0")}`;}
-  const m4=s.match(/(\d{2})[\/\-](\d{2})[\/\-](\d{4})/);
-  if(m4)return `${m4[3]}-${m4[2]}-${m4[1]}`;
-  return null;
+function parseValue(v){
+  if(typeof v==="number")return Math.abs(v);
+  const s=String(v).replace(/R\$\s*/gi,"").replace(/\s/g,"").trim();
+  if(/^\-?\d{1,3}(\.\d{3})*,\d{2}$/.test(s))return Math.abs(parseFloat(s.replace(/\./g,"").replace(",",".")));
+  if(/^\-?\d{1,3}(,\d{3})*\.\d{2}$/.test(s))return Math.abs(parseFloat(s.replace(/,/g,"")));
+  if(/^\-?\d+,\d{1,2}$/.test(s))return Math.abs(parseFloat(s.replace(",",".")));
+  return Math.abs(parseFloat(s.replace(",","."))||0);
 }
 
-function parseValue(v){
-  if(typeof v==="number") return Math.abs(v);
-  const s=String(v).replace(/R\$\s*/gi,"").replace(/\s/g,"").trim();
-  // Formato BR: 1.234,56
-  if(/^\d{1,3}(\.\d{3})*,\d{2}$/.test(s)) return Math.abs(parseFloat(s.replace(/\./g,"").replace(",",".")));
-  // Formato US: 1,234.56
-  if(/^\d{1,3}(,\d{3})*\.\d{2}$/.test(s)) return Math.abs(parseFloat(s.replace(/,/g,"")));
-  // Só vírgula: 34,90
-  if(/^\d+,\d{2}$/.test(s)) return Math.abs(parseFloat(s.replace(",",".")));
-  return Math.abs(parseFloat(s.replace(",","."))||0);
+function parseBRDateFull(s,vy){
+  if(!s)return null;s=String(s).trim();
+  const mo={JAN:"01",FEV:"02",MAR:"03",ABR:"04",MAI:"05",JUN:"06",JUL:"07",AGO:"08",SET:"09",OUT:"10",NOV:"11",DEZ:"12"};
+  let m;
+  m=s.match(/^(\d{2})[\/\-](\d{2})[\/\-](\d{4})$/);if(m)return `${m[3]}-${m[2]}-${m[1]}`;
+  m=s.match(/^(\d{4})[\/\-](\d{2})[\/\-](\d{2})$/);if(m)return `${m[1]}-${m[2]}-${m[3]}`;
+  m=s.match(/^(\d{2})[\/\-](\d{2})$/);if(m){return `${vy}-${m[2]}-${m[1]}`;}
+  m=s.match(/^(\d{2})\s+(JAN|FEV|MAR|ABR|MAI|JUN|JUL|AGO|SET|OUT|NOV|DEZ)(?:\s+(\d{2,4}))?$/i);
+  if(m){const y=m[3]?(m[3].length===2?"20"+m[3]:m[3]):String(vy);return `${y}-${mo[m[2].toUpperCase()]}-${m[1]}`;}
+  m=s.match(/(\d{2})[\/\-](\d{2})[\/\-](\d{4})/);if(m)return `${m[3]}-${m[2]}-${m[1]}`;
+  m=s.match(/(\d{2})[\/\-](\d{2})[\/\-](\d{2})/);if(m)return `20${m[3]}-${m[2]}-${m[1]}`;
+  return null;
 }
 
 function guessCategory(desc,expenseCats){
   const d=(desc||"").toLowerCase();
-  const keywords={
+  const kw={
     "alimentação":["ifood","rappi","uber eats","mcdonalds","burger","pizza","restaurante","lanchonete","padaria","mercado","supermercado","carrefour","atacadao","comida","sushi","acai","cafe"],
     "gasolina":["posto","shell","petrobras","ipiranga","vibra","gasolina","combustivel","br mania","ale","raizen"],
-    "transporte":["uber","99app","taxi","onibus","metro","passagem","embarque","estacionamento","99 tecnologia","cabify"],
-    "farmácia":["drogaria","farmacia","droga","ultrafarma","pacheco","raia","drogasil","panvel","ultrafarma"],
-    "saúde":["hospital","clinica","medico","consulta","exame","laboratorio","odonto","dentista","unimed","amil","hapvida"],
-    "assinaturas":["netflix","spotify","amazon prime","youtube","adobe","microsoft","apple","google","disney","hbo","globoplay","deezer","icloud","canva","chatgpt","openai","claude"],
+    "transporte":["uber","99app","taxi","onibus","metro","passagem","estacionamento","99 tecnologia","cabify"],
+    "farmácia":["drogaria","farmacia","droga","ultrafarma","pacheco","raia","drogasil","panvel"],
+    "saúde":["hospital","clinica","medico","consulta","exame","laboratorio","odonto","dentista","unimed","amil"],
+    "assinaturas":["netflix","spotify","amazon prime","youtube","adobe","microsoft","apple","google one","disney","hbo","globoplay","deezer","icloud","canva","chatgpt","openai"],
     "lazer":["cinema","teatro","show","evento","ingresso","ticket","sympla","boliche","parque","bar ","balada","role"],
-    "compras online":["amazon","shopee","aliexpress","americanas","magazine luiza","mercado livre","shein","magalu","shopee"],
+    "compras online":["amazon","shopee","aliexpress","americanas","magazine luiza","mercado livre","shein","magalu"],
     "roupa / tênis":["nike","adidas","puma","vans","converse","hering","riachuelo","c&a","renner","zara","farm","arezzo"],
-    "moradia":["aluguel","condominio","iptu","energia","enel","sabesp","comgas","net","claro","tim","vivo"],
+    "moradia":["aluguel","condominio","iptu","energia","enel","sabesp","comgas"],
     "cursos online":["udemy","coursera","alura","rocketseat","hotmart","eduzz","origamid"],
-    "carro / seguro / ipva":["seguro auto","ipva","detran","mecanico","borracharia","lavagem","porto seguro auto"],
+    "carro / seguro / ipva":["seguro auto","ipva","detran","mecanico","borracharia","lavagem"],
     "corte de cabelo":["barbearia","salao","hair","cabelo","barba"],
   };
-  for(const [cat,keys] of Object.entries(keywords)){
+  for(const [cat,keys] of Object.entries(kw)){
     if(keys.some(k=>d.includes(k))){
       const found=expenseCats.find(c=>c.name.toLowerCase()===cat.toLowerCase()||c.name.toLowerCase().startsWith(cat.split("/")[0].trim().toLowerCase()));
       if(found)return found.name;
@@ -757,33 +725,75 @@ function guessCategory(desc,expenseCats){
   return expenseCats[expenseCats.length-1]?.name||"Outros";
 }
 
-function transactionsToEntries(transactions,importType,expenseCats,selBank,vm,vy,todayStr){
+function parsePDFTransactions(text,vy){
+  const lines=text.split("\n").map(l=>l.trim()).filter(l=>l.length>2);
+  const rows=[];
+  const valPat=/(-?\s*\d{1,3}(?:\.\d{3})*,\d{2})\s*$/;
+  const datePat=/\b(\d{2}[\/\-]\d{2}(?:[\/\-]\d{2,4})?|\d{2}\s+(?:JAN|FEV|MAR|ABR|MAI|JUN|JUL|AGO|SET|OUT|NOV|DEZ)(?:\s+\d{2,4})?)\b/i;
+  const skipPat=/\b(total|saldo|limite|fatura|pagamento|vencimento|cpf|cnpj|obrigado|agência|conta corrente|poupança|página|page)\b/i;
+  for(let i=0;i<lines.length;i++){
+    const line=lines[i];
+    if(skipPat.test(line))continue;
+    const valMatch=line.match(valPat);
+    if(!valMatch)continue;
+    const val=parseValue(valMatch[1]);
+    if(!val||val>50000)continue; // ignora valores absurdos
+    const dateMatch=line.match(datePat);
+    if(!dateMatch)continue;
+    const dateStr=parseBRDateFull(dateMatch[1],vy)||`${vy}-${String(new Date().getMonth()+1).padStart(2,"0")}-01`;
+    let desc=line
+      .replace(valMatch[0],"")
+      .replace(dateMatch[0],"")
+      .replace(/R\$/g,"")
+      .replace(/\s{2,}/g," ")
+      .replace(/^\s*[-•·]\s*/,"")
+      .trim();
+    // se descrição curta, pega linha anterior como complemento
+    if(desc.length<4&&i>0&&!lines[i-1].match(valPat)){
+      desc=(lines[i-1].replace(/\s{2,}/g," ").trim()+" "+desc).trim();
+    }
+    if(!desc||desc.length<2)desc="Importado";
+    rows.push({date:dateStr,description:desc,value:val});
+  }
+  return rows;
+}
+
+function parseCSVTransactions(text){
+  const lines=text.trim().split(/\r?\n/).filter(l=>l.trim());
+  if(lines.length<2)return[];
+  const sep=lines[0].includes(";")?";":",";
+  const headers=lines[0].split(sep).map(h=>h.replace(/['"]/g,"").trim().toLowerCase());
+  let dateIdx=headers.findIndex(h=>/\bdata\b|date|\bdt\b/.test(h));
+  let descIdx=headers.findIndex(h=>/títul|titulo|descri|memo|lancam|estabele|histor|narrat|lançam/.test(h));
+  let valIdx=headers.findIndex(h=>/^valor$|^value$|^amount$/.test(h));
+  if(valIdx===-1)valIdx=headers.findIndex(h=>/valor|value|amount|debito/.test(h));
+  if(dateIdx===-1)dateIdx=0;
+  if(descIdx===-1)descIdx=Math.min(1,headers.length-1);
+  if(valIdx===-1)throw new Error("Coluna de valor não encontrada. Verifique o CSV.");
+  const rows=[];
+  for(let i=1;i<lines.length;i++){
+    const cols=lines[i].split(sep).map(c=>c.replace(/['"]/g,"").trim());
+    if(cols.length<=valIdx)continue;
+    const val=parseValue(cols[valIdx]||"0");
+    if(!val)continue;
+    rows.push({date:cols[dateIdx]||"",description:cols[descIdx]||`Item ${i}`,value:val});
+  }
+  return rows;
+}
+
+function toEntries(transactions,importType,expenseCats,selBank,vm,vy){
+  const todayStr=`${vy}-${String(vm+1).padStart(2,"0")}-${String(new Date().getDate()).padStart(2,"0")}`;
   return transactions
-    .filter(t=>parseValue(t.value)>0)
-    .map(t=>({
-      id:uid(),
-      ...(importType==="credit"?{
-        name:String(t.description||t.desc||"Importado"),
-        category:guessCategory(t.description||t.desc||"",expenseCats),
-        bank:selBank,
-        totalValue:parseValue(t.value),
-        monthlyValue:parseValue(t.value),
-        installments:1,installmentNum:1,
-        date:parseBRDateFull(String(t.date||""),vy)||todayStr,
-        monthYear:`${vy}-${vm}`,
-        groupId:uid(),
-      }:importType==="expense"?{
-        category:guessCategory(t.description||t.desc||"",expenseCats),
-        description:String(t.description||t.desc||"Importado"),
-        value:parseValue(t.value),
-        date:parseBRDateFull(String(t.date||""),vy)||todayStr,
-        bank:selBank,method:"PIX",essential:false,
-      }:{
-        name:String(t.description||t.desc||"Importado"),
-        value:parseValue(t.value),
-        date:parseBRDateFull(String(t.date||""),vy)||todayStr,
-      })
-    }));
+    .filter(t=>parseValue(t.value||0)>0)
+    .map(t=>{
+      const val=parseValue(t.value);
+      const date=parseBRDateFull(String(t.date||""),vy)||todayStr;
+      const desc=String(t.description||t.desc||"Importado").trim();
+      const cat=guessCategory(desc,expenseCats);
+      if(importType==="credit")return{id:uid(),name:desc,category:cat,bank:selBank,totalValue:val,monthlyValue:val,installments:1,installmentNum:1,date,monthYear:`${vy}-${vm}`,groupId:uid()};
+      if(importType==="expense")return{id:uid(),category:cat,description:desc,value:val,date,bank:selBank,method:"PIX",essential:false};
+      return{id:uid(),name:desc,value:val,date};
+    });
 }
 
 function ImportModal({banks,expenseCats,importType,defaultBank,vm,vy,onClose,onImport}){
@@ -795,81 +805,59 @@ function ImportModal({banks,expenseCats,importType,defaultBank,vm,vy,onClose,onI
   const [loadingMsg,setLoadingMsg]=useState("");
   const [loadingDetail,setLoadingDetail]=useState("");
   const inputRef=React.useRef();
-  const todayStr=`${vy}-${String(vm+1).padStart(2,"0")}-${String(new Date().getDate()).padStart(2,"0")}`;
-
   const IMG_EXTS=["jpg","jpeg","png","gif","webp","heic","jfif"];
+
+  async function processFile(file){
+    const ext=file.name.split(".").pop().toLowerCase();
+    if(IMG_EXTS.includes(ext)||file.type.startsWith("image/")){
+      // Imagem → IA (pode falhar em produção sem proxy — mostra erro claro)
+      try{
+        const b64=await fileToBase64(file);
+        return await callClaudeImage(b64,file.type||"image/jpeg");
+      }catch(err){
+        if(err.message.includes("Failed to fetch")||err.message.includes("CORS")||err.message.includes("401")||err.message.includes("403")){
+          throw new Error("Para importar fotos, exporte o extrato como CSV no app do banco e importe o arquivo CSV — funciona perfeitamente.");
+        }
+        throw err;
+      }
+    }
+    if(ext==="pdf"){
+      const text=await extractPDFText(file);
+      const rows=parsePDFTransactions(text,vy);
+      if(!rows.length)throw new Error("Nenhuma transação reconhecida no PDF. Tente exportar como CSV no app do banco.");
+      return rows;
+    }
+    // CSV / TXT / OFX
+    return await new Promise((res,rej)=>{
+      const r=new FileReader();
+      r.onload=e=>{try{res(parseCSVTransactions(e.target.result));}catch(err){rej(err);}};
+      r.onerror=()=>rej(new Error("Erro ao ler o arquivo."));
+      r.readAsText(file,"UTF-8");
+    });
+  }
 
   async function handleFiles(fileList){
     const files=Array.from(fileList);
     if(!files.length)return;
     setFileError("");setStep("loading");
     const allEntries=[];
+    const errors=[];
     for(let i=0;i<files.length;i++){
       const file=files[i];
-      const ext=file.name.split(".").pop().toLowerCase();
-      setLoadingMsg(`Processando arquivo ${i+1} de ${files.length}…`);
+      setLoadingMsg(files.length>1?`Processando ${i+1} de ${files.length}…`:"Processando…");
       setLoadingDetail(file.name);
       try{
-        let transactions=[];
-        if(IMG_EXTS.includes(ext)||file.type.startsWith("image/")){
-          setLoadingMsg(`Analisando imagem ${i+1}/${files.length} com IA…`);
-          const b64=await fileToBase64(file);
-          const mt=file.type||"image/jpeg";
-          transactions=await callClaudeImage(b64,mt);
-        } else if(ext==="pdf"){
-          setLoadingMsg(`Lendo PDF ${i+1}/${files.length}…`);
-          const text=await extractPDFText(file);
-          setLoadingMsg(`Interpretando PDF ${i+1}/${files.length} com IA…`);
-          transactions=await callClaudeText(text);
-        } else {
-          // CSV / TXT / OFX
-          setLoadingMsg(`Lendo CSV ${i+1}/${files.length}…`);
-          transactions=await new Promise((res,rej)=>{
-            const r=new FileReader();
-            r.onload=e=>{
-              try{res(parseCSVtoTransactions(e.target.result));}
-              catch(err){rej(err);}
-            };
-            r.onerror=()=>rej(new Error("Erro ao ler arquivo"));
-            r.readAsText(file,"UTF-8");
-          });
-        }
-        const entries=transactionsToEntries(transactions,importType,expenseCats,selBank,vm,vy,todayStr);
+        const transactions=await processFile(file);
+        const entries=toEntries(transactions,importType,expenseCats,selBank,vm,vy);
         allEntries.push(...entries);
-      } catch(err){
-        console.error("Erro ao processar",file.name,err);
-        setFileError(`Erro em "${file.name}": ${err.message}. Outros arquivos foram processados normalmente.`);
+      }catch(err){
+        errors.push(`${file.name}: ${err.message}`);
       }
     }
-    if(!allEntries.length){
-      setFileError("Nenhuma transação encontrada. Verifique se o arquivo é legível e tente novamente.");
-      setStep("upload");return;
-    }
+    if(errors.length)setFileError(errors.join(" | "));
+    if(!allEntries.length){setStep("upload");return;}
     setPreview(allEntries);
     setStep("preview");
-  }
-
-  function parseCSVtoTransactions(text){
-    const lines=text.trim().split(/\r?\n/).filter(l=>l.trim());
-    if(lines.length<2)return[];
-    const sep=lines[0].includes(";")?";":",";
-    const headers=lines[0].split(sep).map(h=>h.replace(/['"]/g,"").trim().toLowerCase());
-    let dateIdx=headers.findIndex(h=>/data|date|dt\b/.test(h));
-    let descIdx=headers.findIndex(h=>/títul|titulo|descri|memo|lancam|estabele|histor|narrat|lançam/.test(h));
-    let valIdx=headers.findIndex(h=>/^valor$|^value$|^amount$|montante/.test(h));
-    if(valIdx===-1)valIdx=headers.findIndex(h=>/valor|value|amount|debito/.test(h));
-    if(dateIdx===-1)dateIdx=0;
-    if(descIdx===-1)descIdx=1;
-    if(valIdx===-1)throw new Error("Coluna de valor não encontrada");
-    const rows=[];
-    for(let i=1;i<lines.length;i++){
-      const cols=lines[i].split(sep).map(c=>c.replace(/['"]/g,"").trim());
-      if(cols.length<=valIdx)continue;
-      const val=parseValue(cols[valIdx]);
-      if(!val)continue;
-      rows.push({date:cols[dateIdx]||"",description:cols[descIdx]||`Item ${i}`,value:val});
-    }
-    return rows;
   }
 
   function confirm(){
@@ -881,118 +869,102 @@ function ImportModal({banks,expenseCats,importType,defaultBank,vm,vy,onClose,onI
   const typeLabel={expense:"Gastos (Débito/PIX)",income:"Entradas",credit:"Lançamentos no crédito"};
   const totalValue=preview.reduce((s,p)=>s+(p.value||p.monthlyValue||0),0);
 
-  return (
+  return(
     <>
       <div className="mhdr">
         <div className="mtitle">📂 Importar — {typeLabel[importType]||importType}</div>
         <button className="mclose" onClick={onClose}>✕</button>
       </div>
 
-      {step==="upload"&&(
-        <>
-          <div style={{background:"rgba(99,102,241,.08)",border:"1px solid rgba(99,102,241,.25)",borderRadius:12,padding:"12px 14px",marginBottom:14,fontSize:12,lineHeight:1.7}}>
-            <strong style={{color:"var(--accent)"}}>Aceita múltiplos arquivos:</strong> selecione várias fotos, PDFs ou CSVs de uma vez. A IA lê cada um e combina tudo no preview.
+      {step==="upload"&&(<>
+        <div style={{background:"rgba(99,102,241,.08)",border:"1px solid rgba(99,102,241,.25)",borderRadius:12,padding:"12px 14px",marginBottom:14,fontSize:12,lineHeight:1.7}}>
+          Aceita <strong>múltiplos arquivos</strong>: selecione vários de uma vez. CSV e PDF lidos localmente — fotos requerem conexão com IA.
+        </div>
+        {importType==="credit"&&(
+          <div className="fg">
+            <label className="fl">Cartão / banco</label>
+            <select className="fi" value={selBank} onChange={e=>setSelBank(e.target.value)}>
+              {banks.map(b=><option key={b.id} value={b.name}>{b.name}</option>)}
+            </select>
           </div>
-
-          {importType==="credit"&&(
-            <div className="fg">
-              <label className="fl">Cartão / banco</label>
-              <select className="fi" value={selBank} onChange={e=>setSelBank(e.target.value)}>
-                {banks.map(b=><option key={b.id} value={b.name}>{b.name}</option>)}
-              </select>
-            </div>
-          )}
-
-          <div
-            onClick={()=>inputRef.current?.click()}
-            onDragOver={e=>{e.preventDefault();e.currentTarget.style.borderColor="var(--accent)";}}
-            onDragLeave={e=>{e.currentTarget.style.borderColor="var(--border2)";}}
-            onDrop={e=>{e.preventDefault();e.currentTarget.style.borderColor="var(--border2)";handleFiles(e.dataTransfer.files);}}
-            style={{border:"2px dashed var(--border2)",borderRadius:14,padding:"32px 16px",textAlign:"center",cursor:"pointer",marginBottom:14,transition:"border-color .2s"}}>
-            <div style={{fontSize:32,marginBottom:10}}>📸</div>
-            <div style={{fontSize:13,fontWeight:700,color:"var(--text)",marginBottom:4}}>Clique ou arraste aqui</div>
-            <div style={{fontSize:11,color:"var(--muted)",marginBottom:10}}>Fotos, prints, CSV ou PDF — pode selecionar vários de uma vez</div>
-            <div style={{display:"flex",justifyContent:"center",gap:6,flexWrap:"wrap"}}>
-              {["📷 Fotos","🖼 Prints","PDF","CSV","TXT"].map(f=>(
-                <span key={f} style={{fontSize:10,fontWeight:700,background:"var(--card2)",border:"1px solid var(--border2)",borderRadius:6,padding:"2px 8px"}}>{f}</span>
-              ))}
-            </div>
-            <input ref={inputRef} type="file" multiple accept=".csv,.txt,.ofx,.pdf,.jpg,.jpeg,.png,.gif,.webp,.heic,image/*" style={{display:"none"}} onChange={e=>handleFiles(e.target.files)}/>
+        )}
+        <div onClick={()=>inputRef.current?.click()}
+          onDragOver={e=>{e.preventDefault();e.currentTarget.style.borderColor="var(--accent)";}}
+          onDragLeave={e=>{e.currentTarget.style.borderColor="var(--border2)";}}
+          onDrop={e=>{e.preventDefault();e.currentTarget.style.borderColor="var(--border2)";handleFiles(e.dataTransfer.files);}}
+          style={{border:"2px dashed var(--border2)",borderRadius:14,padding:"30px 16px",textAlign:"center",cursor:"pointer",marginBottom:14,transition:"border-color .2s"}}>
+          <div style={{fontSize:30,marginBottom:8}}>📂</div>
+          <div style={{fontSize:13,fontWeight:700,color:"var(--text)",marginBottom:4}}>Clique ou arraste aqui</div>
+          <div style={{fontSize:11,color:"var(--muted)",marginBottom:10}}>CSV ou PDF — pode selecionar vários de uma vez</div>
+          <div style={{display:"flex",justifyContent:"center",gap:6,flexWrap:"wrap"}}>
+            {["CSV ✅","PDF ✅","📷 Foto (requer IA)"].map(f=>(
+              <span key={f} style={{fontSize:10,fontWeight:700,background:"var(--card2)",border:"1px solid var(--border2)",borderRadius:6,padding:"2px 8px"}}>{f}</span>
+            ))}
           </div>
-
-          {fileError&&<div style={{background:"var(--red-dim)",border:"1px solid rgba(239,68,68,.3)",borderRadius:10,padding:"10px 12px",fontSize:12,color:"var(--red)",marginBottom:12}}>{fileError}</div>}
-
-          <div style={{background:"var(--card2)",borderRadius:10,padding:"10px 12px",fontSize:11,color:"var(--muted)",lineHeight:1.7}}>
-            <strong style={{color:"var(--text2)",display:"block",marginBottom:4}}>Como exportar por banco:</strong>
-            <span style={{color:"var(--accent)"}}>Nubank:</span> App → Fatura → Exportar CSV<br/>
-            <span style={{color:"var(--accent)"}}>Santander/C6/Porto:</span> App → Extrato → PDF ou CSV<br/>
-            <span style={{color:"var(--accent)"}}>Foto/print:</span> A IA lê automaticamente — quanto mais nítido, mais preciso
-          </div>
-        </>
-      )}
+          <input ref={inputRef} type="file" multiple accept=".csv,.txt,.ofx,.pdf,.jpg,.jpeg,.png,.gif,.webp,.heic,image/*" style={{display:"none"}} onChange={e=>handleFiles(e.target.files)}/>
+        </div>
+        {fileError&&<div style={{background:"var(--red-dim)",border:"1px solid rgba(239,68,68,.3)",borderRadius:10,padding:"10px 12px",fontSize:12,color:"var(--red)",marginBottom:12}}>{fileError}</div>}
+        <div style={{background:"var(--card2)",borderRadius:10,padding:"10px 12px",fontSize:11,color:"var(--muted)",lineHeight:1.7}}>
+          <strong style={{color:"var(--text2)",display:"block",marginBottom:4}}>Como exportar:</strong>
+          <span style={{color:"var(--accent)"}}>Nubank:</span> App → Fatura → Exportar CSV<br/>
+          <span style={{color:"var(--accent)"}}>Santander:</span> App → Extrato → Exportar CSV ou PDF<br/>
+          <span style={{color:"var(--accent)"}}>C6 / Porto:</span> App → Cartão → Exportar fatura CSV
+        </div>
+      </>)}
 
       {step==="loading"&&(
-        <div style={{textAlign:"center",padding:"48px 20px",color:"var(--muted)"}}>
-          <div style={{fontSize:36,marginBottom:14}}>⏳</div>
+        <div style={{textAlign:"center",padding:"48px 20px"}}>
+          <div style={{fontSize:32,marginBottom:12}}>⏳</div>
           <div style={{fontSize:13,fontWeight:700,color:"var(--text)",marginBottom:6}}>{loadingMsg}</div>
           <div style={{fontSize:11,color:"var(--muted)"}}>{loadingDetail}</div>
         </div>
       )}
 
-      {step==="preview"&&(
-        <>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-            <span style={{fontSize:12,fontWeight:700}}>{preview.length} transação(ões)</span>
-            <div style={{textAlign:"right"}}>
-              <div style={{fontSize:13,fontWeight:800,color:"var(--wine)"}}>{fmt(totalValue)}</div>
-              <div style={{fontSize:10,color:"var(--muted)"}}>total importado</div>
-            </div>
+      {step==="preview"&&(<>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+          <span style={{fontSize:12,fontWeight:700,color:"var(--text)"}}>{preview.length} transação(ões) detectada(s)</span>
+          <div style={{textAlign:"right"}}>
+            <div style={{fontSize:14,fontWeight:800,color:"var(--wine)"}}>{fmt(totalValue)}</div>
+            <div style={{fontSize:10,color:"var(--muted)"}}>total importado</div>
           </div>
-
-          <button onClick={()=>{setStep("upload");setPreview([]);setEditCats({});}}
-            style={{background:"none",border:"none",color:"var(--accent)",fontSize:11,cursor:"pointer",fontFamily:"'Plus Jakarta Sans',sans-serif",padding:"0 0 10px",display:"block"}}>
-            ← Adicionar mais arquivos
-          </button>
-
-          <div style={{display:"flex",flexDirection:"column",gap:5,marginBottom:14,maxHeight:"48vh",overflowY:"auto"}}>
-            {preview.map((p,i)=>{
-              const cat=catMap[editCats[i]||p.category]||{icon:"📌",color:"#888"};
-              const d=(p.date||"").slice(5).split("-").reverse().join("/");
-              return (
-                <div key={i} style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:10,padding:"8px 10px",display:"flex",alignItems:"center",gap:8}}>
-                  <div style={{width:28,height:28,borderRadius:7,background:cat.color+"33",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,flexShrink:0}}>{cat.icon}</div>
-                  <div style={{flex:1,minWidth:0}}>
-                    <div style={{fontSize:12,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.name||p.description}</div>
-                    <div style={{fontSize:10,color:"var(--muted)",marginTop:1,display:"flex",gap:4,alignItems:"center",flexWrap:"wrap"}}>
-                      <span>{d}</span>
-                      <select value={editCats[i]||p.category} onChange={e=>setEditCats(ec=>({...ec,[i]:e.target.value}))}
-                        style={{fontSize:10,background:"var(--card2)",border:"1px solid var(--border2)",color:"var(--text2)",borderRadius:5,padding:"1px 3px",fontFamily:"'Plus Jakarta Sans',sans-serif",cursor:"pointer"}}>
-                        {expenseCats.map(c=><option key={c.name} value={c.name}>{c.icon} {c.name}</option>)}
-                      </select>
-                    </div>
-                  </div>
-                  <div style={{display:"flex",alignItems:"center",gap:6}}>
-                    <div style={{fontSize:12,fontWeight:700,color:"var(--wine)"}}>{fmt(p.value||p.monthlyValue||0)}</div>
-                    <button onClick={()=>setPreview(pv=>pv.filter((_,j)=>j!==i))}
-                      style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:12,padding:"2px 3px",flexShrink:0}}>✕</button>
+        </div>
+        {fileError&&<div style={{background:"var(--gold-dim)",border:"1px solid rgba(245,158,11,.3)",borderRadius:8,padding:"8px 10px",fontSize:11,color:"var(--gold)",marginBottom:10}}>{fileError}</div>}
+        <div style={{display:"flex",flexDirection:"column",gap:5,marginBottom:12,maxHeight:"46vh",overflowY:"auto"}}>
+          {preview.map((p,i)=>{
+            const cat=catMap[editCats[i]||p.category]||{icon:"📌",color:"#888"};
+            const d=(p.date||"").slice(5).split("-").reverse().join("/");
+            return(
+              <div key={i} style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:10,padding:"8px 10px",display:"flex",alignItems:"center",gap:8}}>
+                <div style={{width:28,height:28,borderRadius:7,background:cat.color+"33",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,flexShrink:0}}>{cat.icon}</div>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontSize:12,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.name||p.description}</div>
+                  <div style={{fontSize:10,color:"var(--muted)",marginTop:1,display:"flex",gap:4,alignItems:"center",flexWrap:"wrap"}}>
+                    <span>{d}</span>
+                    <select value={editCats[i]||p.category} onChange={e=>setEditCats(ec=>({...ec,[i]:e.target.value}))}
+                      style={{fontSize:10,background:"var(--card2)",border:"1px solid var(--border2)",color:"var(--text2)",borderRadius:5,padding:"1px 3px",fontFamily:"'Plus Jakarta Sans',sans-serif",cursor:"pointer"}}>
+                      {expenseCats.map(c=><option key={c.name} value={c.name}>{c.icon} {c.name}</option>)}
+                    </select>
                   </div>
                 </div>
-              );
-            })}
-          </div>
-
-          <div style={{background:"var(--card2)",borderRadius:10,padding:"8px 12px",marginBottom:10,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-            <span style={{fontSize:11,color:"var(--muted)"}}>Total a confirmar</span>
-            <span style={{fontSize:14,fontWeight:800,color:"var(--wine)"}}>{fmt(totalValue)}</span>
-          </div>
-
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:9}}>
-            <button onClick={()=>{setStep("upload");setPreview([]);setEditCats({});}}
-              style={{background:"var(--surface)",border:"1px solid var(--border)",color:"var(--muted)",fontFamily:"'Sora',sans-serif",fontSize:13,fontWeight:600,borderRadius:10,padding:12,cursor:"pointer"}}>← Voltar</button>
-            <button className="savebtn" style={{margin:0}} onClick={confirm} disabled={preview.length===0}>Confirmar {preview.length} itens</button>
-          </div>
-        </>
-      )}
+                <div style={{display:"flex",alignItems:"center",gap:5}}>
+                  <div style={{fontSize:12,fontWeight:700,color:"var(--wine)"}}>{fmt(p.value||p.monthlyValue||0)}</div>
+                  <button onClick={()=>setPreview(pv=>pv.filter((_,j)=>j!==i))}
+                    style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:11,padding:"2px"}}>✕</button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <div style={{background:"var(--card2)",borderRadius:8,padding:"7px 12px",marginBottom:10,display:"flex",justifyContent:"space-between"}}>
+          <span style={{fontSize:11,color:"var(--muted)"}}>Total</span>
+          <span style={{fontSize:13,fontWeight:800,color:"var(--wine)"}}>{fmt(totalValue)}</span>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+          <button onClick={()=>{setStep("upload");setPreview([]);setEditCats({});}}
+            style={{background:"var(--surface)",border:"1px solid var(--border)",color:"var(--muted)",fontFamily:"'Sora',sans-serif",fontSize:13,fontWeight:600,borderRadius:10,padding:12,cursor:"pointer"}}>← Voltar</button>
+          <button className="savebtn" style={{margin:0}} onClick={confirm} disabled={!preview.length}>Confirmar {preview.length}</button>
+        </div>
+      </>)}
     </>
   );
 }
