@@ -239,11 +239,30 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
   const [showImportModal,setShowImportModal]=useState(false);
   const [editingPurchase,setEditingPurchase]=useState(null);
   const [closingInvoice,setClosingInvoice]=useState(false);
+  const [nextCreditData,setNextCreditData]=useState(null);
   const catMap=Object.fromEntries(expenseCats.map(c=>[c.name,c]));
 
-  const purchases=(creditData?.purchases)||[];
-  const bank=banks?.find(b=>b.name===selectedBank)||banks?.[0];
+  const nm=vm===11?0:vm+1, ny=vm===11?vy+1:vy;
 
+  const invoiceId=`invoice_${selectedBank}_${vy}_${vm}`;
+  const invoiceAlreadyClosed=(monthData.fixed||[]).some(f=>f.id===invoiceId);
+
+  // Quando fatura está fechada, carregar dados do próximo mês automaticamente
+  useEffect(()=>{
+    if(invoiceAlreadyClosed){
+      dbGet(creditKey(ny,nm)).then(d=>setNextCreditData(d||EMPTY_CREDIT()));
+    } else {
+      setNextCreditData(null);
+    }
+  },[invoiceAlreadyClosed,selectedBank,nm,ny]);
+
+  // Usar dados do próximo mês quando fatura atual está fechada
+  const activeCreditData=invoiceAlreadyClosed&&nextCreditData ? nextCreditData : creditData;
+  const activeMonth=invoiceAlreadyClosed ? nm : vm;
+  const activeYear=invoiceAlreadyClosed ? ny : vy;
+
+  const bank=banks?.find(b=>b.name===selectedBank)||banks?.[0];
+  const purchases=(activeCreditData?.purchases)||[];
   const bankPurchases=purchases.filter(p=>p.bank===selectedBank);
   const totalUsed=bankPurchases.reduce((s,p)=>s+p.monthlyValue,0);
   const limit=bank?.limit||0;
@@ -254,11 +273,6 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
     const val=bankPurchases.filter(p=>p.category===c.name).reduce((s,p)=>s+p.monthlyValue,0);
     return {...c,val};
   }).filter(c=>c.val>0).sort((a,b)=>b.val-a.val);
-
-  const invoiceId=`invoice_${selectedBank}_${vy}_${vm}`;
-  const invoiceAlreadyClosed=(monthData.fixed||[]).some(f=>f.id===invoiceId);
-
-  const nm=vm===11?0:vm+1, ny=vm===11?vy+1:vy;
 
   function closeInvoice(){
     if(!totalUsed||invoiceAlreadyClosed) return;
@@ -356,7 +370,7 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
 
   return (
     <div className="pg">
-      <div className="st">Cartões — {MONTHS_FULL[vm]} {vy}</div>
+      <div className="st">Cartões — {invoiceAlreadyClosed?`${MONTHS_FULL[nm]} ${activeYear} (fatura aberta)` : `${MONTHS_FULL[vm]} ${vy}`}</div>
 
       <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
         {banks.map(b=>{
@@ -378,7 +392,9 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
               <span style={{fontSize:14,fontWeight:700}}>{selectedBank}</span>
             </div>
             <div style={{fontSize:11,color:invoiceAlreadyClosed?"var(--green)":"var(--muted)"}}>
-              {invoiceAlreadyClosed?`✓ Fatura fechada — vai para ${MONTHS_FULL[nm]}`:`Fatura em aberto — ${MONTHS_FULL[vm]}`}
+              {invoiceAlreadyClosed
+                ?<span>✓ Fatura de <strong>{MONTHS_FULL[vm]}</strong> fechada — vendo <strong style={{color:"var(--accent)"}}>{MONTHS_FULL[nm]}</strong></span>
+                :`Fatura em aberto — ${MONTHS_FULL[vm]}`}
             </div>
           </div>
           <div style={{textAlign:"right"}}>
@@ -460,7 +476,7 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
 
       {showAddModal&&(
         <Modal onClose={()=>setShowAddModal(false)} tall>
-          <CreditPurchaseForm banks={banks} expenseCats={expenseCats} selectedBank={selectedBank} vm={vm} vy={vy} onSave={addPurchase} onClose={()=>setShowAddModal(false)} defaultInvoiceMonth={`${vy}-${vm}`}/>
+          <CreditPurchaseForm banks={banks} expenseCats={expenseCats} selectedBank={selectedBank} vm={activeMonth} vy={activeYear} onSave={addPurchase} onClose={()=>setShowAddModal(false)} defaultInvoiceMonth={`${activeYear}-${activeMonth}`}/>
         </Modal>
       )}
       {showImportModal&&(
@@ -488,7 +504,7 @@ function CreditPurchaseForm({banks,expenseCats,selectedBank,vm,vy,onSave,onClose
   const defInvoice=defaultInvoiceMonth||`${vy}-${vm}`;
   const [form,setForm]=useState(()=>{
     if(initialData) return{...initialData,totalValue:String(initialData.totalValue??initialData.monthlyValue??""),installments:String(initialData.installments||1),invoiceMonth:initialData.monthYear||defInvoice};
-    return{name:"",category:expenseCats[0]?.name||"Outros",bank:selectedBank,totalValue:"",installments:"1",date:dd,invoiceMonth:defInvoice};
+    return{name:"",category:expenseCats[0]?.name||"Outros",bank:selectedBank,totalValue:"",installments:"1",date:dd,invoiceMonth:defaultInvoiceMonth||defInvoice};
   });
   const upd=(k,v)=>setForm(f=>({...f,[k]:v}));
   const tv=parseFloat(String(form.totalValue||"0").replace(",","."))||0;
@@ -1103,18 +1119,43 @@ function AppInner({session}){
       const isClosed=(data.fixed||[]).some(f=>f.id===invoiceId);
       if(isClosed){
         const nm=vm===11?0:vm+1, ny=vm===11?vy+1:vy;
-        return {m:nm,y:ny,label:`Próxima fatura — ${MONTHS_FULL[nm]}`,closed:true};
+        return {m:nm,y:ny,label:`Fatura em aberto — ${MONTHS_FULL[nm]}`,closed:true};
       }
       return {m:vm,y:vy,label:`Fatura em aberto — ${MONTHS_FULL[vm]}`,closed:false};
     }catch(_){
       return {m:vm,y:vy,label:`Fatura em aberto — ${MONTHS_FULL[vm]}`,closed:false};
     }
   }
-  const bankCredit=banks.map(b=>({
-    ...b,
-    spent:(creditData.purchases||[]).filter(p=>p.bank===b.name).reduce((s,p)=>s+p.monthlyValue,0),
-    nextInvoice:getNextInvoiceMonth(b.name),
-  }));
+
+  // nextMonthCredit: carregado do próximo mês para bancos com fatura fechada
+  const [nextMonthCredit,setNextMonthCredit]=useState({});
+  useEffect(()=>{
+    const nm=vm===11?0:vm+1, ny=vm===11?vy+1:vy;
+    const closedBanks=banks.filter(b=>{
+      const invoiceId=`invoice_${b.name}_${vy}_${vm}`;
+      return (data.fixed||[]).some(f=>f.id===invoiceId);
+    });
+    if(!closedBanks.length){setNextMonthCredit({});return;}
+    dbGet(creditKey(ny,nm)).then(d=>{
+      const purchases=(d?.purchases||[]);
+      const byBank={};
+      closedBanks.forEach(b=>{
+        byBank[b.name]=purchases.filter(p=>p.bank===b.name).reduce((s,p)=>s+p.monthlyValue,0);
+      });
+      setNextMonthCredit(byBank);
+    });
+  },[data.fixed,vm,vy,banks]);
+
+  const bankCredit=banks.map(b=>{
+    const invoiceId=`invoice_${b.name}_${vy}_${vm}`;
+    const isClosed=(data.fixed||[]).some(f=>f.id===invoiceId);
+    const ni=getNextInvoiceMonth(b.name);
+    // Se fatura fechada, mostrar gasto do próximo ciclo (próximo mês)
+    const spent=isClosed
+      ?(nextMonthCredit[b.name]||0)
+      :(creditData.purchases||[]).filter(p=>p.bank===b.name).reduce((s,p)=>s+p.monthlyValue,0);
+    return{...b,spent,nextInvoice:ni,isClosed};
+  });
 
   const catData=expenseCats.map(c=>({
     ...c,
@@ -1641,20 +1682,31 @@ function AppInner({session}){
                 <div style={{fontSize:9,color:"var(--muted)",marginTop:6}}>{totalIncome>0?((balance/totalIncome)*100).toFixed(1):0}% da renda</div>
               </div>
               <div className="card">
-                <div className="st" style={{marginBottom:8}}>Crédito por banco</div>
-                <Donut size={120} thick={21} data={bankCredit.filter(b=>b.spent>0).map(b=>({color:b.color,value:b.spent}))} label={fmt(bankCredit.reduce((s,b)=>s+b.spent,0))} sublabel="próx. fatura"/>
+                <div className="st" style={{marginBottom:8}}>Crédito em aberto</div>
+                <Donut size={120} thick={21}
+                  data={bankCredit.filter(b=>b.spent>0).map(b=>({color:b.color,value:b.spent}))}
+                  label={fmt(bankCredit.reduce((s,b)=>s+b.spent,0))}
+                  sublabel="ciclo atual"/>
                 <div style={{marginTop:8,display:"flex",flexDirection:"column",gap:5}}>
                   {bankCredit.filter(b=>b.spent>0).map(b=>{
                     const pct=b.limit>0?Math.min((b.spent/b.limit)*100,100):0;
-                    return (<div key={b.id}>
-                      <div style={{display:"flex",justifyContent:"space-between",fontSize:10,marginBottom:2}}>
-                        <span style={{display:"flex",alignItems:"center",gap:4}}><span style={{width:7,height:7,borderRadius:"50%",background:b.color,display:"inline-block"}}/>{b.name}</span>
-                        <span style={{color:pct>90?"var(--wine)":pct>70?"var(--gold)":"var(--muted)"}}>{fmt(b.spent)}{b.limit?` / ${fmt(b.limit)}`:""}</span>
+                    return (
+                      <div key={b.id}>
+                        <div style={{display:"flex",justifyContent:"space-between",fontSize:10,marginBottom:2}}>
+                          <span style={{display:"flex",alignItems:"center",gap:4}}>
+                            <span style={{width:7,height:7,borderRadius:"50%",background:b.color,display:"inline-block"}}/>
+                            {b.name}
+                            {b.isClosed&&<span style={{fontSize:8,color:"var(--accent)"}}>novo ciclo</span>}
+                          </span>
+                          <span style={{color:pct>90?"var(--wine)":pct>70?"var(--gold)":"var(--muted)"}}>{fmt(b.spent)}{b.limit?` / ${fmt(b.limit)}`:""}</span>
+                        </div>
+                        {b.limit>0&&<div style={{height:3,background:"var(--border)",borderRadius:2,overflow:"hidden"}}>
+                          <div style={{height:"100%",width:`${pct}%`,borderRadius:2,background:pct>90?"var(--wine)":pct>70?"var(--gold)":b.color}}/>
+                        </div>}
                       </div>
-                      {b.limit>0&&<div style={{height:3,background:"var(--border)",borderRadius:2,overflow:"hidden"}}><div style={{height:"100%",width:`${pct}%`,borderRadius:2,background:pct>90?"var(--wine)":pct>70?"var(--gold)":b.color}}/></div>}
-                    </div>);
+                    );
                   })}
-                  {bankCredit.every(b=>!b.spent)&&<div style={{fontSize:9,color:"var(--muted)",textAlign:"center"}}>Sem compras no crédito este mês</div>}
+                  {bankCredit.every(b=>b.spent===0)&&<div style={{fontSize:10,color:"var(--green)",textAlign:"center",fontWeight:600}}>✅ Sem gastos no ciclo atual</div>}
                 </div>
               </div>
             </div>
@@ -1663,30 +1715,39 @@ function AppInner({session}){
               <GoalBar label="Reserva de Emergência" icon="🛡️" current={emergencyTotal} goal={settings.emergencyGoal} color="var(--green)"/>
               <GoalBar label={settings.personalGoalName} icon="🎯" current={personalTotal} goal={settings.personalGoalValue} color="var(--accent)"/>
             </div>
-            {bankCredit.some(b=>b.spent>0)&&(
+            {bankCredit.length>0&&(
               <div className="card">
-                <div className="st" style={{marginBottom:10}}>Faturas 💳</div>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-                  <span style={{fontSize:11,color:"var(--muted)"}}>Total acumulado</span>
-                  <span style={{fontSize:16,fontWeight:700,color:"var(--wine)"}}>{fmt(bankCredit.reduce((s,b)=>s+b.spent,0))}</span>
-                </div>
-                {bankCredit.filter(b=>b.spent>0).map(b=>{
+                <div className="st" style={{marginBottom:10}}>Crédito em aberto 💳</div>
+                {bankCredit.every(b=>b.isClosed&&b.spent===0)&&(
+                  <div style={{textAlign:"center",padding:"12px 0",fontSize:12,color:"var(--green)",fontWeight:600}}>✅ Todas as faturas fechadas — nenhum gasto no novo ciclo ainda</div>
+                )}
+                {bankCredit.map(b=>{
                   const pct=b.limit>0?Math.min((b.spent/b.limit)*100,100):0;
-                  const isNext=b.nextInvoice?.closed;
+                  const avail=b.limit>0?Math.max(b.limit-b.spent,0):null;
+                  if(b.isClosed&&b.spent===0) return null; // ocultar bancos fechados com R$0
                   return (
-                    <div key={b.id} style={{marginBottom:10}}>
-                      <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
-                        <span style={{display:"flex",alignItems:"center",gap:6,fontSize:12,fontWeight:600}}>
-                          <span style={{width:8,height:8,borderRadius:"50%",background:b.color,display:"inline-block"}}/>
+                    <div key={b.id} style={{marginBottom:12,paddingBottom:12,borderBottom:"1px solid var(--border)"}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                        <span style={{display:"flex",alignItems:"center",gap:6,fontSize:12,fontWeight:700}}>
+                          <span style={{width:9,height:9,borderRadius:"50%",background:b.color,display:"inline-block"}}/>
                           {b.name}
-                          {isNext&&<span style={{fontSize:8,background:"rgba(0,214,143,.15)",color:"var(--green)",padding:"1px 5px",borderRadius:8,fontWeight:700}}>paga ✓</span>}
+                          <span style={{fontSize:9,padding:"1px 6px",borderRadius:8,fontWeight:700,
+                            background:b.isClosed?"rgba(0,214,143,.12)":"rgba(99,102,241,.12)",
+                            color:b.isClosed?"var(--green)":"var(--accent)"}}>
+                            {b.isClosed?`novo ciclo — ${MONTHS_FULL[b.nextInvoice?.m??0]}`:`em aberto — ${MONTHS_FULL[b.nextInvoice?.m??0]}`}
+                          </span>
                         </span>
-                        <span style={{fontSize:12,fontWeight:700,color:pct>90?"var(--wine)":pct>70?"var(--gold)":"var(--text)"}}>{fmt(b.spent)}{b.limit>0&&<span style={{fontSize:9,color:"var(--muted)",fontWeight:400}}> / {fmt(b.limit)}</span>}</span>
+                        <span style={{fontSize:13,fontWeight:800,color:pct>90?"var(--wine)":pct>70?"var(--gold)":"var(--text)"}}>{fmt(b.spent)}</span>
                       </div>
-                      <div style={{fontSize:9,color:isNext?"var(--green)":"var(--muted)",marginBottom:4}}>{b.nextInvoice?.label}</div>
-                      {b.limit>0&&<div style={{height:5,background:"var(--border)",borderRadius:3,overflow:"hidden"}}>
-                        <div style={{height:"100%",width:`${pct}%`,borderRadius:3,background:pct>90?"var(--wine)":pct>70?"var(--gold)":b.color}}/>
-                      </div>}
+                      {b.limit>0&&<>
+                        <div style={{height:5,background:"var(--border)",borderRadius:3,overflow:"hidden",marginBottom:3}}>
+                          <div style={{height:"100%",width:`${pct}%`,borderRadius:3,transition:"width .5s",background:pct>90?"var(--wine)":pct>70?"var(--gold)":b.color}}/>
+                        </div>
+                        <div style={{display:"flex",justifyContent:"space-between",fontSize:10}}>
+                          <span style={{color:pct>90?"var(--wine)":pct>70?"var(--gold)":"var(--muted)"}}>{pct.toFixed(0)}% do limite</span>
+                          <span style={{color:"var(--green)",fontWeight:600}}>{fmt(avail)} disponível</span>
+                        </div>
+                      </>}
                     </div>
                   );
                 })}
