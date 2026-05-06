@@ -350,15 +350,39 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
   }
 
   function deletePurchase(id){
-    setCreditData(d=>({purchases:(d.purchases||[]).filter(p=>p.id!==id)}));
+    if(invoiceAlreadyClosed){
+      // Deletar do próximo mês
+      setNextCreditData(d=>{
+        const updated={purchases:(d?.purchases||[]).filter(p=>p.id!==id)};
+        dbSet(creditKey(ny,nm),updated);
+        return updated;
+      });
+    } else {
+      setCreditData(d=>{
+        const updated={purchases:(d.purchases||[]).filter(p=>p.id!==id)};
+        dbSet(creditKey(vy,vm),updated);
+        return updated;
+      });
+    }
   }
 
   function savePurchaseEdit(updated){
-    setCreditData(d=>{
-      const updated2={purchases:(d.purchases||[]).map(p=>p.id===updated.id?{...p,...updated,monthlyValue:updated.installments>1?parseFloat((updated.totalValue/updated.installments).toFixed(2)):updated.totalValue}:p)};
-      dbSet(creditKey(vy,vm),updated2);
-      return updated2;
-    });
+    const newMonthlyValue=updated.installments>1
+      ?parseFloat((updated.totalValue/updated.installments).toFixed(2))
+      :updated.totalValue;
+    if(invoiceAlreadyClosed){
+      setNextCreditData(d=>{
+        const updated2={purchases:(d?.purchases||[]).map(p=>p.id===updated.id?{...p,...updated,monthlyValue:newMonthlyValue}:p)};
+        dbSet(creditKey(ny,nm),updated2);
+        return updated2;
+      });
+    } else {
+      setCreditData(d=>{
+        const updated2={purchases:(d.purchases||[]).map(p=>p.id===updated.id?{...p,...updated,monthlyValue:newMonthlyValue}:p)};
+        dbSet(creditKey(vy,vm),updated2);
+        return updated2;
+      });
+    }
     setEditingPurchase(null);
   }
 
