@@ -546,7 +546,7 @@ function CreditPurchaseForm({banks,expenseCats,selectedBank,vm,vy,onSave,onClose
       <div className="fg"><label className="fl">Descrição</label><input className="fi" placeholder="Ex: Tênis Nike, iFood, Netflix…" value={form.name} onChange={e=>upd("name",e.target.value)} autoFocus/></div>
       <div className="fg"><label className="fl">Categoria</label>
         <div className="catgrid">{expenseCats.map(c=>(
-          <button key={c.id||c.name} className={`catopt${form.category===c.name?" selected":""}`} style={form.category===c.name?{borderColor:c.color,background:c.color+"33",color:"#fff"}:{}} onClick={()=>upd("category",c.name)}>{c.icon} {c.name}</button>
+          <button type="button" key={c.id||c.name} className={`catopt${form.category===c.name?" selected":""}`} onClick={()=>upd("category",c.name)}>{c.icon} {c.name}</button>
         ))}</div>
       </div>
       <div className="fg"><label className="fl">Cartão</label>
@@ -1499,6 +1499,9 @@ function AppInner({session}){
         .light.modal-surface .fi::placeholder{color:#9090b0 !important;opacity:1;}
         .dark.modal-surface .catopt{background:#12121e !important;border:1.5px solid rgba(255,255,255,.2) !important;color:#d0d0f0 !important;}
         .light.modal-surface .catopt{background:#e8e8f2 !important;border:1.5px solid rgba(0,0,0,.2) !important;color:#1a1a44 !important;}
+        .dark.modal-surface .catopt.selected{background:rgba(99,102,241,.25) !important;border-color:#6366f1 !important;color:#fff !important;font-weight:800 !important;}
+        .light.modal-surface .catopt.selected{background:rgba(79,70,229,.12) !important;border-color:#4f46e5 !important;color:#1a1a6a !important;font-weight:800 !important;}
+        .catopt{cursor:pointer;}
         .dark.modal-surface .mhdr .mtitle,.dark.modal-surface .mtitle{color:#f0f0ff !important;}
         .light.modal-surface .mhdr .mtitle,.light.modal-surface .mtitle{color:#0f0f1a !important;}
         .dark.modal-surface .mclose{color:#f0f0ff !important;}
@@ -2239,7 +2242,7 @@ function EntryModal({type,entry,banks,expenseCats,onClose,onSave,vm,vy}){
         </div>
         <div className="fg"><label className="fl">Categoria</label>
           <div className="catgrid">{expenseCats.map(c=>(
-            <button key={c.id||c.name} className={`catopt${form.category===c.name?" selected":""}`} style={form.category===c.name?{borderColor:c.color,background:c.color+"33",color:"#fff"}:{}} onClick={()=>upd("category",c.name)}>{c.icon} {c.name}</button>
+            <button type="button" key={c.id||c.name} className={`catopt${form.category===c.name?" selected":""}`} onClick={()=>upd("category",c.name)}>{c.icon} {c.name}</button>
           ))}</div>
         </div>
         <div className="fg"><label className="fl">Descrição</label><input className="fi" placeholder="Ex: Mercado, Uber, Farmácia…" value={form.description} onChange={e=>upd("description",e.target.value)}/></div>
