@@ -1154,7 +1154,7 @@ function AppInner({session}){
           const exp=(pr.expenses||[]).reduce((s,t)=>s+t.value,0);
           const fix=(pr.fixed||[]).reduce((s,t)=>t.paid?(s+(t.value||0)):s,0);
           const inv=(pr.investments||[]).filter(e=>!isWithdrawal(e)).reduce((s,t)=>s+t.value,0);
-          setPrevBalance(Math.max(inc-exp-fix-inv,0));
+          setPrevBalance(inc-exp-fix-inv); // permite negativo
         }
       }
       setLoading(false);
@@ -1176,11 +1176,18 @@ function AppInner({session}){
       const exp=(data.expenses||[]).reduce((s,t)=>s+t.value,0);
       const fix=(data.fixed||[]).reduce((s,t)=>t.paid?(s+(t.value||0)):s,0);
       const inv=(data.investments||[]).filter(e=>!isWithdrawal(e)).reduce((s,t)=>s+t.value,0);
-      const computedBalance=Math.max(inc+prevBalance-exp-fix-inv,0);
+      // Parcelas de dívidas pagas incluídas no saldo
+      const mk2=`${vy}-${vm}`;
+      const paidDebt2=debts.filter(d=>!d.closed).reduce((s2,d)=>{
+        const di=vy*12+vm-(d.startYear*12+d.startMonth);
+        if(di<0||di>=d.installments) return s2;
+        return (d.paidMonths||[]).includes(mk2)?s2+d.monthlyValue:s2;
+      },0);
+      const computedBalance=inc+prevBalance-exp-fix-paidDebt2-inv; // sem Math.max → negativo carrega
       dbSet(monthKey(vy,vm),{...data,_balance:computedBalance}).then(()=>loadYearCache()).finally(()=>setSyncing(false));
     },800);
     return ()=>clearTimeout(saveTimer.current);
-  },[data,vm,vy,loaded,loading,loadYearCache,prevBalance]);
+  },[data,vm,vy,loaded,loading,loadYearCache,prevBalance,debts]);
 
   useEffect(()=>{
     if(!loaded||loading) return;
@@ -1204,7 +1211,14 @@ function AppInner({session}){
   const totalFixedPaid=data.fixed.filter(f=>f.paid).reduce((s,t)=>s+(t.value||0),0);
   const totalFixedAll=data.fixed.reduce((s,t)=>s+(t.value||0),0);
   const totalInvest=data.investments.filter(e=>!isWithdrawal(e)).reduce((s,t)=>s+t.value,0);
-  const totalOut=totalExpense+totalFixedPaid+totalInvest;
+  // Parcelas de dívidas pagas neste mês (não estão em data.fixed, ficam em debtInst)
+  const monthKey2=`${vy}-${vm}`;
+  const paidDebtValue=debts.filter(d=>!d.closed).reduce((s,d)=>{
+    const idx2=vy*12+vm-(d.startYear*12+d.startMonth);
+    if(idx2<0||idx2>=d.installments) return s;
+    return (d.paidMonths||[]).includes(monthKey2)?s+d.monthlyValue:s;
+  },0);
+  const totalOut=totalExpense+totalFixedPaid+paidDebtValue+totalInvest;
   const balance=totalIncome-totalOut;
 
   const emergencyTotal=(settings.emergencyBase||0)+(settings.emergencyDelta||0);
@@ -1278,7 +1292,13 @@ function AppInner({session}){
     const exp=(d.expenses||[]).reduce((s,t)=>s+t.value,0);
     const fix=(d.fixed||[]).filter(f=>f.paid).reduce((s,t)=>s+(t.value||0),0);
     const inv=(d.investments||[]).filter(e=>!isWithdrawal(e)).reduce((s,t)=>s+t.value,0);
-    return {i,inc,exp,fix,inv,out:exp+fix+inv,bal:inc-exp-fix-inv};
+    const mkey=`${vy}-${i}`;
+    const dbt=debts.filter(dd=>!dd.closed).reduce((s,dd)=>{
+      const di2=vy*12+i-(dd.startYear*12+dd.startMonth);
+      if(di2<0||di2>=dd.installments) return s;
+      return (dd.paidMonths||[]).includes(mkey)?s+dd.monthlyValue:s;
+    },0);
+    return {i,inc,exp,fix,inv,dbt,out:exp+fix+dbt+inv,bal:inc-exp-fix-dbt-inv};
   });
   const annualInc=annualRows.reduce((s,r)=>s+r.inc,0);
   const annualOut=annualRows.reduce((s,r)=>s+r.out,0);
@@ -2178,6 +2198,79 @@ function DebtForm({onSave,vm,vy}){
 }
 
 // ─── SETTINGS ─────────────────────────────────────────────────────────────────
+// ─── RESERVE SETTINGS COMPONENT ──────────────────────────────────────────────
+function ReserveSettings({settings,setSettings,label,baseKey,deltaKey,goalKey,defaultGoal,showName}){
+  const currentBase=settings[baseKey]||0;
+  const currentDelta=settings[deltaKey]||0;
+  const currentTotal=currentBase+currentDelta;
+  const [newBalance,setNewBalance]=React.useState("");
+  const [saved,setSaved]=React.useState(false);
+
+  function applyNewBalance(){
+    const val=parseFloat(String(newBalance).replace(",","."))||0;
+    if(val<=0) return;
+    // Nova base = valor informado, delta zerado
+    setSettings(s=>({...s,[baseKey]:val,[deltaKey]:0}));
+    setNewBalance("");
+    setSaved(true);
+    setTimeout(()=>setSaved(false),2500);
+  }
+
+  return(
+    <div className="card" style={{marginBottom:12}}>
+      {showName&&(
+        <div className="fg">
+          <label className="fl">Nome da meta</label>
+          <input className="fi" value={settings.personalGoalName||""} onChange={e=>setSettings(s=>({...s,personalGoalName:e.target.value}))}/>
+        </div>
+      )}
+      <div className="frow">
+        <div className="fg">
+          <label className="fl">Meta (R$)</label>
+          <input className="fi" type="text" inputMode="decimal" pattern="[0-9.,]*"
+            value={settings[goalKey]||defaultGoal}
+            onChange={e=>setSettings(s=>({...s,[goalKey]:parseFloat(String(e.target.value).replace(",","."))||0}))}/>
+        </div>
+        <div className="fg">
+          <label className="fl">Saldo atual</label>
+          <div style={{background:"var(--card2)",border:"1.5px solid var(--border2)",borderRadius:10,padding:"11px 13px",fontSize:13,fontWeight:700,color:"var(--green)"}}>
+            {new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL"}).format(currentTotal)}
+          </div>
+        </div>
+      </div>
+
+      <div style={{background:"rgba(99,102,241,.07)",border:"1px solid rgba(99,102,241,.2)",borderRadius:10,padding:"12px 13px",marginTop:4}}>
+        <div style={{fontSize:11,fontWeight:700,color:"var(--accent)",marginBottom:8}}>
+          🔧 Corrigir saldo atual
+        </div>
+        <div style={{fontSize:11,color:"var(--muted)",marginBottom:10,lineHeight:1.6}}>
+          Informe o saldo real que você tem hoje. O app usa esse valor como base e soma os próximos aportes em cima.
+        </div>
+        <div style={{display:"flex",gap:8,alignItems:"flex-end"}}>
+          <div style={{flex:1}}>
+            <label className="fl">Saldo real hoje (R$)</label>
+            <input className="fi" type="text" inputMode="decimal" pattern="[0-9.,]*"
+              placeholder="Ex: 2.500,00"
+              value={newBalance}
+              onChange={e=>setNewBalance(e.target.value)}/>
+          </div>
+          <button onClick={applyNewBalance} disabled={!newBalance}
+            style={{background:"var(--accent)",border:"none",color:"#fff",fontFamily:"'Plus Jakarta Sans',sans-serif",fontSize:12,fontWeight:700,borderRadius:10,padding:"11px 16px",cursor:"pointer",whiteSpace:"nowrap",opacity:newBalance?1:0.4,flexShrink:0}}>
+            {saved?"✅ Salvo!":"Definir base"}
+          </button>
+        </div>
+        {(currentBase>0||currentDelta!==0)&&(
+          <div style={{marginTop:8,fontSize:10,color:"var(--muted)",display:"flex",gap:12}}>
+            <span>Base atual: <strong style={{color:"var(--text2)"}}>{new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL"}).format(currentBase)}</strong></span>
+            <span>Aportes registrados: <strong style={{color:currentDelta>=0?"var(--green)":"var(--wine)"}}>{currentDelta>=0?"+":""}{new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL"}).format(currentDelta)}</strong></span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
 function SettingsPage({settings,setSettings,data,setData,userEmail,expenseCats}){
   const banks=settings.banks||DEFAULT_BANKS;
   const [newCat,setNewCat]=useState({name:"",icon:"📌",color:"#7b241c"});
@@ -2197,21 +2290,9 @@ function SettingsPage({settings,setSettings,data,setData,userEmail,expenseCats})
       <div className="card"><div className="fg"><label className="fl">Como quer ser chamado</label><input className="fi" value={settings.name} onChange={e=>setSettings(s=>({...s,name:e.target.value}))}/></div></div>
       <div className="divider"/>
       <div className="st">Reserva de Emergência 🛡️</div>
-      <div className="card">
-        <div className="frow">
-          <div className="fg"><label className="fl">Meta (R$)</label><input className="fi" type="number" value={settings.emergencyGoal} onChange={e=>setSettings(s=>({...s,emergencyGoal:parseFloat(e.target.value)||0}))}/></div>
-          <div className="fg"><label className="fl">Saldo inicial (R$)</label><input className="fi" type="number" value={settings.emergencyBase||0} onChange={e=>setSettings(s=>({...s,emergencyBase:parseFloat(e.target.value)||0}))}/></div>
-        </div>
-        <div style={{fontSize:10,color:"var(--muted)"}}>Saldo inicial = o que você já tinha antes de usar o app.</div>
-      </div>
+      <ReserveSettings settings={settings} setSettings={setSettings} label="Reserva de Emergência" baseKey="emergencyBase" deltaKey="emergencyDelta" goalKey="emergencyGoal" defaultGoal={10000}/>
       <div className="st">Meta Pessoal 🎯</div>
-      <div className="card">
-        <div className="fg"><label className="fl">Nome da meta</label><input className="fi" value={settings.personalGoalName} onChange={e=>setSettings(s=>({...s,personalGoalName:e.target.value}))}/></div>
-        <div className="frow">
-          <div className="fg"><label className="fl">Valor da meta (R$)</label><input className="fi" type="number" value={settings.personalGoalValue} onChange={e=>setSettings(s=>({...s,personalGoalValue:parseFloat(e.target.value)||0}))}/></div>
-          <div className="fg"><label className="fl">Saldo inicial (R$)</label><input className="fi" type="number" value={settings.personalBase||0} onChange={e=>setSettings(s=>({...s,personalBase:parseFloat(e.target.value)||0}))}/></div>
-        </div>
-      </div>
+      <ReserveSettings settings={settings} setSettings={setSettings} label={settings.personalGoalName||"Meta Pessoal"} baseKey="personalBase" deltaKey="personalDelta" goalKey="personalGoalValue" defaultGoal={100000} showName/>
       <div className="divider"/>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
         <div className="st">Cartões & Bancos 💳</div>
