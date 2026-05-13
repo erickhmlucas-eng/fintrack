@@ -1176,14 +1176,16 @@ function AppInner({session}){
       const exp=(data.expenses||[]).reduce((s,t)=>s+t.value,0);
       const fix=(data.fixed||[]).reduce((s,t)=>t.paid?(s+(t.value||0)):s,0);
       const inv=(data.investments||[]).filter(e=>!isWithdrawal(e)).reduce((s,t)=>s+t.value,0);
-      // Parcelas de dívidas pagas incluídas no saldo
+      // Parcelas de dívidas pagas SEM expense entry (backward compat)
       const mk2=`${vy}-${vm}`;
       const paidDebt2=debts.filter(d=>!d.closed).reduce((s2,d)=>{
         const di=vy*12+vm-(d.startYear*12+d.startMonth);
         if(di<0||di>=d.installments) return s2;
-        return (d.paidMonths||[]).includes(mk2)?s2+d.monthlyValue:s2;
+        if(!(d.paidMonths||[]).includes(mk2)) return s2;
+        const hasExp=(data.expenses||[]).some(e=>e.isDebtPayment&&e.debtId===d.id&&e.debtMonthKey===mk2);
+        return hasExp?s2:s2+d.monthlyValue;
       },0);
-      const computedBalance=inc+prevBalance-exp-fix-paidDebt2-inv; // sem Math.max → negativo carrega
+      const computedBalance=inc+prevBalance-exp-fix-paidDebt2-inv;
       dbSet(monthKey(vy,vm),{...data,_balance:computedBalance}).then(()=>loadYearCache()).finally(()=>setSyncing(false));
     },800);
     return ()=>clearTimeout(saveTimer.current);
@@ -1211,12 +1213,15 @@ function AppInner({session}){
   const totalFixedPaid=data.fixed.filter(f=>f.paid).reduce((s,t)=>s+(t.value||0),0);
   const totalFixedAll=data.fixed.reduce((s,t)=>s+(t.value||0),0);
   const totalInvest=data.investments.filter(e=>!isWithdrawal(e)).reduce((s,t)=>s+t.value,0);
-  // Parcelas de dívidas pagas neste mês (não estão em data.fixed, ficam em debtInst)
+  // Parcelas de dívidas pagas SEM expense entry (backward compat — dívidas pagas antes da atualização)
   const monthKey2=`${vy}-${vm}`;
   const paidDebtValue=debts.filter(d=>!d.closed).reduce((s,d)=>{
     const idx2=vy*12+vm-(d.startYear*12+d.startMonth);
     if(idx2<0||idx2>=d.installments) return s;
-    return (d.paidMonths||[]).includes(monthKey2)?s+d.monthlyValue:s;
+    if(!(d.paidMonths||[]).includes(monthKey2)) return s;
+    // Se já tem expense entry, não contar aqui (evita dupla contagem)
+    const hasExpense=(data.expenses||[]).some(e=>e.isDebtPayment&&e.debtId===d.id&&e.debtMonthKey===monthKey2);
+    return hasExpense?s:s+d.monthlyValue;
   },0);
   const totalOut=totalExpense+totalFixedPaid+paidDebtValue+totalInvest;
   const balance=totalIncome-totalOut;
@@ -1391,7 +1396,45 @@ function AppInner({session}){
   }
 
   function toggleFixed(id){setData(d=>({...d,fixed:(d.fixed||[]).map(f=>f.id===id?{...f,paid:!f.paid}:f)}));}
-  function toggleDebtPaid(debtId,mk){setDebts(ds=>ds.map(d=>{if(d.id!==debtId)return d;const paid=d.paidMonths||[];const wasPaid=paid.includes(mk);return{...d,paidMonths:wasPaid?paid.filter(k=>k!==mk):[...paid,mk],paidCount:wasPaid?(d.paidCount||0)-1:(d.paidCount||0)+1};}));}
+  function toggleDebtPaid(debtId,mk){
+    setDebts(ds=>ds.map(d=>{
+      if(d.id!==debtId)return d;
+      const paid=d.paidMonths||[];
+      const wasPaid=paid.includes(mk);
+      const [mkY,mkM]=mk.split("-").map(Number);
+      if(wasPaid){
+        // Remover expense entry correspondente desta dívida/mês
+        setData(dd=>({...dd,expenses:(dd.expenses||[]).filter(e=>!(e.isDebtPayment&&e.debtId===debtId&&e.debtMonthKey===mk))}));
+      } else {
+        // Criar expense entry para este pagamento
+        const expEntry={
+          id:uid(),
+          category:d.category||expenseCats[expenseCats.length-1]?.name||"Outros",
+          description:`Parcela: ${d.name} (${((d.paidCount||0)+1)}/${d.installments})`,
+          value:d.monthlyValue,
+          date:`${mkY}-${String(mkM).padStart(2,"0")}-01`,
+          bank:"",
+          method:"PIX",
+          essential:false,
+          isDebtPayment:true,
+          debtId:debtId,
+          debtMonthKey:mk,
+        };
+        // Só adicionar ao state se for o mês atual visualizado
+        if(mkY===vy&&mkM===vm){
+          setData(dd=>({...dd,expenses:[expEntry,...(dd.expenses||[])]}));
+        } else {
+          // Salvar direto no DB do mês correto
+          dbGet(monthKey(mkY,mkM)).then(existing=>{
+            const ex=existing||EMPTY_MONTH();
+            const alreadyHas=(ex.expenses||[]).some(e=>e.isDebtPayment&&e.debtId===debtId&&e.debtMonthKey===mk);
+            if(!alreadyHas) dbSet(monthKey(mkY,mkM),{...ex,expenses:[expEntry,...(ex.expenses||[])]});
+          });
+        }
+      }
+      return{...d,paidMonths:wasPaid?paid.filter(k=>k!==mk):[...paid,mk],paidCount:wasPaid?(d.paidCount||0)-1:(d.paidCount||0)+1};
+    }));
+  }
 
   const openModal=useCallback((type,entry)=>setModal({type,entry}),[]);
   const closeModal=useCallback(()=>setModal(null),[]);
@@ -1955,7 +1998,8 @@ function AppInner({session}){
                       <div className="txm"><span>{d}</span>{bk&&<span className="chip" style={{background:bk.color+"33",color:bk.color}}>{bk.name}</span>}<span>{e.method}</span></div>
                     </div>
                     <div className="txa" style={{color:"var(--wine)"}}>-{fmt(e.value)}</div>
-                    <button className="tdel" onClick={ev=>{ev.stopPropagation();deleteEntry("expenses",e.id);}}>✕</button>
+                    {e.isDebtPayment&&<span style={{fontSize:9,background:"rgba(99,102,241,.15)",color:"var(--accent)",padding:"2px 6px",borderRadius:6,fontWeight:700,flexShrink:0}}>parcela</span>}
+                    {!e.isDebtPayment&&<button className="tdel" onClick={ev=>{ev.stopPropagation();deleteEntry("expenses",e.id);}}>✕</button>}
                   </div>
                 );
               })}</div>}
@@ -2041,7 +2085,7 @@ function AppInner({session}){
           </div>
         )}
 
-        {!loading&&page==="debts"&&<DebtsPage debts={debts} setDebts={setDebts} vm={vm} vy={vy}/>}
+        {!loading&&page==="debts"&&<DebtsPage debts={debts} setDebts={setDebts} vm={vm} vy={vy} onTogglePaid={toggleDebtPaid}/>}
 
         {!loading&&page==="annual"&&(
           <div className="pg">
@@ -2117,7 +2161,7 @@ function AppInner({session}){
 }
 
 // ─── DEBTS ────────────────────────────────────────────────────────────────────
-function DebtsPage({debts,setDebts,vm,vy}){
+function DebtsPage({debts,setDebts,vm,vy,onTogglePaid}){
   const [showForm,setShowForm]=useState(false);
   const active=debts.filter(d=>!d.closed),closed=debts.filter(d=>d.closed);
   return (
@@ -2147,12 +2191,7 @@ function DebtsPage({debts,setDebts,vm,vy}){
               {dueThisMonth&&<span style={{color:paidThisMonth?"var(--green)":"var(--gold)",fontWeight:600}}>{paidThisMonth?"✓ Paga este mês":"⚡ Vence este mês"}</span>}
             </div>
             {dueThisMonth&&(
-              <button onClick={()=>setDebts(ds=>ds.map(x=>{
-                if(x.id!==d.id) return x;
-                const paid=x.paidMonths||[];
-                const wasPaid=paid.includes(key);
-                return{...x,paidMonths:wasPaid?paid.filter(k=>k!==key):[...paid,key],paidCount:wasPaid?(x.paidCount||0)-1:(x.paidCount||0)+1};
-              }))}
+              <button onClick={()=>onTogglePaid(d.id,key)}
                 style={{width:"100%",background:paidThisMonth?"rgba(0,214,143,.1)":"var(--surface)",border:`1px solid ${paidThisMonth?"var(--green)":"var(--border)"}`,color:paidThisMonth?"var(--green)":"var(--muted)",fontFamily:"'Sora',sans-serif",fontSize:12,fontWeight:600,borderRadius:9,padding:"8px 0",cursor:"pointer",marginBottom:8}}>
                 {paidThisMonth?`✓ Parcela de ${MONTHS_FULL[vm]} paga`:`Marcar parcela de ${MONTHS_FULL[vm]} como paga`}
               </button>
@@ -2175,7 +2214,7 @@ function DebtsPage({debts,setDebts,vm,vy}){
 }
 
 function DebtForm({onSave,vm,vy}){
-  const [f,setF]=useState({name:"",totalValue:"",installments:"",startMonth:String(vm),startYear:String(vy)});
+  const [f,setF]=useState({name:"",totalValue:"",installments:"",startMonth:String(vm),startYear:String(vy),category:"Outros"});
   const upd=(k,v)=>setF(p=>({...p,[k]:v}));
   const tv=parseFloat(String(f.totalValue).replace(",","."))||0;
   const inst=parseInt(f.installments)||0;
@@ -2183,6 +2222,11 @@ function DebtForm({onSave,vm,vy}){
   return (
     <div className="card">
       <div className="fg"><label className="fl">Nome da dívida</label><input className="fi" placeholder="Ex: Carro, Funileiro…" value={f.name} onChange={e=>upd("name",e.target.value)}/></div>
+      <div className="fg"><label className="fl">Categoria do gasto</label>
+        <select className="fi" value={f.category} onChange={e=>upd("category",e.target.value)}>
+          {DEFAULT_EXPENSE_CATS.map(c=><option key={c.id} value={c.name}>{c.icon} {c.name}</option>)}
+        </select>
+      </div>
       <div className="frow">
         <div className="fg"><label className="fl">Valor total (R$)</label><input className="fi" type="text" inputMode="decimal" pattern="[0-9.,]*" value={f.totalValue} onChange={e=>upd("totalValue",e.target.value)}/></div>
         <div className="fg"><label className="fl">Nº de parcelas</label><input className="fi" type="number" inputMode="numeric" value={f.installments} onChange={e=>upd("installments",e.target.value)}/></div>
@@ -2192,7 +2236,7 @@ function DebtForm({onSave,vm,vy}){
         <div className="fg"><label className="fl">Mês início</label><select className="fi" value={f.startMonth} onChange={e=>upd("startMonth",e.target.value)}>{MONTHS_FULL.map((m,i)=><option key={i} value={i}>{m}</option>)}</select></div>
         <div className="fg"><label className="fl">Ano</label><input className="fi" type="number" value={f.startYear} onChange={e=>upd("startYear",e.target.value)}/></div>
       </div>
-      <button className="savebtn" onClick={()=>{if(!f.name||!tv||!inst)return;onSave({id:uid(),name:f.name,totalValue:tv,installments:inst,monthlyValue:parseFloat(monthly.toFixed(2)),startMonth:parseInt(f.startMonth),startYear:parseInt(f.startYear),paidMonths:[],paidCount:0,closed:false});}} disabled={!f.name||!tv||!inst}>Adicionar dívida</button>
+      <button className="savebtn" onClick={()=>{if(!f.name||!tv||!inst)return;onSave({id:uid(),name:f.name,category:f.category||"Outros",totalValue:tv,installments:inst,monthlyValue:parseFloat(monthly.toFixed(2)),startMonth:parseInt(f.startMonth),startYear:parseInt(f.startYear),paidMonths:[],paidCount:0,closed:false});}} disabled={!f.name||!tv||!inst}>Adicionar dívida</button>
     </div>
   );
 }
