@@ -565,8 +565,10 @@ function ClaudeAssistant({ vm, vy, settings, debts, theme, data, creditData: cre
   useEffect(() => { setContextLoaded(false); setFinancialCtx(null); setMessages([]); }, [vm, vy]);
 
   async function buildContext() {
+    try {
     const pm = vm === 0 ? 11 : vm - 1, py = vm === 0 ? vy - 1 : vy;
-    const prevMonthData = await dbGet(monthKey(py, pm));
+    let prevMonthData = null;
+    try { prevMonthData = await dbGet(monthKey(py, pm)); } catch(_) {}
     const d = data || EMPTY_MONTH(), cr = creditDataProp || EMPTY_CREDIT(), pd = prevMonthData || EMPTY_MONTH();
     const inc     = (d.incomes     || []).reduce((s, t) => s + t.value, 0);
     const exp     = (d.expenses    || []).reduce((s, t) => s + t.value, 0);
@@ -630,6 +632,11 @@ function ClaudeAssistant({ vm, vy, settings, debts, theme, data, creditData: cre
     setFinancialCtx(ctx);
     setContextLoaded(true);
     generateOpening(ctx);
+    } catch(err) {
+      console.error("ClaudeAssistant buildContext error:", err);
+      setMessages([{ role: "assistant", content: `⚠️ Não consegui carregar todos os dados (${err.message}). Pode me perguntar assim mesmo — vou usar o que estiver disponível.` }]);
+      setContextLoaded(true);
+    }
   }
 
   function generateOpening(ctx) {
