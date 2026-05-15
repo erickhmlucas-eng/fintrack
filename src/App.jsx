@@ -618,7 +618,7 @@ function ClaudeAssistant({ vm, vy, settings, debts, theme, data, creditData: cre
     const ctx = {
       month: MONTHS_FULL[vm], year: vy, prevMonth: MONTHS_FULL[pm], prevYear: py,
       income: inc, prevBalance: prevBalance || 0, expenses: exp,
-      fixedTotal: fixAll, fixedPaid, fixedPending: fixPend,
+      fixedTotal: fixAll, fixedPaid: fixPaid, fixedPending: fixPend,
       investments: inv, creditSpent: credit, balance: bal, savingsRate: saveRate,
       prevIncome: pInc, prevExpenses: pExp, prevFixed: pFix, prevInvestments: pInv, prevBalance2: pInc - pExp - pFix - pInv,
       emergency: { current: emerg, goal: eGoal, pct: ePct, monthsToGoal: eMonthsToGoal },
