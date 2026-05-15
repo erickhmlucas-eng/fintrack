@@ -549,7 +549,7 @@ function ImportModal({banks,expenseCats,importType,defaultBank,vm,vy,onClose,onI
 }
 
 // ─── CLAUDE FINANCIAL CONSULTANT ─────────────────────────────────────────────
-function ClaudeAssistant({ vm, vy, settings, debts, theme, data, yearCache, prevBalance }) {
+function ClaudeAssistant({ vm, vy, settings, debts, theme, data, creditData: creditDataProp, yearCache, prevBalance }) {
   const [open, setOpen]                   = useState(false);
   const [messages, setMessages]           = useState([]);
   const [input, setInput]                 = useState("");
@@ -566,8 +566,8 @@ function ClaudeAssistant({ vm, vy, settings, debts, theme, data, yearCache, prev
 
   async function buildContext() {
     const pm = vm === 0 ? 11 : vm - 1, py = vm === 0 ? vy - 1 : vy;
-    const [creditData, prevMonthData] = await Promise.all([dbGet(creditKey(vy, vm)), dbGet(monthKey(py, pm))]);
-    const d = data || EMPTY_MONTH(), cr = creditData || EMPTY_CREDIT(), pd = prevMonthData || EMPTY_MONTH();
+    const prevMonthData = await dbGet(monthKey(py, pm));
+    const d = data || EMPTY_MONTH(), cr = creditDataProp || EMPTY_CREDIT(), pd = prevMonthData || EMPTY_MONTH();
     const inc     = (d.incomes     || []).reduce((s, t) => s + t.value, 0);
     const exp     = (d.expenses    || []).reduce((s, t) => s + t.value, 0);
     const fixAll  = (d.fixed       || []).reduce((s, t) => s + (t.value || 0), 0);
@@ -1335,7 +1335,7 @@ function AppInner({session}){
 
       {fabType&&<button className="fab" onClick={()=>openModal(fabType)}>+</button>}
       {/* ── CONSULTOR FINANCEIRO IA ── */}
-      <ClaudeAssistant vm={vm} vy={vy} settings={settings} debts={debts} theme={theme} data={data} yearCache={yearCache} prevBalance={prevBalance}/>
+      <ClaudeAssistant vm={vm} vy={vy} settings={settings} debts={debts} theme={theme} data={data} creditData={creditData} yearCache={yearCache} prevBalance={prevBalance}/>
       {toast&&<Toast msg={toast} onDone={()=>setToast(null)}/>}
 
       {modal&&(
