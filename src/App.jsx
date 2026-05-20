@@ -628,6 +628,19 @@ function ClaudeAssistant({ vm, vy, settings, debts, theme, data, creditData: cre
       activeDebts, totalDebtMonthly: totalDebtM,
       ytdIncome: ytdInc, ytdExpenses: ytdExp, ytdFixed: ytdFix, ytdInvestments: ytdInv,
       ytdBalance: ytdInc - ytdExp - ytdFix - ytdInv, notes: d.notes || "",
+      expenseList: (d.expenses || []).map(e => ({
+        desc: e.description || e.category,
+        cat: e.category,
+        value: e.value,
+        date: e.date ? e.date.slice(5).split('-').reverse().join('/') : '',
+        method: e.method || '',
+        bank: e.bank || '',
+      })).sort((a,b) => b.value - a.value),
+      incomeList: (d.incomes || []).filter(e => !e.autoFromWithdrawal).map(e => ({
+        name: e.name,
+        value: e.value,
+        date: e.date ? e.date.slice(5).split('-').reverse().join('/') : '',
+      })),
     };
     setFinancialCtx(ctx);
     setContextLoaded(true);
@@ -721,6 +734,12 @@ METAS & RESERVAS:
 
 GASTOS POR CATEGORIA:
 ${ctx.catBreakdown.length > 0 ? ctx.catBreakdown.map((c, i) => `${i + 1}. ${c.icon} ${c.name}: ${f(c.value)}${c.budget > 0 ? ` / orç. ${f(c.budget)} (${pct(c.value, c.budget)})${c.value > c.budget ? " ⚠️ ESTOUROU" : ""}` : ""}`).join("\n") : "Nenhum gasto registrado."}
+
+LANÇAMENTOS INDIVIDUAIS — GASTOS (débito/pix):
+${ctx.expenseList && ctx.expenseList.length > 0 ? ctx.expenseList.map(e => `• ${e.date} | ${e.desc} | ${e.cat} | ${f(e.value)}${e.bank ? ` | ${e.bank}` : ""}${e.method ? ` | ${e.method}` : ""}`).join("\n") : "Nenhum gasto registrado."}
+
+ENTRADAS INDIVIDUAIS:
+${ctx.incomeList && ctx.incomeList.length > 0 ? ctx.incomeList.map(e => `• ${e.date} | ${e.name} | ${f(e.value)}`).join("\n") : "Nenhuma entrada registrada."}
 
 DESPESAS FIXAS:
 ${ctx.fixedList.length > 0 ? ctx.fixedList.map(fi => `• ${fi.name}: ${f(fi.value)} [${fi.paid ? "✓ PAGO" : "⏳ PENDENTE"}]`).join("\n") : "Nenhuma."}
