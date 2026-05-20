@@ -433,7 +433,7 @@ async function extractPDFText(file){
 async function fileToBase64(file){return new Promise((resolve,reject)=>{const r=new FileReader();r.onload=e=>resolve(e.target.result.split(",")[1]);r.onerror=()=>reject(new Error("Erro ao ler arquivo"));r.readAsDataURL(file);});}
 async function callClaudeImage(base64,mediaType){
   const prompt=`Analise esta imagem de extrato ou fatura bancária. Extraia TODAS as transações individuais.\nRetorne APENAS um array JSON válido, sem markdown: [{"date":"DD/MM/YYYY","description":"estabelecimento","value":99.90}]\nRegras: value numérico positivo, inclua TODAS as compras, ignore totais/saldos/cabeçalhos, para parcelas use o valor da parcela.`;
-  const resp=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:2000,messages:[{role:"user",content:[{type:"image",source:{type:"base64",media_type:mediaType,data:base64}},{type:"text",text:prompt}]}]})});
+  const resp=await fetch("/api/claude",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:2000,messages:[{role:"user",content:[{type:"image",source:{type:"base64",media_type:mediaType,data:base64}},{type:"text",text:prompt}]}]})});
   if(!resp.ok){const err=await resp.text();throw new Error(`API ${resp.status}: ${err.slice(0,100)}`);}
   const data=await resp.json();const txt=data.content?.find(c=>c.type==="text")?.text||"[]";
   return JSON.parse(txt.replace(/```json?|```/g,"").trim());
@@ -663,17 +663,32 @@ function ClaudeAssistant({ vm, vy, settings, debts, theme, data, creditData: cre
     const pct = (v, t) => t > 0 ? `${((v / t) * 100).toFixed(1)}%` : "—";
     const totalMonthOut    = ctx.expenses + ctx.fixedPaid + ctx.totalDebtMonthly;
     const emergCoverMonths = totalMonthOut > 0 ? (ctx.emergency.current / totalMonthOut).toFixed(1) : "0";
-    return `Você é o CONSULTOR FINANCEIRO PESSOAL integrado ao FinTrack. Trate as finanças do usuário como se fossem uma empresa: busque escala (investimentos), corte vazamentos (gastos desnecessários) e proteja o caixa (reservas).
+    return `Você é o CONSULTOR FINANCEIRO PESSOAL do Erick, integrado diretamente ao app FinTrack dele.
 
-PERSONALIDADE:
-• Direto e honesto — opiniões concretas, nunca genéricas
-• Proativo — antecipe problemas e sugira ações específicas com valores e prazos
-• Fale como um amigo especialista em finanças, não como um robô
-• Máximo 280 palavras por resposta (exceto quando pedirem análise completa)
-• Use markdown: **negrito**, • listas, números para prioridades
+════════ QUEM VOCÊ É ════════
+Você não é um chatbot de FAQ financeiro. Você é o consultor de confiança do Erick — aquele amigo que entende de dinheiro de verdade e fala a verdade sem rodeios. Pensa como um CFO pessoal: analisa, questiona, desafia e ajuda a tomar decisões melhores.
 
-PERFIL DO USUÁRIO:
-• Renda fixa base: ~R$ 4.000/mês (tem renda variável via vendas online no site)
+PERSONALIDADE E FORMA DE FALAR:
+• Fale como um amigo próximo que entende de finanças — natural, direto, sem linguagem de manual
+• Seja honesto mesmo quando dói: se ele está errando em algo, diz claramente e explica por quê
+• Faça perguntas de acompanhamento quando necessário: "o que aconteceu esse mês?", "esse gasto foi planejado?"
+• Comemore conquistas genuinamente — se a taxa de poupança subiu, reconheça isso com entusiasmo
+• Adapte o tom: mensagem casual = resposta na mesma vibe. Pedido de análise = aprofunde sem pressa
+• Use markdown com moderação: **negrito** só para números e pontos-chave
+• Sem limite de tamanho — responda o quanto a pergunta pedir. Curta = curto. Análise = extensa
+
+COMO VOCÊ AJUDA (além de relatórios):
+• Faz contas junto quando ele pede ("eu tenho X no Nubank, Y no C6, o saldo bate?")
+• Ajuda a planejar o mês seguinte com valores concretos por categoria
+• Identifica padrões de comportamento que estão custando dinheiro
+• Questiona gastos que parecem altos — sem julgamento, mas com clareza
+• Sugere redistribuição de dinheiro entre bancos/reservas quando faz sentido
+• Avisa sobre riscos que ele pode não estar vendo (crédito alto, reserva baixa, dívidas acumulando)
+• Responde dúvidas do cotidiano: "vale parcelar?", "compro à vista ou no crédito?", "tenho dinheiro pra isso?"
+• Quando ele mandar saldos manualmente, confere as contas e aponta se algo não fecha
+
+PERFIL DO ERICK:
+• Renda fixa base: ~R$ 4.000/mês + renda variável via vendas online (site próprio)
 • Pagamento principal: crédito + Pix
 • Bancos: ${(settings.banks || []).map(b => b.name).join(", ")}
 
@@ -722,15 +737,23 @@ ACUMULADO ${ctx.year}:
 
 OBSERVAÇÕES DO MÊS: ${ctx.notes || "—"}
 
-════════ DIRETRIZES ════════
-1. Baseie TODAS as respostas nos dados reais acima
-2. Saldo negativo → priorize cortes imediatos ANTES de falar em investir
-3. Para metas: dê prazos e valores concretos ("guarde R$ 800/mês")
-4. Gastos acima do orçamento → aponte e sugira limite específico
-5. Distribuição ideal: 50% necessidades / 30% qualidade de vida / 20% futuro
-6. Com renda variável extra → oriente a guardar 50%+ do excedente
-7. Compare sempre com mês anterior para mostrar evolução ou regressão
-8. Quando perguntado sobre planejamento futuro, use os dados YTD como base`;
+════════ COMO ANALISAR ════════
+1. Use os dados reais acima como base — nunca chute valores
+2. Saldo negativo = alerta vermelho: cortes primeiro, investimento depois
+3. Compare sempre com o mês anterior — mostre se melhorou ou piorou e quanto
+4. Gastos acima do orçamento → aponte a categoria, o quanto estourou, e sugira limite realista
+5. Distribuição saudável: ~50% necessidades fixas / ~30% qualidade de vida / ~20% futuro
+6. Renda variável extra → orienta guardar 50%+ do excedente antes de gastar
+7. Para metas: sempre traduza em ação concreta ("guarde R$ X/mês → chega lá em Y meses")
+8. Com dados YTD: mostre tendências anuais, não só o mês atual
+
+════════ REGRAS DE CONVERSA ════════
+• Se ele mandar saldos/valores manualmente, FAÇA AS CONTAS e mostre o resultado
+• Se a pergunta for vaga, responda o que conseguir e faça UMA pergunta de follow-up
+• Nunca dê lista genérica de dicas — seja específico para a situação DELE
+• Se ele admitir um erro financeiro, não julga — ajuda a corrigir
+• Sugestões sempre com valor e prazo: "separa R$ 300 até dia 10"
+• Se perceber algo preocupante nos dados, menciona proativamente mesmo sem ser perguntado`;
   }
 
   async function sendMessage(text) {
@@ -742,7 +765,7 @@ OBSERVAÇÕES DO MÊS: ${ctx.notes || "—"}
     setInput("");
     setLoading(true);
     try {
-      const resp = await fetch("https://api.anthropic.com/v1/messages", {
+      const resp = await fetch("/api/claude", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1200, system: buildSystemPrompt(financialCtx), messages: newHistory.map(m => ({ role: m.role, content: m.content })) }),
       });
@@ -1272,7 +1295,7 @@ function AppInner({session}){
                   <div className="card" style={{textAlign:"center"}}><div className="st" style={{marginBottom:8}}>Saldo</div><Donut size={130} thick={23} data={[{color:"var(--green)",value:totalIncome},{color:"var(--wine)",value:totalOut}]} label={fmt(balance)} sublabel={balance>=0?"positivo":"negativo"}/><div style={{fontSize:9,color:"var(--muted)",marginTop:6}}>{totalIncome>0?((balance/totalIncome)*100).toFixed(1):0}% da renda</div></div>
                   <div className="card"><div className="st" style={{marginBottom:8}}>Crédito em aberto</div><Donut size={120} thick={21} data={bankCredit.filter(b=>b.spent>0).map(b=>({color:b.color,value:b.spent}))} label={fmt(bankCredit.reduce((s,b)=>s+b.spent,0))} sublabel="ciclo atual"/><div style={{marginTop:8,display:"flex",flexDirection:"column",gap:5}}>{bankCredit.filter(b=>b.spent>0).map(b=>{const pct=b.limit>0?Math.min((b.spent/b.limit)*100,100):0;return(<div key={b.id}><div style={{display:"flex",justifyContent:"space-between",fontSize:10,marginBottom:2}}><span style={{display:"flex",alignItems:"center",gap:4}}><span style={{width:7,height:7,borderRadius:"50%",background:b.color,display:"inline-block"}}/>{b.name}{b.isClosed&&<span style={{fontSize:8,color:"var(--accent)"}}>novo ciclo</span>}</span><span style={{color:pct>90?"var(--wine)":pct>70?"var(--gold)":"var(--muted)"}}>{fmt(b.spent)}{b.limit?` / ${fmt(b.limit)}`:""}</span></div>{b.limit>0&&<div style={{height:3,background:"var(--border)",borderRadius:2,overflow:"hidden"}}><div style={{height:"100%",width:`${pct}%`,borderRadius:2,background:pct>90?"var(--wine)":pct>70?"var(--gold)":b.color}}/></div>}</div>);})}{bankCredit.every(b=>b.spent===0)&&<div style={{fontSize:10,color:"var(--green)",textAlign:"center",fontWeight:600}}>✅ Sem gastos no ciclo atual</div>}</div></div>
                 </div>
-                <div className="card"><div className="st" style={{marginBottom:10}}>Metas & Reservas</div><GoalBar label="Reserva de Emergência" icon="🛡️" current={emergencyTotal} goal={settings.emergencyGoal} color="var(--green)"/><GoalBar label={settings.personalGoalName} icon="🎯" current={personalTotal} goal={settings.personalGoalValue} color="var(--accent)"/></div>
+                <div className="card"><div className="st" style={{marginBottom:10}}>Metas & Reservas</div><GoalBar label="Reserva de Emergência" icon="🛡️" current={emergencyTotal} goal={settings.emergencyGoal} color="var(--green)"/><GoalBar label={settings.personalGoalName} icon="🎯" current={personalTotal} goal={settings.personalGoalValue} color="var(--gold)"/></div>
                 {bankCredit.length>0&&(<div className="card"><div className="st" style={{marginBottom:10}}>Crédito em aberto 💳</div>{bankCredit.every(b=>b.isClosed&&b.spent===0)&&(<div style={{textAlign:"center",padding:"12px 0",fontSize:12,color:"var(--green)",fontWeight:600}}>✅ Todas as faturas fechadas — nenhum gasto no novo ciclo ainda</div>)}{bankCredit.map(b=>{const pct=b.limit>0?Math.min((b.spent/b.limit)*100,100):0;const avail=b.limit>0?Math.max(b.limit-b.spent,0):null;if(b.isClosed&&b.spent===0)return null;return(<div key={b.id} style={{marginBottom:12,paddingBottom:12,borderBottom:"1px solid var(--border)"}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}><span style={{display:"flex",alignItems:"center",gap:6,fontSize:12,fontWeight:700}}><span style={{width:9,height:9,borderRadius:"50%",background:b.color,display:"inline-block"}}/>{b.name}<span style={{fontSize:9,padding:"1px 6px",borderRadius:8,fontWeight:700,background:b.isClosed?"rgba(0,214,143,.12)":"rgba(99,102,241,.12)",color:b.isClosed?"var(--green)":"var(--accent)"}}>{b.isClosed?`novo ciclo — ${MONTHS_FULL[b.nextInvoice?.m??0]}`:`em aberto — ${MONTHS_FULL[b.nextInvoice?.m??0]}`}</span></span><span style={{fontSize:13,fontWeight:800,color:pct>90?"var(--wine)":pct>70?"var(--gold)":"var(--text)"}}>{fmt(b.spent)}</span></div>{b.limit>0&&<><div style={{height:5,background:"var(--border)",borderRadius:3,overflow:"hidden",marginBottom:3}}><div style={{height:"100%",width:`${pct}%`,borderRadius:3,transition:"width .5s",background:pct>90?"var(--wine)":pct>70?"var(--gold)":b.color}}/></div><div style={{display:"flex",justifyContent:"space-between",fontSize:10}}><span style={{color:pct>90?"var(--wine)":pct>70?"var(--gold)":"var(--muted)"}}>{pct.toFixed(0)}% do limite</span><span style={{color:"var(--green)",fontWeight:600}}>{fmt(avail)} disponível</span></div></>}</div>);})}</div>)}
                 {catData.length>0&&(<div className="card"><div className="st" style={{marginBottom:10}}>Gastos por categoria (débito/pix)</div>{catData.map(c=>{const hasBudget=c.budget>0,pct=hasBudget?Math.min((c.value/c.budget)*100,100):0;const over=hasBudget&&c.value>c.budget,warn=hasBudget&&pct>=80&&!over;return(<div key={c.name} style={{marginBottom:9}}><div style={{display:"flex",justifyContent:"space-between",marginBottom:3,alignItems:"center"}}><span style={{fontSize:11,fontWeight:500}}>{c.icon} {c.name}</span><span style={{fontSize:10,display:"flex",gap:5,alignItems:"center"}}>{over&&<span style={{color:"var(--wine)",fontSize:9,fontWeight:700}}>⚠ estourou</span>}{warn&&<span style={{color:"var(--gold)",fontSize:9,fontWeight:700}}>⚡ quase</span>}<span style={{color:"var(--muted)"}}>{fmt(c.value)}{hasBudget?` / ${fmt(c.budget)}`:""}</span></span></div><div style={{height:5,background:"var(--border)",borderRadius:3,overflow:"hidden"}}><div style={{height:"100%",borderRadius:3,transition:"width .6s",width:`${hasBudget?pct:(c.value/maxCat)*100}%`,background:over?"var(--wine)":warn?"var(--gold)":c.color}}/></div></div>);})}</div>)}
                 <div className="card"><div className="st" style={{marginBottom:8}}>Observações</div><textarea className="notesarea" placeholder="Ajustes, onde passou do esperado, decisões pro próximo mês…" value={data.notes||""} onChange={e=>setData(d=>({...d,notes:e.target.value}))}/></div>
@@ -1317,7 +1340,7 @@ function AppInner({session}){
               <div className="pg">
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><div className="st">Reservas & Investimentos</div><div style={{fontSize:13,fontWeight:700,color:"var(--gold)"}}>{fmt(totalInvest)}</div></div>
                 <button className="bulkbtn" onClick={()=>openModal("bulk_investment")}>📋 Colar em lote</button>
-                <div className="card"><GoalBar label="Reserva de Emergência" icon="🛡️" current={emergencyTotal} goal={settings.emergencyGoal} color="var(--green)"/><GoalBar label={settings.personalGoalName} icon="🎯" current={personalTotal} goal={settings.personalGoalValue} color="var(--accent)"/></div>
+                <div className="card"><GoalBar label="Reserva de Emergência" icon="🛡️" current={emergencyTotal} goal={settings.emergencyGoal} color="var(--green)"/><GoalBar label={settings.personalGoalName} icon="🎯" current={personalTotal} goal={settings.personalGoalValue} color="var(--gold)"/></div>
                 {(data.investments||[]).length===0?<div className="empty">Nenhum lançamento.<br/>Toque no <strong style={{color:"var(--accent)"}}>+</strong> ou cole em lote.</div>
                   :<div className="txlist">{(data.investments||[]).map(e=>{const isW=isWithdrawal(e);return(<div key={e.id} className="txi" onClick={()=>openModal("investment",e)}><div className="txicon" style={{background:isW?"var(--wine)22":"var(--gold)22"}}>{isW?"📤":"💰"}</div><div className="txinfo"><div className="txd">{e.name||e.type}</div><div className="txm">{e.date?.slice(5).split("-").reverse().join("/")} · {e.type}{isW&&<span style={{color:"var(--green)",fontSize:8,fontWeight:700}}>→ entrada auto</span>}</div></div><div className="txa" style={{color:isW?"var(--wine)":"var(--gold)"}}>{isW?"-":"+"}{fmt(e.value)}</div><button className="tdel" onClick={ev=>{ev.stopPropagation();deleteEntry("investments",e.id);}}>✕</button></div>);})}</div>}
               </div>
