@@ -1240,22 +1240,29 @@ function AppInner({session}){
       const r=await dbGet(monthKey(vy,vm));
       let loadedData=r||EMPTY_MONTH();
 
-      // ── Auto-copiar fixas recorrentes do mês anterior ──
-      const pmAuto=vm===0?11:vm-1, pyAuto=vm===0?vy-1:vy;
-      const prev=await dbGet(monthKey(pyAuto,pmAuto));
-      if(prev&&prev.fixed&&prev.fixed.length>0){
-        const recurringFixed=prev.fixed.filter(f=>
-          f.recurring!==false && // recurring true ou undefined (legado)
-          !f.isAutoInvoice && // não copiar faturas de cartão fechadas
-          !f.closedInMonth
-        );
-        const existingNames=new Set((loadedData.fixed||[]).map(f=>f.name));
-        const toAdd=recurringFixed
-          .filter(f=>!existingNames.has(f.name))
-          .map(f=>({...f,id:uid(),paid:false,recurring:f.recurring!==false}));
-        if(toAdd.length>0){
-          loadedData={...loadedData,fixed:[...toAdd,...(loadedData.fixed||[])]};
-          await dbSet(monthKey(vy,vm),loadedData);
+      // ── Auto-copiar fixas recorrentes APENAS se este mês estiver VAZIO ──
+      // (evita duplicar quando você já lançou as fixas manualmente)
+      const isMonthEmpty=!loadedData.fixed||loadedData.fixed.length===0;
+      const wasNeverOpened=!loadedData._autoCopyDone;
+      if(isMonthEmpty&&wasNeverOpened){
+        const pmAuto=vm===0?11:vm-1, pyAuto=vm===0?vy-1:vy;
+        const prev=await dbGet(monthKey(pyAuto,pmAuto));
+        if(prev&&prev.fixed&&prev.fixed.length>0){
+          const recurringFixed=prev.fixed.filter(f=>
+            f.recurring!==false &&
+            !f.isAutoInvoice &&
+            !f.closedInMonth
+          );
+          const toAdd=recurringFixed.map(f=>({...f,id:uid(),paid:false,recurring:f.recurring!==false}));
+          if(toAdd.length>0){
+            loadedData={...loadedData,fixed:toAdd,_autoCopyDone:true};
+            await dbSet(monthKey(vy,vm),loadedData);
+          } else {
+            loadedData={...loadedData,_autoCopyDone:true};
+            await dbSet(monthKey(vy,vm),loadedData);
+          }
+        } else {
+          loadedData={...loadedData,_autoCopyDone:true};
         }
       }
       setData(loadedData);
@@ -2886,7 +2893,6 @@ function BalanceReconciliation({banks,balance,settings,setSettings,onAdjust}){
 function SettingsPage({settings,setSettings,data,setData,userEmail,expenseCats,onRecalculate,banks,balance,onAdjustBalance}){
   const [recalcMsg,setRecalcMsg]=useState("");
   const [recalcing,setRecalcing]=useState(false);
-  const banks=settings.banks||DEFAULT_BANKS;
   const [newCat,setNewCat]=useState({name:"",icon:"📌",color:"#7b241c"});
   const [showNewCat,setShowNewCat]=useState(false);
   function addCat(){if(!newCat.name.trim())return;setSettings(s=>({...s,expenseCats:[...(s.expenseCats||DEFAULT_EXPENSE_CATS),{id:uid(),...newCat}]}));setNewCat({name:"",icon:"📌",color:"#7b241c"});setShowNewCat(false);}
