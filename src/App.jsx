@@ -1098,6 +1098,106 @@ export default function FinTrack(){
   return <AppInner session={session}/>;
 }
 
+// ─── SMART ALERTS ────────────────────────────────────────────────────────────
+function generateAlerts(yearCache,vm,vy,settings,debts,expenseCats,bankCredit){
+  const alerts=[];
+  const currentData=yearCache[vm]||EMPTY_MONTH();
+
+  // Média dos últimos 3 meses (excluindo o atual)
+  const past={};
+  let monthsCount=0;
+  for(let i=1;i<=3;i++){
+    const m=vm-i;
+    if(m<0) break;
+    const d=yearCache[m];
+    if(!d) continue;
+    monthsCount++;
+    (d.expenses||[]).forEach(e=>{
+      past[e.category]=(past[e.category]||0)+e.value;
+    });
+  }
+  if(monthsCount===0) return alerts;
+
+  const avgByCategory={};
+  Object.entries(past).forEach(([cat,total])=>{avgByCategory[cat]=total/monthsCount;});
+
+  // Gastos atuais por categoria
+  const currentByCategory={};
+  (currentData.expenses||[]).forEach(e=>{
+    currentByCategory[e.category]=(currentByCategory[e.category]||0)+e.value;
+  });
+
+  // Alert 1: Categoria com gasto destoante (3x acima da média)
+  Object.entries(currentByCategory).forEach(([cat,val])=>{
+    const avg=avgByCategory[cat]||0;
+    if(avg>0&&val>=avg*2.5&&val>=100){
+      const mult=(val/avg).toFixed(1);
+      alerts.push({type:"warn",icon:"⚠️",msg:`${cat}: você gastou ${fmt(val)} este mês (${mult}x sua média de ${fmt(avg)})`});
+    }
+  });
+
+  // Alert 2: Fatura de cartão muito maior que média
+  bankCredit.forEach(b=>{
+    if(b.spent<=0) return;
+    // Calcular média de fatura do banco
+    let totalSpent=0,monthsB=0;
+    for(let m=0;m<vm;m++){
+      const cd=yearCache[`credit_${m}`];
+      if(!cd?.purchases) continue;
+      const s=cd.purchases.filter(p=>p.bank===b.name).reduce((sum,p)=>sum+p.monthlyValue,0);
+      if(s>0){totalSpent+=s;monthsB++;}
+    }
+    if(monthsB>=2){
+      const avg=totalSpent/monthsB;
+      if(b.spent>=avg*1.5){
+        const pct=(((b.spent-avg)/avg)*100).toFixed(0);
+        alerts.push({type:"warn",icon:"💳",msg:`Fatura ${b.name} está ${pct}% acima da sua média (${fmt(b.spent)} vs ${fmt(avg)})`});
+      }
+    }
+  });
+
+  // Alert 3: Renda do mês muito menor que esperado
+  const currentIncome=(currentData.incomes||[]).reduce((s,t)=>s+t.value,0);
+  let totalInc=0,incMonths=0;
+  for(let m=0;m<vm;m++){
+    const d=yearCache[m];
+    if(!d?.incomes) continue;
+    const s=d.incomes.reduce((sum,t)=>sum+t.value,0);
+    if(s>0){totalInc+=s;incMonths++;}
+  }
+  if(incMonths>=2&&currentIncome>0){
+    const avgInc=totalInc/incMonths;
+    if(currentIncome<avgInc*0.7){
+      const pct=(((avgInc-currentIncome)/avgInc)*100).toFixed(0);
+      alerts.push({type:"info",icon:"📥",msg:`Suas entradas estão ${pct}% abaixo da média este mês`});
+    }
+  }
+
+  // Alert 4: Reserva baixa
+  const emergencyTotal=(settings.emergencyBase||0)+(settings.emergencyDelta||0);
+  if(settings.emergencyGoal>0&&emergencyTotal<settings.emergencyGoal*0.2){
+    const pct=((emergencyTotal/settings.emergencyGoal)*100).toFixed(0);
+    alerts.push({type:"warn",icon:"🛡️",msg:`Reserva está em ${pct}% da meta. Priorize aportes antes de novos gastos parceláveis.`});
+  }
+
+  // Alert 5: Parcelas comprometem muito da renda
+  const monthKey2=`${vy}-${vm}`;
+  const activeInst=debts.filter(d=>!d.closed).reduce((s,d)=>{
+    const idx=vy*12+vm-(d.startYear*12+d.startMonth);
+    return (idx>=0&&idx<d.installments)?s+d.monthlyValue:s;
+  },0);
+  if(incMonths>=1){
+    const avgInc=incMonths>0?totalInc/incMonths:currentIncome;
+    if(activeInst>0&&avgInc>0&&activeInst>avgInc*0.3){
+      const pct=((activeInst/avgInc)*100).toFixed(0);
+      alerts.push({type:"warn",icon:"🔗",msg:`Suas parcelas comprometem ${pct}% da sua renda média. Evite assumir novas dívidas.`});
+    }
+  }
+
+  return alerts.slice(0,4); // máx 4 alertas
+}
+
+
 function AppInner({session}){
   const [page,setPage]=useState("dashboard");
   const [vm,setVm]=useState(today.getMonth());
@@ -1245,6 +1345,8 @@ function AppInner({session}){
   },0);
   const totalOut=totalExpense+totalFixedPaid+paidDebtValue+totalInvest;
   const balance=totalIncome-totalOut;
+  const categoryMemory=React.useMemo(()=>buildCategoryMemory(yearCache),[yearCache]);
+  const smartAlerts=React.useMemo(()=>generateAlerts(yearCache,vm,vy,settings,debts,expenseCats,bankCredit),[yearCache,vm,vy,settings,debts,expenseCats,bankCredit]);
 
   const emergencyTotal=(settings.emergencyBase||0)+(settings.emergencyDelta||0);
   const personalTotal=(settings.personalBase||0)+(settings.personalDelta||0);
@@ -1416,6 +1518,34 @@ function AppInner({session}){
   }
 
   function toggleFixed(id){setData(d=>({...d,fixed:(d.fixed||[]).map(f=>f.id===id?{...f,paid:!f.paid}:f)}));}
+  function adjustBalanceToReal(diff){
+    // diff positivo = app tem mais que o real → criar gasto de ajuste (reduzir)
+    // diff negativo = app tem menos que o real → criar entrada de ajuste
+    if(Math.abs(diff)<1) return;
+    if(diff>0){
+      // Saldo do app está MAIOR — criar gasto fantasma
+      const adjustment={
+        id:uid(),
+        category:expenseCats[expenseCats.length-1]?.name||"Outros",
+        description:`Ajuste de saldo (-${fmt(diff)})`,
+        value:Math.abs(diff),
+        date:`${vy}-${String(vm+1).padStart(2,"0")}-${String(new Date().getDate()).padStart(2,"0")}`,
+        bank:"",method:"Ajuste",essential:false,isAdjustment:true,
+      };
+      setData(d=>({...d,expenses:[adjustment,...(d.expenses||[])]}));
+    } else {
+      // Saldo do app está MENOR — criar entrada de ajuste
+      const adjustment={
+        id:uid(),
+        name:`Ajuste de saldo (+${fmt(Math.abs(diff))})`,
+        value:Math.abs(diff),
+        date:`${vy}-${String(vm+1).padStart(2,"0")}-${String(new Date().getDate()).padStart(2,"0")}`,
+        isAdjustment:true,
+      };
+      setData(d=>({...d,incomes:[adjustment,...(d.incomes||[])]}));
+    }
+  }
+
   async function recalculateAllBalances(){
     let previousBalance=0;
     for(let m=0;m<12;m++){
@@ -1797,6 +1927,21 @@ function AppInner({session}){
               <button className="hero-btn fixed" onClick={()=>setModal({type:"fixed"})}>+ Fixa</button>
             </div>
           </div>
+
+          {smartAlerts.length>0&&(
+            <div style={{display:"flex",flexDirection:"column",gap:6}}>
+              {smartAlerts.map((a,i)=>(
+                <div key={i} style={{
+                  background:a.type==="warn"?"rgba(245,158,11,.08)":"rgba(59,130,246,.08)",
+                  border:`1px solid ${a.type==="warn"?"rgba(245,158,11,.3)":"rgba(59,130,246,.3)"}`,
+                  borderRadius:10,padding:"9px 12px",display:"flex",gap:9,alignItems:"flex-start"
+                }}>
+                  <span style={{fontSize:15,flexShrink:0}}>{a.icon}</span>
+                  <div style={{fontSize:11,color:"var(--text)",lineHeight:1.5,fontWeight:500}}>{a.msg}</div>
+                </div>
+              ))}
+            </div>
+          )}
 
           <div className="metrics4">
             <div className="mc4 green">
@@ -2187,7 +2332,7 @@ function AppInner({session}){
           </div>
         )}
 
-        {!loading&&page==="settings"&&<SettingsPage settings={settings} setSettings={setSettings} data={data} setData={setData} userEmail={session?.user?.email} expenseCats={expenseCats} onRecalculate={recalculateAllBalances}/>}
+        {!loading&&page==="settings"&&<SettingsPage settings={settings} setSettings={setSettings} data={data} setData={setData} userEmail={session?.user?.email} expenseCats={expenseCats} onRecalculate={recalculateAllBalances} banks={banks} balance={balance} onAdjustBalance={adjustBalanceToReal}/>}
 
 
           </div>
@@ -2205,7 +2350,7 @@ function AppInner({session}){
           {modal.type==="bulk_fixed"&&<BulkPanel type="fixed" banks={banks} expenseCats={expenseCats} vy={vy} vm={vm} onClose={closeModal} onConfirm={i=>{saveBulk("fixed",i);closeModal();}}/>}
           {modal.type==="bulk_investment"&&<BulkPanel type="investment" banks={banks} expenseCats={expenseCats} vy={vy} vm={vm} onClose={closeModal} onConfirm={i=>{saveBulk("investments",i);closeModal();}}/>}
           {["income","expense","fixed","investment"].includes(modal.type)&&(
-            <EntryModal type={modal.type} entry={modal.entry} banks={banks} expenseCats={expenseCats} onClose={closeModal} onSave={saveEntry} vm={vm} vy={vy}/>
+            <EntryModal type={modal.type} entry={modal.entry} banks={banks} expenseCats={expenseCats} onClose={closeModal} onSave={saveEntry} vm={vm} vy={vy} categoryMemory={categoryMemory}/>
           )}
         </Modal>
       )}
@@ -2654,7 +2799,91 @@ function PlanningPage({yearCache,vm,vy,settings,debts,expenseCats}){
 }
 
 
-function SettingsPage({settings,setSettings,data,setData,userEmail,expenseCats,onRecalculate}){
+// ─── BALANCE RECONCILIATION ──────────────────────────────────────────────────
+function BalanceReconciliation({banks,balance,settings,setSettings,onAdjust}){
+  const [realBalances,setRealBalances]=useState(()=>{
+    const stored=settings.bankRealBalances||{};
+    const obj={};
+    banks.forEach(b=>{obj[b.name]=stored[b.name]||"";});
+    return obj;
+  });
+  const [showResult,setShowResult]=useState(false);
+
+  const realTotal=banks.reduce((s,b)=>{
+    const v=parseFloat(String(realBalances[b.name]||"0").replace(",","."))||0;
+    return s+v;
+  },0);
+  const diff=balance-realTotal;
+
+  function check(){
+    setSettings(s=>({...s,bankRealBalances:realBalances}));
+    setShowResult(true);
+  }
+
+  function adjustToReal(){
+    onAdjust(diff);
+    setShowResult(false);
+  }
+
+  return(
+    <div className="card" style={{background:"rgba(34,197,94,.05)",border:"1.5px solid rgba(34,197,94,.2)",marginBottom:12}}>
+      <div style={{fontSize:13,fontWeight:700,color:"var(--green)",marginBottom:6}}>🔍 Conferência de saldos</div>
+      <div style={{fontSize:11,color:"var(--text2)",lineHeight:1.6,marginBottom:12}}>
+        Informe o saldo REAL de cada banco hoje. O app compara com o saldo calculado e mostra a diferença.
+      </div>
+      {banks.map(b=>(
+        <div key={b.id} className="fg" style={{display:"grid",gridTemplateColumns:"1fr 1.5fr",gap:8,alignItems:"center"}}>
+          <label style={{fontSize:12,fontWeight:700,color:"var(--text)",display:"flex",alignItems:"center",gap:6}}>
+            <span style={{width:9,height:9,borderRadius:"50%",background:b.color,display:"inline-block"}}/>
+            {b.name}
+          </label>
+          <input className="fi" type="text" inputMode="decimal" pattern="[0-9.,]*"
+            placeholder="Ex: 1.234,56"
+            value={realBalances[b.name]||""}
+            onChange={e=>setRealBalances(rb=>({...rb,[b.name]:e.target.value}))}/>
+        </div>
+      ))}
+      <button onClick={check}
+        style={{width:"100%",background:"var(--green)",border:"none",color:"#fff",fontFamily:"'Plus Jakarta Sans',sans-serif",fontSize:12,fontWeight:700,borderRadius:10,padding:"10px",cursor:"pointer",marginTop:4}}>
+        Conferir saldos
+      </button>
+
+      {showResult&&(
+        <div style={{marginTop:12,padding:"12px 14px",borderRadius:10,background:"var(--card2)",border:"1.5px solid var(--border2)"}}>
+          <div style={{display:"flex",justifyContent:"space-between",fontSize:11,marginBottom:4}}>
+            <span style={{color:"var(--muted)"}}>Saldo calculado pelo app</span>
+            <span style={{fontWeight:700,color:"var(--accent)"}}>{fmt(balance)}</span>
+          </div>
+          <div style={{display:"flex",justifyContent:"space-between",fontSize:11,marginBottom:8}}>
+            <span style={{color:"var(--muted)"}}>Saldo real (soma dos bancos)</span>
+            <span style={{fontWeight:700,color:"var(--green)"}}>{fmt(realTotal)}</span>
+          </div>
+          <div style={{height:1,background:"var(--border)",margin:"6px 0"}}/>
+          <div style={{display:"flex",justifyContent:"space-between",fontSize:13,fontWeight:800,marginBottom:8}}>
+            <span style={{color:"var(--text)"}}>Diferença</span>
+            <span style={{color:Math.abs(diff)<1?"var(--green)":Math.abs(diff)<50?"var(--gold)":"var(--red)"}}>
+              {diff>=0?"+":""}{fmt(diff)}
+            </span>
+          </div>
+          {Math.abs(diff)<1&&<div style={{fontSize:11,color:"var(--green)",fontWeight:600,marginTop:6}}>✅ Os saldos batem!</div>}
+          {Math.abs(diff)>=1&&Math.abs(diff)<50&&<div style={{fontSize:11,color:"var(--gold)",marginTop:6,lineHeight:1.5}}>⚠️ Diferença pequena — pode ser arredondamento de centavos ou um lançamento esquecido.</div>}
+          {Math.abs(diff)>=50&&(<>
+            <div style={{fontSize:11,color:"var(--text2)",marginTop:6,marginBottom:10,lineHeight:1.5}}>
+              Diferença significativa. Pode ser uma transferência entre contas, um aporte ou um gasto não lançado.
+            </div>
+            <button onClick={adjustToReal}
+              style={{width:"100%",background:"var(--accent)",border:"none",color:"#fff",fontFamily:"'Plus Jakarta Sans',sans-serif",fontSize:11,fontWeight:700,borderRadius:9,padding:"9px",cursor:"pointer"}}>
+              🔧 Criar lançamento de ajuste ({fmt(Math.abs(diff))})
+            </button>
+          </>)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+function SettingsPage({settings,setSettings,data,setData,userEmail,expenseCats,onRecalculate,banks,balance,onAdjustBalance}){
   const [recalcMsg,setRecalcMsg]=useState("");
   const [recalcing,setRecalcing]=useState(false);
   const banks=settings.banks||DEFAULT_BANKS;
@@ -2674,6 +2903,8 @@ function SettingsPage({settings,setSettings,data,setData,userEmail,expenseCats,o
       <div className="st">Personalização</div>
       <div className="card"><div className="fg"><label className="fl">Como quer ser chamado</label><input className="fi" value={settings.name} onChange={e=>setSettings(s=>({...s,name:e.target.value}))}/></div></div>
       <div className="divider"/>
+      <BalanceReconciliation banks={banks} balance={balance} settings={settings} setSettings={setSettings} onAdjust={onAdjustBalance}/>
+
       <div className="card" style={{background:"rgba(99,102,241,.06)",border:"1.5px solid rgba(99,102,241,.25)"}}>
         <div style={{fontSize:13,fontWeight:700,color:"var(--accent)",marginBottom:6}}>🔄 Recalcular saldos</div>
         <div style={{fontSize:11,color:"var(--text2)",lineHeight:1.6,marginBottom:10}}>
@@ -2757,6 +2988,42 @@ function SettingsPage({settings,setSettings,data,setData,userEmail,expenseCats,o
 }
 
 // ─── ENTRY MODAL ──────────────────────────────────────────────────────────────
+
+// ─── SMART CATEGORIZATION ────────────────────────────────────────────────────
+function buildCategoryMemory(yearCache){
+  const memory={};
+  for(let m=0;m<12;m++){
+    const data=yearCache[m];
+    if(!data?.expenses) continue;
+    data.expenses.forEach(e=>{
+      if(!e.description||!e.category) return;
+      const key=e.description.toLowerCase().trim().slice(0,30);
+      if(!memory[key]) memory[key]={};
+      memory[key][e.category]=(memory[key][e.category]||0)+1;
+    });
+  }
+  return memory;
+}
+
+function suggestCategory(description,memory,defaultCat){
+  if(!description) return defaultCat;
+  const key=description.toLowerCase().trim().slice(0,30);
+  // Exact match
+  if(memory[key]){
+    const sorted=Object.entries(memory[key]).sort((a,b)=>b[1]-a[1]);
+    return sorted[0][0];
+  }
+  // Partial match (prefixo)
+  for(const memKey in memory){
+    if(memKey.length<4) continue;
+    if(key.includes(memKey)||memKey.includes(key)){
+      const sorted=Object.entries(memory[memKey]).sort((a,b)=>b[1]-a[1]);
+      return sorted[0][0];
+    }
+  }
+  return defaultCat;
+}
+
 function EntryModal({type,entry,banks,expenseCats,onClose,onSave,vm,vy}){
   const isEdit=!!entry;
   const dd=`${vy}-${String(vm+1).padStart(2,"0")}-${String(today.getDate()).padStart(2,"0")}`;
@@ -2795,7 +3062,14 @@ function EntryModal({type,entry,banks,expenseCats,onClose,onSave,vm,vy}){
             <button type="button" key={c.id||c.name} className={`catopt${form.category===c.name?" selected":""}`} onClick={()=>upd("category",c.name)}>{c.icon} {c.name}</button>
           ))}</div>
         </div>
-        <div className="fg"><label className="fl">Descrição</label><input className="fi" placeholder="Ex: Mercado, Uber, Farmácia…" value={form.description} onChange={e=>upd("description",e.target.value)}/></div>
+        <div className="fg"><label className="fl">Descrição</label><input className="fi" placeholder="Ex: Mercado, Uber, Farmácia…" value={form.description} onChange={e=>{
+          const v=e.target.value;
+          upd("description",v);
+          if(v.length>=3&&categoryMemory&&Object.keys(categoryMemory).length>0){
+            const suggested=suggestCategory(v,categoryMemory,form.category);
+            if(suggested&&suggested!==form.category) upd("category",suggested);
+          }
+        }}/></div>
         <div className="frow">
           <div className="fg"><label className="fl">Valor (R$)</label><input className="fi" type="text" inputMode="decimal" pattern="[0-9.,]*" placeholder="0,00" value={form.value} onChange={e=>upd("value",e.target.value)}/></div>
           <div className="fg"><label className="fl">Data</label><input className="fi" type="date" value={form.date} onChange={e=>upd("date",e.target.value)}/></div>
