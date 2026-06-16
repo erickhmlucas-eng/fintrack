@@ -1352,8 +1352,7 @@ function AppInner({session}){
   },0);
   const totalOut=totalExpense+totalFixedPaid+paidDebtValue+totalInvest;
   const balance=totalIncome-totalOut;
-  const categoryMemory=React.useMemo(()=>buildCategoryMemory(yearCache),[yearCache]);
-  const smartAlerts=React.useMemo(()=>generateAlerts(yearCache,vm,vy,settings,debts,expenseCats,bankCredit),[yearCache,vm,vy,settings,debts,expenseCats,bankCredit]);
+  
 
   const emergencyTotal=(settings.emergencyBase||0)+(settings.emergencyDelta||0);
   const personalTotal=(settings.personalBase||0)+(settings.personalDelta||0);
@@ -1401,6 +1400,9 @@ function AppInner({session}){
       :(creditData.purchases||[]).filter(p=>p.bank===b.name).reduce((s,p)=>s+p.monthlyValue,0);
     return{...b,spent,nextInvoice:ni,isClosed};
   });
+
+  const categoryMemory=React.useMemo(()=>buildCategoryMemory(yearCache),[yearCache]);
+  const smartAlerts=React.useMemo(()=>generateAlerts(yearCache,vm,vy,settings,debts,expenseCats,bankCredit),[yearCache,vm,vy,settings,debts,expenseCats,bankCredit]);
 
   const catData=expenseCats.map(c=>({
     ...c,
