@@ -3032,7 +3032,7 @@ function suggestCategory(description,memory,defaultCat){
   return defaultCat;
 }
 
-function EntryModal({type,entry,banks,expenseCats,onClose,onSave,vm,vy}){
+function EntryModal({type,entry,banks,expenseCats,onClose,onSave,vm,vy,categoryMemory={}}){
   const isEdit=!!entry;
   const dd=`${vy}-${String(vm+1).padStart(2,"0")}-${String(today.getDate()).padStart(2,"0")}`;
   const [form,setForm]=useState(()=>{
