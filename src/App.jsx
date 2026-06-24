@@ -48,10 +48,10 @@ const MONTHS_FULL = ["Janeiro","Fevereiro","Março","Abril","Maio","Junho","Julh
 const MONTHS = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"];
 
 const DEFAULT_BANKS = [
-  {id:"c6",name:"C6",color:"#2d2d2d",limit:0},
-  {id:"porto",name:"Porto",color:"#1a4fcc",limit:0},
-  {id:"santander",name:"Santander",color:"#e8001c",limit:0},
-  {id:"nubank",name:"Nubank",color:"#8a05be",limit:0},
+  {id:"c6",name:"C6",color:"#2d2d2d",limit:0,currentBalance:0,adjustDate:null},
+  {id:"porto",name:"Porto",color:"#1a4fcc",limit:0,currentBalance:0,adjustDate:null},
+  {id:"santander",name:"Santander",color:"#e8001c",limit:0,currentBalance:0,adjustDate:null},
+  {id:"nubank",name:"Nubank",color:"#8a05be",limit:0,currentBalance:0,adjustDate:null},
 ];
 
 const DEFAULT_EXPENSE_CATS = [
@@ -95,6 +95,7 @@ const DEFAULT_SETTINGS = {
 
 const NAV = [
   {id:"dashboard",icon:"📊",label:"Início"},
+  {id:"wallet",   icon:"💼",label:"Carteira"},
   {id:"incomes",  icon:"📥",label:"Entradas"},
   {id:"expenses", icon:"📤",label:"Gastos"},
   {id:"fixed",    icon:"📋",label:"Fixas"},
@@ -1198,6 +1199,60 @@ function generateAlerts(yearCache,vm,vy,settings,debts,expenseCats,bankCredit){
 }
 
 
+// ─── SALDO POR BANCO (FUNDAÇÃO ENTREGA 1) ──────────────────────────────────
+// Calcula o saldo atual de um banco a partir do "currentBalance" definido pelo usuário
+// + todos os lançamentos desde a adjustDate (ou desde o início se não houver)
+function calcBankBalance(bankName, yearCache, settings){
+  const banks = settings.banks || DEFAULT_BANKS;
+  const bank = banks.find(b => b.name === bankName);
+  if (!bank) return 0;
+  
+  const base = bank.currentBalance || 0;
+  const adjustDate = bank.adjustDate; // formato YYYY-MM-DD
+  
+  let delta = 0;
+  
+  // Itera por todos os meses do cache
+  for (let m = 0; m < 12; m++) {
+    const data = yearCache[m];
+    if (!data) continue;
+    
+    // Entradas deste banco
+    (data.incomes || []).forEach(e => {
+      if (e.bank !== bankName) return;
+      if (adjustDate && e.date && e.date <= adjustDate) return; // ignora pré-ajuste
+      delta += e.value || 0;
+    });
+    
+    // Gastos deste banco (débito/PIX — NÃO inclui crédito, isso vai na Entrega 2)
+    (data.expenses || []).forEach(e => {
+      if (e.bank !== bankName) return;
+      if (adjustDate && e.date && e.date <= adjustDate) return;
+      delta -= e.value || 0;
+    });
+    
+    // Fixas pagas deste banco
+    (data.fixed || []).forEach(f => {
+      if (!f.paid || f.bank !== bankName) return;
+      // Fixas pagas não têm data exata, assume meio do mês
+      const fDate = `${settings._currentYear||new Date().getFullYear()}-${String(m+1).padStart(2,"0")}-15`;
+      if (adjustDate && fDate <= adjustDate) return;
+      delta -= f.value || 0;
+    });
+    
+    // Investimentos / retiradas deste banco
+    (data.investments || []).forEach(i => {
+      if (i.bank !== bankName) return;
+      if (adjustDate && i.date && i.date <= adjustDate) return;
+      const isWithdraw = (i.type || "").toLowerCase().includes("retirada");
+      delta += isWithdraw ? (i.value || 0) : -(i.value || 0);
+    });
+  }
+  
+  return base + delta;
+}
+
+
 function AppInner({session}){
   const [page,setPage]=useState("dashboard");
   const [vm,setVm]=useState(today.getMonth());
@@ -1352,6 +1407,7 @@ function AppInner({session}){
   },0);
   const totalOut=totalExpense+totalFixedPaid+paidDebtValue+totalInvest;
   const balance=totalIncome-totalOut;
+  const totalContasReais=(banks||[]).reduce((s,b)=>s+calcBankBalance(b.name,yearCache,settings),0);
   
 
   const emergencyTotal=(settings.emergencyBase||0)+(settings.emergencyDelta||0);
@@ -1965,11 +2021,11 @@ function AppInner({session}){
               <div className="mc4-value" style={{color:"var(--red)"}}>{fmt(totalExpense+totalFixedPaid)}</div>
               <div className="mc4-sub">{fmt(totalInvest)} investido</div>
             </div>
-            <div className="mc4 blue">
-              <div className="mc4-icon">💳</div>
-              <div className="mc4-label">Saldo em contas</div>
-              <div className="mc4-value" style={{color:balance>=0?"var(--green)":"var(--red)"}}>{fmt(balance)}</div>
-              <div className="mc4-sub">{totalIncome>0?((balance/totalIncome)*100).toFixed(1):0}% da renda</div>
+            <div className="mc4 blue" onClick={()=>setPage("wallet")} style={{cursor:"pointer"}}>
+              <div className="mc4-icon">💼</div>
+              <div className="mc4-label">Total nas contas</div>
+              <div className="mc4-value" style={{color:totalContasReais>=0?"var(--green)":"var(--red)"}}>{fmt(totalContasReais)}</div>
+              <div className="mc4-sub">Saldo real dos bancos · toque para ver</div>
             </div>
             <div className="mc4 accent">
               <div className="mc4-icon">🛡️</div>
@@ -2152,6 +2208,7 @@ function AppInner({session}){
           </>
         )}
 
+        {!loading&&page==="wallet"&&<WalletPage banks={banks} setSettings={setSettings} yearCache={yearCache} settings={settings} vm={vm} vy={vy}/>}
         {!loading&&page==="incomes"&&(
           <div className="pg">
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
@@ -2892,6 +2949,93 @@ function BalanceReconciliation({banks,balance,settings,setSettings,onAdjust}){
 }
 
 
+// ─── WALLET PAGE (saldo por banco — ENTREGA 1) ──────────────────────────────
+function WalletPage({banks,setSettings,yearCache,settings,vm,vy}){
+  const [editingBank,setEditingBank]=useState(null);
+  const [newBalance,setNewBalance]=useState("");
+  
+  function saveBalance(){
+    const val=parseFloat(String(newBalance).replace(",","."))||0;
+    const today=new Date();
+    const dateStr=`${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,"0")}-${String(today.getDate()).padStart(2,"0")}`;
+    setSettings(s=>({
+      ...s,
+      banks:(s.banks||DEFAULT_BANKS).map(b=>
+        b.name===editingBank
+          ?{...b,currentBalance:val,adjustDate:dateStr}
+          :b
+      )
+    }));
+    setEditingBank(null);
+    setNewBalance("");
+  }
+  
+  const bankBalances=banks.map(b=>({
+    ...b,
+    realBalance:calcBankBalance(b.name,yearCache,settings),
+    hasBaseline:b.currentBalance!==undefined&&b.adjustDate
+  }));
+  
+  const totalContas=bankBalances.reduce((s,b)=>s+b.realBalance,0);
+  
+  return (
+    <div className="pg">
+      <div style={{padding:"14px 16px",background:"linear-gradient(135deg,rgba(99,102,241,.15),rgba(139,92,246,.08))",borderRadius:14,marginBottom:12,border:"1px solid rgba(99,102,241,.2)"}}>
+        <div style={{fontSize:11,color:"var(--text2)",textTransform:"uppercase",letterSpacing:".06em",fontWeight:700,marginBottom:6}}>💼 Total nas contas</div>
+        <div style={{fontSize:26,fontWeight:800,color:"var(--green)"}}>{fmt(totalContas)}</div>
+        <div style={{fontSize:10,color:"var(--muted)",marginTop:4}}>Soma do saldo real de cada banco</div>
+      </div>
+      
+      <div className="st">Saldo por banco</div>
+      
+      {bankBalances.map(b=>{
+        const isEditing=editingBank===b.name;
+        const dateLabel=b.adjustDate?new Date(b.adjustDate+"T12:00").toLocaleDateString("pt-BR"):"nunca definido";
+        return (
+          <div key={b.id} style={{background:"var(--card)",border:"1.5px solid var(--border)",borderRadius:12,padding:"13px 14px",marginBottom:8}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+              <div style={{display:"flex",alignItems:"center",gap:8,fontSize:14,fontWeight:700,color:"var(--text)"}}>
+                <span style={{width:10,height:10,borderRadius:"50%",background:b.color,display:"inline-block"}}/>
+                {b.name}
+              </div>
+              <div style={{fontSize:17,fontWeight:800,color:b.realBalance>=0?"var(--green)":"var(--wine)"}}>
+                {fmt(b.realBalance)}
+              </div>
+            </div>
+            
+            <div style={{fontSize:10,color:"var(--muted)",marginBottom:6,lineHeight:1.5}}>
+              {b.hasBaseline
+                ?<>Saldo definido em {dateLabel}: {fmt(b.currentBalance||0)}<br/>+ movimentações desde então</>
+                :<>⚠ Saldo ainda não foi definido. Defina seu saldo atual para começar.</>}
+            </div>
+            
+            {isEditing
+              ?<div style={{display:"flex",gap:6,alignItems:"center"}}>
+                <input className="fi" type="text" inputMode="decimal" pattern="[0-9.,]*"
+                  placeholder="Ex: 1.234,56"
+                  value={newBalance}
+                  onChange={e=>setNewBalance(e.target.value)}
+                  autoFocus
+                  style={{flex:1}}/>
+                <button onClick={saveBalance} style={{background:"var(--green)",border:"none",color:"#fff",fontFamily:"'Plus Jakarta Sans',sans-serif",fontSize:11,fontWeight:700,borderRadius:8,padding:"10px 14px",cursor:"pointer",whiteSpace:"nowrap"}}>Salvar</button>
+                <button onClick={()=>{setEditingBank(null);setNewBalance("");}} style={{background:"transparent",border:"1px solid var(--border)",color:"var(--muted)",fontFamily:"'Plus Jakarta Sans',sans-serif",fontSize:11,fontWeight:600,borderRadius:8,padding:"10px 12px",cursor:"pointer"}}>✕</button>
+              </div>
+              :<button onClick={()=>{setEditingBank(b.name);setNewBalance(String(b.currentBalance||""));}}
+                style={{width:"100%",background:b.hasBaseline?"rgba(99,102,241,.1)":"rgba(34,197,94,.15)",border:`1px solid ${b.hasBaseline?"rgba(99,102,241,.3)":"rgba(34,197,94,.3)"}`,color:b.hasBaseline?"var(--accent)":"var(--green)",fontFamily:"'Plus Jakarta Sans',sans-serif",fontSize:11,fontWeight:700,borderRadius:9,padding:"8px",cursor:"pointer"}}>
+                {b.hasBaseline?"🔧 Ajustar saldo (digitar o real de hoje)":"➕ Definir saldo atual"}
+              </button>}
+          </div>
+        );
+      })}
+      
+      <div style={{background:"rgba(99,102,241,.05)",border:"1px solid rgba(99,102,241,.15)",borderRadius:10,padding:"10px 12px",marginTop:8,fontSize:11,color:"var(--text2)",lineHeight:1.6}}>
+        <strong style={{color:"var(--accent)"}}>Como funciona:</strong> ao definir o saldo atual, o app fixa esse valor como ponto zero. A partir daí, cada entrada/gasto/fixa que você lançar com banco vai atualizar o saldo automaticamente. Se notar diferença com o banco real, é só clicar em "Ajustar saldo" e digitar o valor novamente.
+      </div>
+    </div>
+  );
+}
+
+
 function SettingsPage({settings,setSettings,data,setData,userEmail,expenseCats,onRecalculate,banks,balance,onAdjustBalance}){
   const [recalcMsg,setRecalcMsg]=useState("");
   const [recalcing,setRecalcing]=useState(false);
@@ -3037,10 +3181,10 @@ function EntryModal({type,entry,banks,expenseCats,onClose,onSave,vm,vy,categoryM
   const dd=`${vy}-${String(vm+1).padStart(2,"0")}-${String(today.getDate()).padStart(2,"0")}`;
   const [form,setForm]=useState(()=>{
     if(isEdit) return{...entry, value: String(entry.value ?? '')};
-    if(type==="income")     return{id:uid(),name:"",value:"",date:dd};
+    if(type==="income")     return{id:uid(),name:"",value:"",date:dd,bank:banks[0]?.name||""};
     if(type==="expense")    return{id:uid(),category:expenseCats[0]?.name||"Outros",date:dd,description:"",value:"",bank:banks[0]?.name||"",method:"PIX",essential:false};
     if(type==="fixed")      return{id:uid(),name:"",value:"",paid:false,recurring:true};
-    if(type==="investment") return{id:uid(),name:"",type:"Reserva de Emergência",value:"",date:dd};
+    if(type==="investment") return{id:uid(),name:"",type:"Reserva de Emergência",value:"",date:dd,bank:banks[0]?.name||""};
     return{};
   });
   const upd=(k,v)=>setForm(f=>({...f,[k]:v}));
@@ -3059,6 +3203,12 @@ function EntryModal({type,entry,banks,expenseCats,onClose,onSave,vm,vy,categoryM
         <div className="frow">
           <div className="fg"><label className="fl">Valor (R$)</label><input className="fi" type="text" inputMode="decimal" pattern="[0-9.,]*" placeholder="0,00" value={form.value} onChange={e=>upd("value",e.target.value)}/></div>
           <div className="fg"><label className="fl">Data</label><input className="fi" type="date" value={form.date} onChange={e=>upd("date",e.target.value)}/></div>
+        </div>
+        <div className="fg"><label className="fl">Banco onde caiu</label>
+          <select className="fi" value={form.bank||""} onChange={e=>upd("bank",e.target.value)}>
+            <option value="">— Selecione —</option>
+            {banks.map(b=><option key={b.id} value={b.name}>{b.name}</option>)}
+          </select>
         </div>
       </>}
       {type==="expense"&&<>
@@ -3091,6 +3241,12 @@ function EntryModal({type,entry,banks,expenseCats,onClose,onSave,vm,vy,categoryM
         <div className="fg"><label className="fl">Nome</label><input className="fi" placeholder="Ex: Parcela carro, Seguro…" value={form.name} onChange={e=>upd("name",e.target.value)}/></div>
         <div className="fg"><label className="fl">Valor (R$)</label><input className="fi" type="text" inputMode="decimal" pattern="[0-9.,]*" placeholder="0,00" value={form.value} onChange={e=>upd("value",e.target.value)}/></div>
         <div className="fg"><label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:13}}><input type="checkbox" checked={!!form.paid} onChange={e=>upd("paid",e.target.checked)} style={{width:16,height:16,accentColor:"var(--green)"}}/>Já paga</label></div>
+        {form.paid&&<div className="fg"><label className="fl">Pago pelo banco</label>
+          <select className="fi" value={form.bank||""} onChange={e=>upd("bank",e.target.value)}>
+            <option value="">— Selecione —</option>
+            {banks.map(b=><option key={b.id} value={b.name}>{b.name}</option>)}
+          </select>
+        </div>}
         <div className="fg" style={{background:"rgba(99,102,241,.06)",border:"1px solid rgba(99,102,241,.2)",borderRadius:10,padding:"10px 12px"}}>
           <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:12}}>
             <input type="checkbox" checked={form.recurring!==false} onChange={e=>upd("recurring",e.target.checked)} style={{width:16,height:16,accentColor:"var(--accent)"}}/>
@@ -3105,6 +3261,12 @@ function EntryModal({type,entry,banks,expenseCats,onClose,onSave,vm,vy,categoryM
         <div className="frow">
           <div className="fg"><label className="fl">Valor (R$)</label><input className="fi" type="text" inputMode="decimal" pattern="[0-9.,]*" placeholder="0,00" value={form.value} onChange={e=>upd("value",e.target.value)}/></div>
           <div className="fg"><label className="fl">Data</label><input className="fi" type="date" value={form.date} onChange={e=>upd("date",e.target.value)}/></div>
+        </div>
+        <div className="fg"><label className="fl">Banco de origem / destino</label>
+          <select className="fi" value={form.bank||""} onChange={e=>upd("bank",e.target.value)}>
+            <option value="">— Selecione —</option>
+            {banks.map(b=><option key={b.id} value={b.name}>{b.name}</option>)}
+          </select>
         </div>
       </>}
       <button className="savebtn" onClick={save}>{isEdit?"Salvar alterações":"Adicionar"}</button>
