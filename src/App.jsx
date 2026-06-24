@@ -96,6 +96,7 @@ const DEFAULT_SETTINGS = {
 const NAV = [
   {id:"dashboard",icon:"📊",label:"Início"},
   {id:"wallet",   icon:"💼",label:"Carteira"},
+  {id:"bills",    icon:"📅",label:"A pagar"},
   {id:"incomes",  icon:"📥",label:"Entradas"},
   {id:"expenses", icon:"📤",label:"Gastos"},
   {id:"fixed",    icon:"📋",label:"Fixas"},
@@ -235,7 +236,7 @@ function AuthScreen(){
 }
 
 // ─── CARTÕES PAGE ─────────────────────────────────────────────────────────────
-function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData,setMonthData,bankCredit}){
+function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData,setMonthData,bankCredit,setSettings,settings}){
   const [selectedBank,setSelectedBank]=useState(banks[0]?.name||"");
   const [showAddModal,setShowAddModal]=useState(false);
   const [showImportModal,setShowImportModal]=useState(false);
@@ -287,22 +288,39 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
   function closeInvoice(){
     if(!totalUsed||invoiceAlreadyClosed) return;
     setClosingInvoice(true);
-    const fixedEntry={
+    // NOVO SISTEMA (Entrega 2): Fatura vira "billToPay" — não mexe no saldo até pagar
+    const billToPay={
       id:invoiceId,
       name:`Fatura ${selectedBank} — ${MONTHS_FULL[vm]}/${vy}`,
+      value:parseFloat(totalUsed.toFixed(2)),
+      bankCard:selectedBank, // cartão de origem
+      paid:false,
+      paidBank:null, // banco que pagou (escolhido na hora de marcar paga)
+      paidDate:null,
+      dueMonth:nm,
+      dueYear:ny,
+      createdAt:new Date().toISOString(),
+      isCardInvoice:true,
+    };
+    // Marca também como fixed (legado) só para o app saber que essa fatura "fechou"
+    // mas sem afetar o saldo já que o fixed só conta quando paid=true
+    const fixedMarker={
+      id:invoiceId,
+      name:billToPay.name,
       value:parseFloat(totalUsed.toFixed(2)),
       paid:false,
       isAutoInvoice:true,
       autoInvoiceKey:invoiceId,
+      isLegacyMarker:true, // novo: sinaliza que só é marker
     };
-    dbGet(monthKey(ny,nm)).then(existing=>{
-      const ex=existing||{incomes:[],expenses:[],fixed:[],investments:[],notes:""};
-      const alreadyThere=(ex.fixed||[]).some(f=>f.id===invoiceId);
-      if(!alreadyThere){
-        dbSet(monthKey(ny,nm),{...ex,fixed:[fixedEntry,...(ex.fixed||[])]});
-      }
-    }).finally(()=>setClosingInvoice(false));
-    setMonthData(d=>({...d,fixed:[...(d.fixed||[]),{...fixedEntry,closedInMonth:true}]}));
+    setMonthData(d=>({...d,fixed:[...(d.fixed||[]),{...fixedMarker,closedInMonth:true}]}));
+    // Salva a billToPay nas settings
+    setSettings(s=>{
+      const bills=s.billsToPay||[];
+      if(bills.some(b=>b.id===invoiceId)){setClosingInvoice(false);return s;}
+      return{...s,billsToPay:[...bills,billToPay]};
+    });
+    setClosingInvoice(false);
   }
 
   function addPurchase(purchase){
@@ -1212,6 +1230,14 @@ function calcBankBalance(bankName, yearCache, settings){
   
   let delta = 0;
   
+  // Faturas de cartão pagas POR este banco (Entrega 2)
+  const bills = settings.billsToPay || [];
+  bills.forEach(b => {
+    if (!b.paid || b.paidBank !== bankName) return;
+    if (adjustDate && b.paidDate && b.paidDate <= adjustDate) return;
+    delta -= b.value || 0;
+  });
+  
   // Itera por todos os meses do cache
   for (let m = 0; m < 12; m++) {
     const data = yearCache[m];
@@ -1408,6 +1434,7 @@ function AppInner({session}){
   const totalOut=totalExpense+totalFixedPaid+paidDebtValue+totalInvest;
   const balance=totalIncome-totalOut;
   const totalContasReais=(banks||[]).reduce((s,b)=>s+calcBankBalance(b.name,yearCache,settings),0);
+  const totalCartoesComprometido=(settings.billsToPay||[]).filter(b=>!b.paid).reduce((s,b)=>s+(b.value||0),0);
   
 
   const emergencyTotal=(settings.emergencyBase||0)+(settings.emergencyDelta||0);
@@ -2025,7 +2052,13 @@ function AppInner({session}){
               <div className="mc4-icon">💼</div>
               <div className="mc4-label">Total nas contas</div>
               <div className="mc4-value" style={{color:totalContasReais>=0?"var(--green)":"var(--red)"}}>{fmt(totalContasReais)}</div>
-              <div className="mc4-sub">Saldo real dos bancos · toque para ver</div>
+              <div className="mc4-sub">Saldo real · toque para ver</div>
+            </div>
+            <div className="mc4" style={{cursor:"pointer",background:totalCartoesComprometido>0?"rgba(239,68,68,.08)":"var(--card)",border:`1px solid ${totalCartoesComprometido>0?"rgba(239,68,68,.25)":"var(--border)"}`}} onClick={()=>setPage("bills")}>
+              <div className="mc4-icon">💳</div>
+              <div className="mc4-label">A pagar (cartões)</div>
+              <div className="mc4-value" style={{color:totalCartoesComprometido>0?"var(--wine)":"var(--muted)"}}>{fmt(totalCartoesComprometido)}</div>
+              <div className="mc4-sub">{(settings.billsToPay||[]).filter(b=>!b.paid).length} fatura(s) em aberto</div>
             </div>
             <div className="mc4 accent">
               <div className="mc4-icon">🛡️</div>
@@ -2208,6 +2241,7 @@ function AppInner({session}){
           </>
         )}
 
+        {!loading&&page==="bills"&&<BillsPage banks={banks} setSettings={setSettings} settings={settings} setData={setData} vm={vm} vy={vy}/>}
         {!loading&&page==="wallet"&&<WalletPage banks={banks} setSettings={setSettings} yearCache={yearCache} settings={settings} vm={vm} vy={vy}/>}
         {!loading&&page==="incomes"&&(
           <div className="pg">
@@ -2315,7 +2349,7 @@ function AppInner({session}){
 
         {!loading&&page==="cards"&&(
           <ErrorBoundary key={`cards-${vm}-${vy}`}>
-          <CartoesPage banks={banks} expenseCats={expenseCats} vm={vm} vy={vy} creditData={creditData} setCreditData={setCreditData} monthData={data} setMonthData={setData} bankCredit={bankCredit}/>
+          <CartoesPage banks={banks} expenseCats={expenseCats} vm={vm} vy={vy} creditData={creditData} setCreditData={setCreditData} monthData={data} setMonthData={setData} bankCredit={bankCredit} setSettings={setSettings} settings={settings}/>
         </ErrorBoundary>
         )}
 
@@ -2950,6 +2984,146 @@ function BalanceReconciliation({banks,balance,settings,setSettings,onAdjust}){
 
 
 // ─── WALLET PAGE (saldo por banco — ENTREGA 1) ──────────────────────────────
+// ─── BILLS PAGE — Faturas a pagar (ENTREGA 2) ──────────────────────────────
+function BillsPage({banks,setSettings,settings,setData,vm,vy}){
+  const bills = (settings.billsToPay||[]).slice().sort((a,b)=>{
+    if(a.paid!==b.paid) return a.paid?1:-1;
+    return new Date(a.createdAt||0)-new Date(b.createdAt||0);
+  });
+  const [paying,setPaying]=useState(null); // billId aguardando seleção de banco
+  const [selBank,setSelBank]=useState("");
+  
+  function markPaid(bill){
+    if(!selBank){alert("Selecione o banco que pagou.");return;}
+    const today=new Date();
+    const dateStr=`${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,"0")}-${String(today.getDate()).padStart(2,"0")}`;
+    setSettings(s=>({
+      ...s,
+      billsToPay:(s.billsToPay||[]).map(b=>
+        b.id===bill.id ? {...b,paid:true,paidBank:selBank,paidDate:dateStr} : b
+      )
+    }));
+    setPaying(null);
+    setSelBank("");
+  }
+  
+  function unmarkPaid(bill){
+    if(!confirm("Desmarcar essa fatura como paga?"))return;
+    setSettings(s=>({
+      ...s,
+      billsToPay:(s.billsToPay||[]).map(b=>
+        b.id===bill.id ? {...b,paid:false,paidBank:null,paidDate:null} : b
+      )
+    }));
+  }
+  
+  function reopenInvoice(bill){
+    if(!confirm("Reabrir essa fatura? Ela volta para a aba Cartões e você poderá adicionar/editar lançamentos."))return;
+    // Remove o billToPay e remove o marker do fixed
+    setSettings(s=>({
+      ...s,
+      billsToPay:(s.billsToPay||[]).filter(b=>b.id!==bill.id)
+    }));
+    // Remove o marker do month do mês de destino
+    const targetKey=monthKey(bill.dueYear,bill.dueMonth);
+    dbGet(targetKey).then(d=>{
+      if(!d)return;
+      const newFixed=(d.fixed||[]).filter(f=>f.id!==bill.id);
+      dbSet(targetKey,{...d,fixed:newFixed});
+      // Se for o mês atual, atualizar setData
+      if(bill.dueYear===vy && bill.dueMonth===vm){
+        setData(dd=>({...dd,fixed:newFixed}));
+      }
+    });
+  }
+  
+  const openBills = bills.filter(b=>!b.paid);
+  const paidBills = bills.filter(b=>b.paid);
+  const totalOpen = openBills.reduce((s,b)=>s+(b.value||0),0);
+  
+  return (
+    <div className="pg">
+      <div className="st">📅 Contas a pagar</div>
+      
+      {totalOpen>0&&(
+        <div style={{padding:"12px 14px",background:"rgba(239,68,68,.06)",borderRadius:12,border:"1px solid rgba(239,68,68,.2)"}}>
+          <div style={{fontSize:11,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".06em",fontWeight:700,marginBottom:4}}>💳 Total comprometido em cartões</div>
+          <div style={{fontSize:24,fontWeight:800,color:"var(--wine)"}}>{fmt(totalOpen)}</div>
+          <div style={{fontSize:10,color:"var(--muted)",marginTop:3}}>{openBills.length} fatura(s) em aberto</div>
+        </div>
+      )}
+      
+      <div className="st" style={{marginTop:8}}>Em aberto</div>
+      {openBills.length===0?(
+        <div className="empty">Nenhuma fatura em aberto 🎉</div>
+      ):openBills.map(bill=>{
+        const bank=banks.find(b=>b.name===bill.bankCard);
+        const isThisPaying=paying===bill.id;
+        return (
+          <div key={bill.id} style={{background:"var(--card)",border:"1.5px solid var(--border)",borderRadius:12,padding:"12px 13px",marginBottom:8}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
+              <div style={{flex:1}}>
+                <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:3}}>
+                  <span style={{width:9,height:9,borderRadius:"50%",background:bank?.color||"#888",display:"inline-block"}}/>
+                  <div style={{fontSize:13,fontWeight:700,color:"var(--text)"}}>{bill.name}</div>
+                </div>
+                <div style={{fontSize:10,color:"var(--muted)"}}>Vence em {MONTHS_FULL[bill.dueMonth]}/{bill.dueYear}</div>
+              </div>
+              <div style={{fontSize:16,fontWeight:800,color:"var(--wine)"}}>{fmt(bill.value)}</div>
+            </div>
+            
+            {isThisPaying?(
+              <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                <select className="fi" value={selBank} onChange={e=>setSelBank(e.target.value)} style={{flex:1}}>
+                  <option value="">— Banco que pagou —</option>
+                  {banks.map(b=><option key={b.id} value={b.name}>{b.name}</option>)}
+                </select>
+                <button onClick={()=>markPaid(bill)} style={{background:"var(--green)",border:"none",color:"#fff",fontFamily:"'Plus Jakarta Sans',sans-serif",fontSize:11,fontWeight:700,borderRadius:8,padding:"10px 14px",cursor:"pointer",whiteSpace:"nowrap"}}>Confirmar</button>
+                <button onClick={()=>{setPaying(null);setSelBank("");}} style={{background:"transparent",border:"1px solid var(--border)",color:"var(--muted)",fontFamily:"'Plus Jakarta Sans',sans-serif",fontSize:11,fontWeight:600,borderRadius:8,padding:"10px 12px",cursor:"pointer"}}>✕</button>
+              </div>
+            ):(
+              <div style={{display:"flex",gap:6}}>
+                <button onClick={()=>{setPaying(bill.id);setSelBank("");}} style={{flex:1,background:"var(--green)",border:"none",color:"#fff",fontFamily:"'Plus Jakarta Sans',sans-serif",fontSize:11,fontWeight:700,borderRadius:9,padding:"9px",cursor:"pointer"}}>✓ Marcar paga</button>
+                <button onClick={()=>reopenInvoice(bill)} style={{background:"transparent",border:"1px solid var(--border)",color:"var(--muted)",fontFamily:"'Plus Jakarta Sans',sans-serif",fontSize:10,fontWeight:600,borderRadius:9,padding:"9px 12px",cursor:"pointer"}}>↺ Reabrir fatura</button>
+              </div>
+            )}
+          </div>
+        );
+      })}
+      
+      {paidBills.length>0&&(<>
+        <div className="st" style={{marginTop:14}}>Pagas ({paidBills.length})</div>
+        {paidBills.slice(-5).reverse().map(bill=>{
+          const bank=banks.find(b=>b.name===bill.bankCard);
+          const paidDate=bill.paidDate?new Date(bill.paidDate+"T12:00").toLocaleDateString("pt-BR"):"—";
+          return (
+            <div key={bill.id} style={{background:"rgba(34,197,94,.05)",border:"1px solid rgba(34,197,94,.15)",borderRadius:10,padding:"10px 12px",marginBottom:6}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div style={{flex:1}}>
+                  <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:2}}>
+                    <span style={{width:7,height:7,borderRadius:"50%",background:bank?.color||"#888",display:"inline-block"}}/>
+                    <div style={{fontSize:12,fontWeight:700,color:"var(--text)"}}>{bill.name}</div>
+                  </div>
+                  <div style={{fontSize:9,color:"var(--green)"}}>✓ Pago em {paidDate} via {bill.paidBank}</div>
+                </div>
+                <div style={{textAlign:"right"}}>
+                  <div style={{fontSize:13,fontWeight:700,color:"var(--green)"}}>{fmt(bill.value)}</div>
+                  <button onClick={()=>unmarkPaid(bill)} style={{background:"transparent",border:"none",color:"var(--muted)",fontFamily:"'Plus Jakarta Sans',sans-serif",fontSize:9,cursor:"pointer",textDecoration:"underline"}}>desmarcar</button>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </>)}
+      
+      <div style={{background:"rgba(99,102,241,.05)",border:"1px solid rgba(99,102,241,.15)",borderRadius:10,padding:"10px 12px",marginTop:12,fontSize:11,color:"var(--text2)",lineHeight:1.6}}>
+        <strong style={{color:"var(--accent)"}}>Como funciona:</strong> ao fechar a fatura de um cartão na aba <strong>Cartões</strong>, ela aparece aqui como "a pagar". Quando você marca como paga, o app reduz o saldo do banco que você selecionar (não interfere antes disso).
+      </div>
+    </div>
+  );
+}
+
+
 function WalletPage({banks,setSettings,yearCache,settings,vm,vy}){
   const [editingBank,setEditingBank]=useState(null);
   const [newBalance,setNewBalance]=useState("");
