@@ -244,6 +244,9 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
   const [closingInvoice,setClosingInvoice]=useState(false);
   const [nextCreditData,setNextCreditData]=useState(null);
   const [viewingHistory,setViewingHistory]=useState(false); // toggle histórico
+  const [sortPurchases,setSortPurchases]=useState("date_desc");
+  const [filterPurchasesText,setFilterPurchasesText]=useState("");
+  const [filterPurchasesCat,setFilterPurchasesCat]=useState("");
   const catMap=Object.fromEntries(expenseCats.map(c=>[c.name,c]));
 
   const nm=vm===11?0:vm+1, ny=vm===11?vy+1:vy;
@@ -321,6 +324,18 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
       return{...s,billsToPay:[...bills,billToPay]};
     });
     setClosingInvoice(false);
+  }
+
+  function reopenInvoice(){
+    if(!invoiceAlreadyClosed) return;
+    if(!confirm(`Reabrir a fatura de ${MONTHS_FULL[vm]}/${vy}? Você poderá adicionar/editar lançamentos novamente.`)) return;
+    // Remove o billToPay
+    setSettings(s=>({...s,billsToPay:(s.billsToPay||[]).filter(b=>b.id!==invoiceId)}));
+    // Remove o marker do fixed
+    setMonthData(d=>({...d,fixed:(d.fixed||[]).filter(f=>f.id!==invoiceId)}));
+    // Reset views
+    setViewingHistory(false);
+    setNextCreditData(null);
   }
 
   function addPurchase(purchase){
@@ -516,9 +531,9 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
             style={{background:"var(--accent)",border:"none",color:"#fff",fontFamily:"'Sora',sans-serif",fontSize:12,fontWeight:700,borderRadius:11,padding:"12px 8px",cursor:"pointer"}}>
             + Lançar compra
           </button>
-          <button onClick={closeInvoice} disabled={!totalUsed||invoiceAlreadyClosed||closingInvoice}
-            style={{background:invoiceAlreadyClosed?"rgba(0,214,143,.1)":"var(--surface)",border:`1px solid ${invoiceAlreadyClosed?"var(--green)":"var(--border)"}`,color:invoiceAlreadyClosed?"var(--green)":"var(--muted)",fontFamily:"'Sora',sans-serif",fontSize:12,fontWeight:700,borderRadius:11,padding:"12px 8px",cursor:"pointer",opacity:(!totalUsed||invoiceAlreadyClosed)?0.5:1}}>
-            {invoiceAlreadyClosed?`✓ Fatura fechada`:`Fechar fatura → ${MONTHS_FULL[nm]}`}
+          <button onClick={()=>invoiceAlreadyClosed?reopenInvoice():closeInvoice()} disabled={(!totalUsed&&!invoiceAlreadyClosed)||closingInvoice}
+            style={{background:invoiceAlreadyClosed?"rgba(245,158,11,.1)":"var(--surface)",border:`1px solid ${invoiceAlreadyClosed?"var(--gold)":"var(--border)"}`,color:invoiceAlreadyClosed?"var(--gold)":"var(--muted)",fontFamily:"'Sora',sans-serif",fontSize:12,fontWeight:700,borderRadius:11,padding:"12px 8px",cursor:"pointer",opacity:(!totalUsed&&!invoiceAlreadyClosed)?0.5:1}}>
+            {invoiceAlreadyClosed?`↺ Reabrir fatura de ${MONTHS_FULL[vm]}`:`Fechar fatura → ${MONTHS_FULL[nm]}`}
           </button>
           <button onClick={()=>setShowImportModal(true)}
             style={{background:"rgba(99,102,241,.1)",border:"1px solid rgba(99,102,241,.3)",color:"var(--accent)",fontFamily:"'Sora',sans-serif",fontSize:12,fontWeight:700,borderRadius:11,padding:"12px 8px",cursor:"pointer"}}>
@@ -552,8 +567,9 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
       {bankPurchases.length>0&&(
         <div>
           <div className="st" style={{marginBottom:8}}>Lançamentos ({bankPurchases.length}){viewingHistory&&` — ${MONTHS_FULL[vm]}`}</div>
+          {bankPurchases.length>0&&<ListControls sortBy={sortPurchases} setSortBy={setSortPurchases} filterText={filterPurchasesText} setFilterText={setFilterPurchasesText} filterCategory={filterPurchasesCat} setFilterCategory={setFilterPurchasesCat} expenseCats={expenseCats} banks={banks} showBank={false}/>}
           <div className="txlist">
-            {bankPurchases.map(p=>{
+            {applyFilters(bankPurchases,{sortBy:sortPurchases,filterText:filterPurchasesText,filterCategory:filterPurchasesCat,nameField:"name",valueField:"monthlyValue"}).map(p=>{
               const cat=catMap[p.category]||{icon:"📌",color:"#888"};
               const d=p.date?p.date.slice(5).split("-").reverse().join("/"):"";
               return (
@@ -1280,6 +1296,13 @@ function calcBankBalance(bankName, yearCache, settings){
 
 
 function AppInner({session}){
+  const [sortIncomes,setSortIncomes]=useState("date_desc");
+  const [filterIncomesText,setFilterIncomesText]=useState("");
+  const [filterIncomesBank,setFilterIncomesBank]=useState("");
+  const [sortExpenses,setSortExpenses]=useState("date_desc");
+  const [filterExpensesText,setFilterExpensesText]=useState("");
+  const [filterExpensesCat,setFilterExpensesCat]=useState("");
+  const [filterExpensesBank,setFilterExpensesBank]=useState("");
   const [page,setPage]=useState("dashboard");
   const [vm,setVm]=useState(today.getMonth());
   const [vy,setVy]=useState(today.getFullYear());
@@ -2254,8 +2277,12 @@ function AppInner({session}){
               <button className="bulkbtn" onClick={()=>openModal("bulk_income")}>📋 Colar em lote</button>
               <button className="bulkbtn" onClick={()=>openModal("import_income")} style={{color:"var(--accent)",borderColor:"rgba(99,102,241,.3)"}}>📂 Importar CSV</button>
             </div>
-            {(data.incomes||[]).length===0?<div className="empty">Nenhuma entrada ainda.<br/>Toque no <strong style={{color:"var(--accent)"}}>+</strong> ou cole em lote.</div>
-              :<div className="txlist">{(data.incomes||[]).map(e=>(
+            {(data.incomes||[]).length>0&&<ListControls sortBy={sortIncomes} setSortBy={setSortIncomes} filterText={filterIncomesText} setFilterText={setFilterIncomesText} filterBank={filterIncomesBank} setFilterBank={setFilterIncomesBank} expenseCats={expenseCats} banks={banks} showCategory={false}/>}
+            {(()=>{
+              const filteredIncomes=applyFilters(data.incomes||[],{sortBy:sortIncomes,filterText:filterIncomesText,filterBank:filterIncomesBank,nameField:"name"});
+              return filteredIncomes.length===0&&(data.incomes||[]).length===0?<div className="empty">Nenhuma entrada ainda.<br/>Toque no <strong style={{color:"var(--accent)"}}>+</strong> ou cole em lote.</div>
+                :filteredIncomes.length===0?<div className="empty">Nenhum resultado para o filtro atual.</div>
+                :<div className="txlist">{filteredIncomes.map(e=>(
                 <div key={e.id} className="txi" onClick={()=>!e.autoFromWithdrawal&&openModal("income",e)}>
                   <div className="txicon" style={{background:e.autoFromWithdrawal?"rgba(155,140,255,.15)":"#00d68f22"}}>{e.autoFromWithdrawal?"🔄":"💰"}</div>
                   <div className="txinfo">
@@ -2265,7 +2292,7 @@ function AppInner({session}){
                   <div className="txa" style={{color:"var(--green)"}}>+{fmt(e.value)}</div>
                   {!e.autoFromWithdrawal&&<button className="tdel" onClick={ev=>{ev.stopPropagation();deleteEntry("incomes",e.id);}}>✕</button>}
                 </div>
-              ))}</div>}
+              ))}</div>;})()}
           </div>
         )}
 
@@ -2282,8 +2309,12 @@ function AppInner({session}){
               <button className="bulkbtn" onClick={()=>openModal("bulk_expense")}>📋 Colar em lote</button>
               <button className="bulkbtn" onClick={()=>openModal("import_expense")} style={{color:"var(--accent)",borderColor:"rgba(99,102,241,.3)"}}>📂 Importar CSV</button>
             </div>
-            {(data.expenses||[]).length===0?<div className="empty">Nenhum gasto ainda.<br/>Toque no <strong style={{color:"var(--accent)"}}>+</strong> ou cole em lote.</div>
-              :<div className="txlist">{(data.expenses||[]).map(e=>{
+            {(data.expenses||[]).length>0&&<ListControls sortBy={sortExpenses} setSortBy={setSortExpenses} filterText={filterExpensesText} setFilterText={setFilterExpensesText} filterCategory={filterExpensesCat} setFilterCategory={setFilterExpensesCat} filterBank={filterExpensesBank} setFilterBank={setFilterExpensesBank} expenseCats={expenseCats} banks={banks}/>}
+            {(()=>{
+              const filteredExpenses=applyFilters(data.expenses||[],{sortBy:sortExpenses,filterText:filterExpensesText,filterCategory:filterExpensesCat,filterBank:filterExpensesBank,nameField:"description"});
+              return filteredExpenses.length===0&&(data.expenses||[]).length===0?<div className="empty">Nenhum gasto ainda.<br/>Toque no <strong style={{color:"var(--accent)"}}>+</strong> ou cole em lote.</div>
+                :filteredExpenses.length===0?<div className="empty">Nenhum resultado para o filtro atual.</div>
+                :<div className="txlist">{filteredExpenses.map(e=>{
                 const cat=catMap[e.category]||{icon:"📌",color:"#888"};
                 const bk=banks.find(b=>b.name===e.bank);
                 const d=e.date?e.date.slice(5).split("-").reverse().join("/"):"";
@@ -2299,7 +2330,7 @@ function AppInner({session}){
                     {!e.isDebtPayment&&<button className="tdel" onClick={ev=>{ev.stopPropagation();deleteEntry("expenses",e.id);}}>✕</button>}
                   </div>
                 );
-              })}</div>}
+              })}</div>;})()}
           </div>
         )}
 
@@ -3349,6 +3380,83 @@ function suggestCategory(description,memory,defaultCat){
   }
   return defaultCat;
 }
+
+// ─── FILTRO E ORDENAÇÃO REUTILIZÁVEL (ENTREGA 3) ───────────────────────────
+function ListControls({sortBy,setSortBy,filterText,setFilterText,filterCategory,setFilterCategory,filterBank,setFilterBank,expenseCats,banks,showCategory=true,showBank=true,sortOptions}){
+  const [open,setOpen]=useState(false);
+  const defaultSorts=[
+    {id:"date_desc",label:"Mais recente"},
+    {id:"date_asc",label:"Mais antigo"},
+    {id:"value_desc",label:"Maior valor"},
+    {id:"value_asc",label:"Menor valor"},
+    {id:"name_asc",label:"A → Z"},
+  ];
+  const sorts=sortOptions||defaultSorts;
+  const hasFilter=filterText||filterCategory||filterBank;
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:8}}>
+      <div style={{display:"flex",gap:6}}>
+        <input className="fi" placeholder="🔍 Buscar..." value={filterText||""} onChange={e=>setFilterText(e.target.value)} style={{flex:1,fontSize:12,padding:"8px 12px"}}/>
+        <select className="fi" value={sortBy} onChange={e=>setSortBy(e.target.value)} style={{flex:"0 0 130px",fontSize:11,padding:"8px"}}>
+          {sorts.map(s=><option key={s.id} value={s.id}>{s.label}</option>)}
+        </select>
+        <button onClick={()=>setOpen(o=>!o)} style={{background:open||hasFilter?"rgba(99,102,241,.15)":"var(--surface)",border:`1px solid ${open||hasFilter?"var(--accent)":"var(--border)"}`,color:open||hasFilter?"var(--accent)":"var(--muted)",fontFamily:"'Plus Jakarta Sans',sans-serif",fontSize:11,fontWeight:700,borderRadius:9,padding:"0 12px",cursor:"pointer",whiteSpace:"nowrap"}}>
+          {hasFilter?`✓ Filtros`:`⚙ Filtros`}
+        </button>
+      </div>
+      {open&&(
+        <div style={{background:"var(--card2)",border:"1px solid var(--border)",borderRadius:10,padding:"10px 12px",display:"flex",flexDirection:"column",gap:8}}>
+          {showCategory&&(
+            <div>
+              <label style={{fontSize:10,fontWeight:700,color:"var(--text2)",textTransform:"uppercase",letterSpacing:".05em",display:"block",marginBottom:4}}>Categoria</label>
+              <select className="fi" value={filterCategory||""} onChange={e=>setFilterCategory(e.target.value)} style={{fontSize:12,padding:"7px 10px"}}>
+                <option value="">Todas</option>
+                {expenseCats.map(c=><option key={c.id||c.name} value={c.name}>{c.icon} {c.name}</option>)}
+              </select>
+            </div>
+          )}
+          {showBank&&(
+            <div>
+              <label style={{fontSize:10,fontWeight:700,color:"var(--text2)",textTransform:"uppercase",letterSpacing:".05em",display:"block",marginBottom:4}}>Banco</label>
+              <select className="fi" value={filterBank||""} onChange={e=>setFilterBank(e.target.value)} style={{fontSize:12,padding:"7px 10px"}}>
+                <option value="">Todos</option>
+                {banks.map(b=><option key={b.id} value={b.name}>{b.name}</option>)}
+              </select>
+            </div>
+          )}
+          {hasFilter&&(
+            <button onClick={()=>{setFilterText("");setFilterCategory("");setFilterBank("");}} style={{background:"transparent",border:"1px solid var(--border)",color:"var(--muted)",fontFamily:"'Plus Jakarta Sans',sans-serif",fontSize:10,fontWeight:600,borderRadius:7,padding:"6px",cursor:"pointer"}}>
+              Limpar filtros
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function applyFilters(items,{sortBy,filterText,filterCategory,filterBank,nameField="name",dateField="date",valueField="value"}){
+  let filtered=items.slice();
+  if(filterText){
+    const q=filterText.toLowerCase();
+    filtered=filtered.filter(i=>{
+      const txt=`${i[nameField]||""} ${i.description||""} ${i.category||""} ${i.bank||""}`.toLowerCase();
+      return txt.includes(q);
+    });
+  }
+  if(filterCategory) filtered=filtered.filter(i=>i.category===filterCategory);
+  if(filterBank) filtered=filtered.filter(i=>i.bank===filterBank);
+  switch(sortBy){
+    case "date_desc": filtered.sort((a,b)=>(b[dateField]||"").localeCompare(a[dateField]||""));break;
+    case "date_asc": filtered.sort((a,b)=>(a[dateField]||"").localeCompare(b[dateField]||""));break;
+    case "value_desc": filtered.sort((a,b)=>(b[valueField]||0)-(a[valueField]||0));break;
+    case "value_asc": filtered.sort((a,b)=>(a[valueField]||0)-(b[valueField]||0));break;
+    case "name_asc": filtered.sort((a,b)=>String(a[nameField]||a.description||"").localeCompare(String(b[nameField]||b.description||"")));break;
+    default: break;
+  }
+  return filtered;
+}
+
 
 function EntryModal({type,entry,banks,expenseCats,onClose,onSave,vm,vy,categoryMemory={}}){
   const isEdit=!!entry;
