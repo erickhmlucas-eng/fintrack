@@ -54,6 +54,8 @@ const DEFAULT_BANKS = [
   {id:"nubank",name:"Nubank",color:"#8a05be",limit:0,currentBalance:0,adjustDate:null},
 ];
 
+const TRANSFER_CATEGORY = "🔄 Transferência entre contas";
+
 const DEFAULT_EXPENSE_CATS = [
   {id:"alimentacao",name:"Alimentação",icon:"🍔",color:"#c0392b"},
   {id:"transporte",name:"Transporte",icon:"🚌",color:"#922b21"},
@@ -1266,18 +1268,25 @@ function calcBankBalance(bankName, yearCache, settings){
       delta += e.value || 0;
     });
     
-    // Gastos deste banco (débito/PIX — NÃO inclui crédito, isso vai na Entrega 2)
+    // Gastos deste banco (débito/PIX — NÃO inclui crédito)
     (data.expenses || []).forEach(e => {
-      if (e.bank !== bankName) return;
       if (adjustDate && e.date && e.date <= adjustDate) return;
+      // Transferências: subtrai do banco origem, soma no banco destino
+      if (e.isTransfer && e.transferTo) {
+        if (e.bank === bankName) delta -= e.value || 0;
+        if (e.transferTo === bankName) delta += e.value || 0;
+        return;
+      }
+      // Gasto normal: subtrai do banco
+      if (e.bank !== bankName) return;
       delta -= e.value || 0;
     });
     
     // Fixas pagas deste banco
     (data.fixed || []).forEach(f => {
       if (!f.paid || f.bank !== bankName) return;
-      // Fixas pagas não têm data exata, assume meio do mês
-      const fDate = `${settings._currentYear||new Date().getFullYear()}-${String(m+1).padStart(2,"0")}-15`;
+      // Usa paidDate real, fallback para meio do mês
+      const fDate = f.paidDate || `${settings._currentYear||new Date().getFullYear()}-${String(m+1).padStart(2,"0")}-15`;
       if (adjustDate && fDate <= adjustDate) return;
       delta -= f.value || 0;
     });
@@ -1398,6 +1407,12 @@ function AppInner({session}){
     setYearCache(cache);
   },[vy]);
 
+  // Atualização otimista do yearCache quando data muda (sem esperar DB)
+  useEffect(()=>{
+    if(!loaded||loading)return;
+    setYearCache(yc=>({...yc,[vm]:data}));
+  },[data,vm,loaded,loading]);
+
   useEffect(()=>{
     if(!loaded||loading) return;
     clearTimeout(saveTimer.current);
@@ -1420,7 +1435,7 @@ function AppInner({session}){
       dbSet(monthKey(vy,vm),{...data,_balance:computedBalance}).then(()=>loadYearCache()).finally(()=>setSyncing(false));
     },800);
     return ()=>clearTimeout(saveTimer.current);
-  },[data,vm,vy,loaded,loading,loadYearCache,prevBalance,debts]);
+  },[data,vm,vy,loaded,loading,loadYearCache,prevBalance,debts,settings.billsToPay]);
 
   useEffect(()=>{
     if(!loaded||loading) return;
@@ -1440,7 +1455,7 @@ function AppInner({session}){
 
   const rawIncome=data.incomes.reduce((s,t)=>s+t.value,0);
   const totalIncome=rawIncome+prevBalance;
-  const totalExpense=data.expenses.reduce((s,t)=>s+t.value,0);
+  const totalExpense=data.expenses.filter(t=>!t.isTransfer).reduce((s,t)=>s+t.value,0);
   const totalFixedPaid=data.fixed.filter(f=>f.paid).reduce((s,t)=>s+(t.value||0),0);
   const totalFixedAll=data.fixed.reduce((s,t)=>s+(t.value||0),0);
   const totalInvest=data.investments.filter(e=>!isWithdrawal(e)).reduce((s,t)=>s+t.value,0);
@@ -1693,7 +1708,7 @@ function AppInner({session}){
     return true;
   }
 
-  function toggleDebtPaid(debtId,mk){
+  function toggleDebtPaid(debtId,mk,bankPaid=""){
     setDebts(ds=>ds.map(d=>{
       if(d.id!==debtId)return d;
       const paid=d.paidMonths||[];
@@ -1710,7 +1725,7 @@ function AppInner({session}){
           description:`Parcela: ${d.name} (${((d.paidCount||0)+1)}/${d.installments})`,
           value:d.monthlyValue,
           date:`${mkY}-${String(mkM).padStart(2,"0")}-01`,
-          bank:"",
+          bank:bankPaid||"",
           method:"PIX",
           essential:false,
           isDebtPayment:true,
@@ -2320,13 +2335,14 @@ function AppInner({session}){
                 const d=e.date?e.date.slice(5).split("-").reverse().join("/"):"";
                 return (
                   <div key={e.id} className="txi" onClick={()=>openModal("expense",e)}>
-                    <div className="txicon" style={{background:cat.color+"33"}}>{cat.icon}</div>
+                    <div className="txicon" style={{background:e.isTransfer?"rgba(99,102,241,.2)":cat.color+"33"}}>{e.isTransfer?"🔄":cat.icon}</div>
                     <div className="txinfo">
-                      <div className="txd">{e.description||e.category}</div>
-                      <div className="txm"><span>{d}</span>{bk&&<span className="chip" style={{background:bk.color+"33",color:bk.color}}>{bk.name}</span>}<span>{e.method}</span></div>
+                      <div className="txd">{e.isTransfer?`${e.bank} → ${e.transferTo}`:(e.description||e.category)}</div>
+                      <div className="txm"><span>{d}</span>{!e.isTransfer&&bk&&<span className="chip" style={{background:bk.color+"33",color:bk.color}}>{bk.name}</span>}<span>{e.isTransfer?"Transferência interna":e.method}</span></div>
                     </div>
-                    <div className="txa" style={{color:"var(--wine)"}}>-{fmt(e.value)}</div>
+                    <div className="txa" style={{color:e.isTransfer?"var(--muted)":"var(--wine)"}}>{e.isTransfer?fmt(e.value):"-"+fmt(e.value)}</div>
                     {e.isDebtPayment&&<span style={{fontSize:9,background:"rgba(99,102,241,.15)",color:"var(--accent)",padding:"2px 6px",borderRadius:6,fontWeight:700,flexShrink:0}}>parcela</span>}
+                    {e.isTransfer&&<span style={{fontSize:9,background:"rgba(99,102,241,.15)",color:"var(--accent)",padding:"2px 6px",borderRadius:6,fontWeight:700,flexShrink:0}}>transfer</span>}
                     {!e.isDebtPayment&&<button className="tdel" onClick={ev=>{ev.stopPropagation();deleteEntry("expenses",e.id);}}>✕</button>}
                   </div>
                 );
@@ -2413,7 +2429,7 @@ function AppInner({session}){
           </div>
         )}
 
-        {!loading&&page==="debts"&&<DebtsPage debts={debts} setDebts={setDebts} vm={vm} vy={vy} onTogglePaid={toggleDebtPaid}/>}
+        {!loading&&page==="debts"&&<DebtsPage debts={debts} setDebts={setDebts} vm={vm} vy={vy} onTogglePaid={toggleDebtPaid} banks={banks}/>}
         {!loading&&page==="planning"&&<PlanningPage yearCache={yearCache} vm={vm} vy={vy} settings={settings} debts={debts} expenseCats={expenseCats}/>}
 
         {!loading&&page==="annual"&&(
@@ -2490,7 +2506,7 @@ function AppInner({session}){
 }
 
 // ─── DEBTS ────────────────────────────────────────────────────────────────────
-function DebtsPage({debts,setDebts,vm,vy,onTogglePaid}){
+function DebtsPage({debts,setDebts,vm,vy,onTogglePaid,banks}){
   const [showForm,setShowForm]=useState(false);
   const active=debts.filter(d=>!d.closed),closed=debts.filter(d=>d.closed);
   return (
@@ -2520,7 +2536,14 @@ function DebtsPage({debts,setDebts,vm,vy,onTogglePaid}){
               {dueThisMonth&&<span style={{color:paidThisMonth?"var(--green)":"var(--gold)",fontWeight:600}}>{paidThisMonth?"✓ Paga este mês":"⚡ Vence este mês"}</span>}
             </div>
             {dueThisMonth&&(
-              <button onClick={()=>onTogglePaid(d.id,key)}
+              <button onClick={()=>{
+                  if(paidThisMonth){
+                    onTogglePaid(d.id,key);
+                  } else {
+                    const bankName=window.prompt(`Qual banco pagou a parcela de ${MONTHS_FULL[vm]}?\nDigite: ${banks.map(b=>b.name).join(", ")}`,banks[0]?.name||"");
+                    if(bankName!==null) onTogglePaid(d.id,key,bankName||"");
+                  }
+                }}
                 style={{width:"100%",background:paidThisMonth?"rgba(0,214,143,.1)":"var(--surface)",border:`1px solid ${paidThisMonth?"var(--green)":"var(--border)"}`,color:paidThisMonth?"var(--green)":"var(--muted)",fontFamily:"'Sora',sans-serif",fontSize:12,fontWeight:600,borderRadius:9,padding:"8px 0",cursor:"pointer",marginBottom:8}}>
                 {paidThisMonth?`✓ Parcela de ${MONTHS_FULL[vm]} paga`:`Marcar parcela de ${MONTHS_FULL[vm]} como paga`}
               </button>
@@ -3464,7 +3487,7 @@ function EntryModal({type,entry,banks,expenseCats,onClose,onSave,vm,vy,categoryM
   const [form,setForm]=useState(()=>{
     if(isEdit) return{...entry, value: String(entry.value ?? '')};
     if(type==="income")     return{id:uid(),name:"",value:"",date:dd,bank:banks[0]?.name||""};
-    if(type==="expense")    return{id:uid(),category:expenseCats[0]?.name||"Outros",date:dd,description:"",value:"",bank:banks[0]?.name||"",method:"PIX",essential:false};
+    if(type==="expense")    return{id:uid(),category:expenseCats[0]?.name||"Outros",date:dd,description:"",value:"",bank:banks[0]?.name||"",isTransfer:false,transferTo:"",method:"PIX",essential:false};
     if(type==="fixed")      return{id:uid(),name:"",value:"",paid:false,recurring:true};
     if(type==="investment") return{id:uid(),name:"",type:"Reserva de Emergência",value:"",date:dd,bank:banks[0]?.name||""};
     return{};
@@ -3473,7 +3496,16 @@ function EntryModal({type,entry,banks,expenseCats,onClose,onSave,vm,vy,categoryM
   function save(){
     const stMap={income:"incomes",expense:"expenses",fixed:"fixed",investment:"investments"};
     const st=stMap[type];
-    const p={...form,value:parseFloat(String(form.value||"0").replace(",","."))||0};
+    let p={...form,value:parseFloat(String(form.value||"0").replace(",","."))||0};
+    // Se fixa marcada como paga, adicionar paidDate atual (fix bug 3)
+    if(type==="fixed"&&p.paid&&!p.paidDate){
+      const t=new Date();
+      p.paidDate=`${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,"0")}-${String(t.getDate()).padStart(2,"0")}`;
+    }
+    // Se fixa desmarcada, limpar paidDate
+    if(type==="fixed"&&!p.paid){
+      p.paidDate=null;
+    }
     onSave(st,p,isEdit?entry:null);
   }
   const titles={income:"Entrada",expense:"Gasto (Débito/PIX)",fixed:"Despesa Fixa",investment:"Reserva / Investimento"};
@@ -3517,6 +3549,24 @@ function EntryModal({type,entry,banks,expenseCats,onClose,onSave,vm,vy,categoryM
         <div className="frow">
           <div className="fg"><label className="fl">Banco</label><select className="fi" value={form.bank} onChange={e=>upd("bank",e.target.value)}>{banks.map(b=><option key={b.id} value={b.name}>{b.name}</option>)}</select></div>
           <div className="fg"><label className="fl">Método</label><select className="fi" value={form.method} onChange={e=>upd("method",e.target.value)}>{METHODS.map(m=><option key={m}>{m}</option>)}</select></div>
+        </div>
+        <div className="fg" style={{background:"rgba(99,102,241,.05)",border:"1px solid rgba(99,102,241,.18)",borderRadius:10,padding:"10px 12px"}}>
+          <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:12}}>
+            <input type="checkbox" checked={!!form.isTransfer} onChange={e=>upd("isTransfer",e.target.checked)} style={{width:16,height:16,accentColor:"var(--accent)"}}/>
+            <span><strong>🔄 Transferência entre minhas contas</strong></span>
+          </label>
+          <div style={{fontSize:10,color:"var(--muted)",marginTop:4,paddingLeft:24,lineHeight:1.5}}>Marque se está apenas movendo dinheiro entre seus bancos. Não conta como gasto real.</div>
+          {form.isTransfer&&(
+            <div style={{marginTop:8}}>
+              <label className="fl" style={{display:"block",marginBottom:4}}>Para qual banco?</label>
+              <select className="fi" value={form.transferTo||""} onChange={e=>upd("transferTo",e.target.value)}>
+                <option value="">— Selecione —</option>
+                {banks.filter(b=>b.name!==form.bank).map(b=><option key={b.id} value={b.name}>{b.name}</option>)}
+              </select>
+            </div>
+          )}
+        </div>
+        <div style={{display:"none"}}>
         </div>
       </>}
       {type==="fixed"&&<>
