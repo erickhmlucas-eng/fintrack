@@ -3566,8 +3566,6 @@ function EntryModal({type,entry,banks,expenseCats,onClose,onSave,vm,vy,categoryM
             </div>
           )}
         </div>
-        <div style={{display:"none"}}>
-        </div>
       </>}
       {type==="fixed"&&<>
         <div className="fg"><label className="fl">Nome</label><input className="fi" placeholder="Ex: Parcela carro, Seguro…" value={form.name} onChange={e=>upd("name",e.target.value)}/></div>
