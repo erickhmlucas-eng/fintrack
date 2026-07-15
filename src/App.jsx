@@ -1248,11 +1248,12 @@ function calcBankBalance(bankName, yearCache, settings){
   
   let delta = 0;
   
-  // Faturas de cartão pagas POR este banco (Entrega 2)
+  // Faturas de cartão pagas POR este banco
   const bills = settings.billsToPay || [];
   bills.forEach(b => {
     if (!b.paid || b.paidBank !== bankName) return;
-    if (adjustDate && b.paidDate && b.paidDate <= adjustDate) return;
+    // Só ignora se paidDate for ESTRITAMENTE anterior ao ajuste (não ignora se for igual)
+    if (adjustDate && b.paidDate && b.paidDate < adjustDate) return;
     delta -= b.value || 0;
   });
   
@@ -1264,13 +1265,13 @@ function calcBankBalance(bankName, yearCache, settings){
     // Entradas deste banco
     (data.incomes || []).forEach(e => {
       if (e.bank !== bankName) return;
-      if (adjustDate && e.date && e.date <= adjustDate) return; // ignora pré-ajuste
+      if (adjustDate && e.date && e.date < adjustDate) return;
       delta += e.value || 0;
     });
     
     // Gastos deste banco (débito/PIX — NÃO inclui crédito)
     (data.expenses || []).forEach(e => {
-      if (adjustDate && e.date && e.date <= adjustDate) return;
+      if (adjustDate && e.date && e.date < adjustDate) return;
       // Transferências: subtrai do banco origem, soma no banco destino
       if (e.isTransfer && e.transferTo) {
         if (e.bank === bankName) delta -= e.value || 0;
@@ -1287,14 +1288,14 @@ function calcBankBalance(bankName, yearCache, settings){
       if (!f.paid || f.bank !== bankName) return;
       // Usa paidDate real, fallback para meio do mês
       const fDate = f.paidDate || `${settings._currentYear||new Date().getFullYear()}-${String(m+1).padStart(2,"0")}-15`;
-      if (adjustDate && fDate <= adjustDate) return;
+      if (adjustDate && fDate < adjustDate) return;
       delta -= f.value || 0;
     });
     
     // Investimentos / retiradas deste banco
     (data.investments || []).forEach(i => {
       if (i.bank !== bankName) return;
-      if (adjustDate && i.date && i.date <= adjustDate) return;
+      if (adjustDate && i.date && i.date < adjustDate) return;
       const isWithdraw = (i.type || "").toLowerCase().includes("retirada");
       delta += isWithdraw ? (i.value || 0) : -(i.value || 0);
     });
@@ -1546,14 +1547,19 @@ function AppInner({session}){
   const annualRows=MONTHS.map((_,i)=>{
     const d=yearCache[i]||EMPTY_MONTH();
     const inc=(d.incomes||[]).reduce((s,t)=>s+t.value,0);
-    const exp=(d.expenses||[]).reduce((s,t)=>s+t.value,0);
+    // Gastos: exclui transferências (não são gastos reais)
+    const exp=(d.expenses||[]).filter(t=>!t.isTransfer).reduce((s,t)=>s+t.value,0);
     const fix=(d.fixed||[]).filter(f=>f.paid).reduce((s,t)=>s+(t.value||0),0);
     const inv=(d.investments||[]).filter(e=>!isWithdrawal(e)).reduce((s,t)=>s+t.value,0);
     const mkey=`${vy}-${i}`;
+    // Dívidas: só conta parcelas que NÃO viraram expense entry (evita dupla contagem)
     const dbt=debts.filter(dd=>!dd.closed).reduce((s,dd)=>{
       const di2=vy*12+i-(dd.startYear*12+dd.startMonth);
       if(di2<0||di2>=dd.installments) return s;
-      return (dd.paidMonths||[]).includes(mkey)?s+dd.monthlyValue:s;
+      if(!(dd.paidMonths||[]).includes(mkey)) return s;
+      // Se já existe uma expense com isDebtPayment para essa parcela, não conta aqui
+      const hasExpense=(d.expenses||[]).some(e=>e.isDebtPayment&&e.debtId===dd.id&&e.debtMonthKey===mkey);
+      return hasExpense?s:s+dd.monthlyValue;
     },0);
     return {i,inc,exp,fix,inv,dbt,out:exp+fix+dbt+inv,bal:inc-exp-fix-dbt-inv};
   });
@@ -1647,7 +1653,21 @@ function AppInner({session}){
     if(data[st]) setData(d=>({...d,[st]:(d[st]||[]).filter(i=>i.id!==id)}));
   }
 
-  function toggleFixed(id){setData(d=>({...d,fixed:(d.fixed||[]).map(f=>f.id===id?{...f,paid:!f.paid}:f)}));}
+  function toggleFixed(id){
+    const fx=(data.fixed||[]).find(f=>f.id===id);
+    if(!fx) return;
+    if(fx.paid){
+      // desmarcando: limpa banco e paidDate
+      setData(d=>({...d,fixed:(d.fixed||[]).map(f=>f.id===id?{...f,paid:false,bank:"",paidDate:null}:f)}));
+    } else {
+      // marcando: pede banco
+      const bkName=window.prompt(`Qual banco pagou "${fx.name}"?\nDigite: ${banks.map(b=>b.name).join(", ")}`,fx.bank||banks[0]?.name||"");
+      if(bkName===null) return;
+      const t=new Date();
+      const dateStr=`${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,"0")}-${String(t.getDate()).padStart(2,"0")}`;
+      setData(d=>({...d,fixed:(d.fixed||[]).map(f=>f.id===id?{...f,paid:true,bank:bkName||"",paidDate:dateStr}:f)}));
+    }
+  }
   function adjustBalanceToReal(diff){
     // diff positivo = app tem mais que o real → criar gasto de ajuste (reduzir)
     // diff negativo = app tem menos que o real → criar entrada de ajuste
@@ -2383,7 +2403,10 @@ function AppInner({session}){
                   {paidFixed.map(e=>(
                     <div key={e.id} className="checkrow" onClick={()=>e.isDebt?toggleDebtPaid(e.debtId,e.debtMonthKey):toggleFixed(e.id)}>
                       <div className="checkbox on"><span style={{color:"#fff",fontSize:11,fontWeight:700}}>✓</span></div>
-                      <div style={{flex:1,minWidth:0}}><div style={{fontSize:12,fontWeight:500,textDecoration:"line-through",color:"var(--muted)"}}>{e.name}</div></div>
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{fontSize:12,fontWeight:500,textDecoration:"line-through",color:"var(--muted)"}}>{e.name}</div>
+                        {e.bank&&<div style={{fontSize:9,color:"var(--green)",marginTop:2,fontWeight:600}}>✓ Pago via {e.bank}</div>}
+                      </div>
                       <div style={{fontSize:13,fontWeight:700,color:"var(--green)"}}>{fmt(e.value)}</div>
                       {!e.isDebt&&!e.isAutoInvoice&&<><button className="tdel" onClick={ev=>{ev.stopPropagation();openModal("fixed",e);}}>✏️</button><button className="tdel" onClick={ev=>{ev.stopPropagation();deleteEntry("fixed",e.id);}}>✕</button></>}
                     </div>
