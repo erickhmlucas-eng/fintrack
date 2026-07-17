@@ -1306,8 +1306,6 @@ function calcBankBalance(bankName, yearCache, settings){
 
 
 function AppInner({session}){
-  const [viewingBank,setViewingBank]=useState(null);
-  useEffect(()=>{if(page!=="wallet")setViewingBank(null);},[page]);
   const [sortIncomes,setSortIncomes]=useState("date_desc");
   const [filterIncomesText,setFilterIncomesText]=useState("");
   const [filterIncomesBank,setFilterIncomesBank]=useState("");
@@ -2302,8 +2300,7 @@ function AppInner({session}){
         )}
 
         {!loading&&page==="bills"&&<BillsPage banks={banks} setSettings={setSettings} settings={settings} setData={setData} vm={vm} vy={vy}/>}
-        {!loading&&page==="wallet"&&!viewingBank&&<WalletPage banks={banks} setSettings={setSettings} yearCache={yearCache} settings={settings} vm={vm} vy={vy} onOpenBank={setViewingBank}/>}
-        {!loading&&page==="wallet"&&viewingBank&&<BankStatementPage bank={viewingBank} onBack={()=>setViewingBank(null)} yearCache={yearCache} settings={settings} vm={vm} vy={vy} banks={banks} expenseCats={expenseCats} MONTHS={MONTHS} MONTHS_FULL={MONTHS_FULL}/>}
+        {!loading&&page==="wallet"&&<WalletPage banks={banks} setSettings={setSettings} yearCache={yearCache} settings={settings} vm={vm} vy={vy}/>}
         {!loading&&page==="incomes"&&(
           <div className="pg">
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
@@ -3204,184 +3201,7 @@ function BillsPage({banks,setSettings,settings,setData,vm,vy}){
 }
 
 
-// ─── BANK STATEMENT — Extrato completo do banco ────────────────────────────
-function BankStatementPage({bank,onBack,yearCache,settings,vm,vy,banks,expenseCats,MONTHS,MONTHS_FULL}){
-  const catMap=Object.fromEntries(expenseCats.map(c=>[c.name,c]));
-  const data=yearCache[vm]||{incomes:[],expenses:[],fixed:[],investments:[],notes:""};
-  const currentBalance=calcBankBalance(bank.name,yearCache,settings);
-  
-  // Coletar todas as movimentações do banco no mês atual
-  const movs=[];
-  
-  // Entradas
-  (data.incomes||[]).forEach(e=>{
-    if(e.bank===bank.name) movs.push({...e,_kind:"income",_desc:e.name||"Entrada",_value:e.value,_date:e.date});
-  });
-  
-  // Gastos (débito/PIX) + Transferências
-  (data.expenses||[]).forEach(e=>{
-    if(e.isTransfer&&e.transferTo){
-      if(e.bank===bank.name){
-        movs.push({...e,_kind:"transfer_out",_desc:`${e.bank} → ${e.transferTo}`,_value:e.value,_date:e.date});
-      }
-      if(e.transferTo===bank.name){
-        movs.push({...e,_kind:"transfer_in",_desc:`${e.bank} → ${e.transferTo}`,_value:e.value,_date:e.date});
-      }
-      return;
-    }
-    if(e.bank===bank.name){
-      movs.push({...e,_kind:"expense",_desc:e.description||e.category,_value:e.value,_date:e.date});
-    }
-  });
-  
-  // Fixas pagas por este banco
-  (data.fixed||[]).forEach(f=>{
-    if(f.paid&&f.bank===bank.name){
-      movs.push({...f,_kind:"fixed_paid",_desc:f.name,_value:f.value,_date:f.paidDate||`${vy}-${String(vm+1).padStart(2,"0")}-15`});
-    }
-  });
-  
-  // Investimentos deste banco
-  (data.investments||[]).forEach(i=>{
-    if(i.bank===bank.name){
-      const isWithdraw=(i.type||"").toLowerCase().includes("retirada");
-      movs.push({...i,_kind:isWithdraw?"withdraw":"invest",_desc:i.name||i.type,_value:i.value,_date:i.date});
-    }
-  });
-  
-  // Faturas pagas por este banco
-  (settings.billsToPay||[]).forEach(b=>{
-    if(b.paid&&b.paidBank===bank.name&&b.paidDate){
-      const d=new Date(b.paidDate);
-      if(d.getFullYear()===vy&&d.getMonth()===vm){
-        movs.push({...b,_kind:"bill_paid",_desc:b.name,_value:b.value,_date:b.paidDate});
-      }
-    }
-  });
-  
-  // Ordenar por data mais recente primeiro
-  movs.sort((a,b)=>(b._date||"").localeCompare(a._date||""));
-  
-  // Totais
-  const totalIn=movs.filter(m=>["income","transfer_in","withdraw"].includes(m._kind)).reduce((s,m)=>s+m._value,0);
-  const totalOut=movs.filter(m=>["expense","fixed_paid","invest","bill_paid","transfer_out"].includes(m._kind)).reduce((s,m)=>s+m._value,0);
-  
-  // Breakdown por categoria (só gastos + fixas + faturas)
-  const catBreakdown={};
-  movs.forEach(m=>{
-    if(m._kind==="expense"){
-      catBreakdown[m.category||"Outros"]=(catBreakdown[m.category||"Outros"]||0)+m._value;
-    } else if(m._kind==="fixed_paid"){
-      catBreakdown["📋 Fixas"]=(catBreakdown["📋 Fixas"]||0)+m._value;
-    } else if(m._kind==="bill_paid"){
-      catBreakdown["💳 Faturas cartão"]=(catBreakdown["💳 Faturas cartão"]||0)+m._value;
-    } else if(m._kind==="invest"){
-      catBreakdown["💰 Investimento"]=(catBreakdown["💰 Investimento"]||0)+m._value;
-    } else if(m._kind==="transfer_out"){
-      catBreakdown["🔄 Transferência"]=(catBreakdown["🔄 Transferência"]||0)+m._value;
-    }
-  });
-  const catList=Object.entries(catBreakdown).sort((a,b)=>b[1]-a[1]);
-  
-  function kindMeta(kind){
-    switch(kind){
-      case "income": return {icon:"💰",bg:"rgba(34,197,94,.15)",fg:"#22c55e",chip:"entrada",valColor:"#22c55e",prefix:"+"};
-      case "transfer_in": return {icon:"🔄",bg:"rgba(34,197,94,.15)",fg:"#22c55e",chip:"transferência recebida",valColor:"#22c55e",prefix:"+"};
-      case "transfer_out": return {icon:"🔄",bg:"rgba(99,102,241,.15)",fg:"var(--accent)",chip:"transferência enviada",valColor:"var(--muted)",prefix:""};
-      case "expense": return {icon:"💸",bg:"rgba(192,57,43,.2)",fg:"var(--wine)",chip:"",valColor:"var(--wine)",prefix:"-"};
-      case "fixed_paid": return {icon:"📋",bg:"rgba(59,130,246,.2)",fg:"var(--blue)",chip:"fixa paga",valColor:"var(--wine)",prefix:"-"};
-      case "bill_paid": return {icon:"💳",bg:"rgba(245,158,11,.2)",fg:"var(--gold)",chip:"fatura paga",valColor:"var(--wine)",prefix:"-"};
-      case "invest": return {icon:"💰",bg:"rgba(155,89,182,.2)",fg:"#c39bd3",chip:"aporte reserva",valColor:"var(--wine)",prefix:"-"};
-      case "withdraw": return {icon:"↩️",bg:"rgba(34,197,94,.15)",fg:"#22c55e",chip:"retirada",valColor:"#22c55e",prefix:"+"};
-      default: return {icon:"•",bg:"var(--surface)",fg:"var(--muted)",chip:"",valColor:"var(--muted)",prefix:""};
-    }
-  }
-  
-  function fmtDate(dstr){
-    if(!dstr) return "";
-    const parts=dstr.split("-");
-    return parts.length===3?`${parts[2]}/${MONTHS[parseInt(parts[1])-1]?.toLowerCase().slice(0,3)}`:dstr;
-  }
-  
-  return (
-    <div className="pg">
-      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:6}}>
-        <button onClick={onBack} style={{background:"transparent",border:"1px solid var(--border)",color:"var(--accent)",fontFamily:"'Plus Jakarta Sans',sans-serif",fontSize:14,padding:"4px 10px",borderRadius:8,cursor:"pointer"}}>←</button>
-        <div style={{flex:1}}>
-          <div style={{display:"flex",alignItems:"center",gap:6,fontSize:15,fontWeight:800,color:"var(--text)"}}>
-            <span style={{width:9,height:9,borderRadius:"50%",background:bank.color,display:"inline-block"}}/>
-            {bank.name}
-          </div>
-          <div style={{fontSize:10,color:"var(--muted)"}}>Extrato · {MONTHS_FULL[vm]}/{vy}</div>
-        </div>
-      </div>
-      
-      <div style={{padding:"14px 16px",background:`linear-gradient(135deg,${bank.color}22,${bank.color}08)`,borderRadius:12,marginBottom:10,border:`1px solid ${bank.color}33`}}>
-        <div style={{fontSize:10,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".06em",fontWeight:700,marginBottom:3}}>Saldo atual</div>
-        <div style={{fontSize:24,fontWeight:800,color:currentBalance>=0?"var(--green)":"var(--wine)"}}>{fmt(currentBalance)}</div>
-        {bank.currentBalance!==undefined&&bank.adjustDate&&(
-          <div style={{fontSize:10,color:"var(--muted)",marginTop:3}}>Base definida em {new Date(bank.adjustDate+"T12:00").toLocaleDateString("pt-BR")}: {fmt(bank.currentBalance||0)}</div>
-        )}
-      </div>
-      
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:12}}>
-        <div style={{background:"var(--card)",border:"1px solid var(--border)",borderRadius:9,padding:"8px 10px"}}>
-          <div style={{fontSize:9,color:"var(--muted)",textTransform:"uppercase",fontWeight:700,letterSpacing:".04em",marginBottom:2}}>Entradas</div>
-          <div style={{fontSize:14,fontWeight:800,color:"var(--green)"}}>+{fmt(totalIn)}</div>
-        </div>
-        <div style={{background:"var(--card)",border:"1px solid var(--border)",borderRadius:9,padding:"8px 10px"}}>
-          <div style={{fontSize:9,color:"var(--muted)",textTransform:"uppercase",fontWeight:700,letterSpacing:".04em",marginBottom:2}}>Saídas</div>
-          <div style={{fontSize:14,fontWeight:800,color:"var(--wine)"}}>-{fmt(totalOut)}</div>
-        </div>
-      </div>
-      
-      {catList.length>0&&(<>
-        <div style={{padding:"0 4px 6px",fontSize:10,color:"var(--muted)",textTransform:"uppercase",fontWeight:700,letterSpacing:".06em"}}>📊 Saídas por categoria</div>
-        <div style={{background:"var(--card)",border:"1px solid var(--border)",borderRadius:10,padding:"8px 12px",marginBottom:12}}>
-          {catList.map(([cat,val])=>{
-            const c=catMap[cat]||{icon:"📌"};
-            return (
-              <div key={cat} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"4px 0",fontSize:11}}>
-                <span style={{color:"var(--text2)"}}>{cat.startsWith("📋")||cat.startsWith("💳")||cat.startsWith("💰")||cat.startsWith("🔄")?cat:`${c.icon} ${cat}`}</span>
-                <span style={{color:"var(--gold)",fontWeight:700}}>-{fmt(val)}</span>
-              </div>
-            );
-          })}
-        </div>
-      </>)}
-      
-      <div style={{padding:"0 4px 6px",fontSize:10,color:"var(--muted)",textTransform:"uppercase",fontWeight:700,letterSpacing:".06em"}}>📋 Movimentações ({movs.length})</div>
-      {movs.length===0?(
-        <div style={{background:"var(--card)",border:"1px solid var(--border)",borderRadius:10,padding:"20px 12px",textAlign:"center",fontSize:11,color:"var(--muted)"}}>
-          Nenhuma movimentação neste banco no mês.
-        </div>
-      ):(
-        <div style={{display:"flex",flexDirection:"column",gap:5}}>
-          {movs.map((m,i)=>{
-            const meta=kindMeta(m._kind);
-            return (
-              <div key={m.id+"_"+i} style={{background:"var(--card)",border:"1px solid var(--border)",borderRadius:10,padding:"9px 11px",display:"flex",alignItems:"center",gap:9}}>
-                <div style={{width:28,height:28,borderRadius:8,background:meta.bg,color:meta.fg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,flexShrink:0}}>{meta.icon}</div>
-                <div style={{flex:1,minWidth:0}}>
-                  <div style={{fontSize:11,fontWeight:600,color:"var(--text)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{m._desc}</div>
-                  <div style={{fontSize:9,color:"var(--muted)",display:"flex",gap:6,marginTop:2}}>
-                    <span>{fmtDate(m._date)}</span>
-                    {meta.chip&&<span style={{background:"rgba(99,102,241,.15)",color:"var(--accent)",padding:"1px 5px",borderRadius:4,fontWeight:700}}>{meta.chip}</span>}
-                    {m._kind==="expense"&&m.method&&<span>{m.method}</span>}
-                  </div>
-                </div>
-                <div style={{fontSize:12,fontWeight:800,color:meta.valColor,flexShrink:0}}>{meta.prefix}{fmt(m._value)}</div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-}
-
-
-function WalletPage({banks,setSettings,yearCache,settings,vm,vy,onOpenBank}){
+function WalletPage({banks,setSettings,yearCache,settings,vm,vy}){
   const [editingBank,setEditingBank]=useState(null);
   const [newBalance,setNewBalance]=useState("");
   
@@ -3423,7 +3243,7 @@ function WalletPage({banks,setSettings,yearCache,settings,vm,vy,onOpenBank}){
         const isEditing=editingBank===b.name;
         const dateLabel=b.adjustDate?new Date(b.adjustDate+"T12:00").toLocaleDateString("pt-BR"):"nunca definido";
         return (
-          <div key={b.id} style={{background:"var(--card)",border:"1.5px solid var(--border)",borderRadius:12,padding:"13px 14px",marginBottom:8,cursor:"pointer",transition:"transform 0.1s"}} onClick={ev=>{if(ev.target.tagName==="BUTTON"||ev.target.tagName==="INPUT"||ev.target.closest("button")||ev.target.closest("input"))return;onOpenBank&&onOpenBank(b);}}>
+          <div key={b.id} style={{background:"var(--card)",border:"1.5px solid var(--border)",borderRadius:12,padding:"13px 14px",marginBottom:8}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
               <div style={{display:"flex",alignItems:"center",gap:8,fontSize:14,fontWeight:700,color:"var(--text)"}}>
                 <span style={{width:10,height:10,borderRadius:"50%",background:b.color,display:"inline-block"}}/>
