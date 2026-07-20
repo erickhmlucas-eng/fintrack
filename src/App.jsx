@@ -254,7 +254,7 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
   const nm=vm===11?0:vm+1, ny=vm===11?vy+1:vy;
 
   const invoiceId=`invoice_${selectedBank}_${vy}_${vm}`;
-  const invoiceAlreadyClosed=(monthData.fixed||[]).some(f=>f.id===invoiceId);
+  const invoiceAlreadyClosed=((settings.billsToPay||[]).some(b=>b.id===invoiceId))||((monthData.fixed||[]).some(f=>f.id===invoiceId));
 
   // Reset viewingHistory quando trocar de banco ou mês
   useEffect(()=>{setViewingHistory(false);},[selectedBank,vm,vy]);
@@ -293,33 +293,23 @@ function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData
   function closeInvoice(){
     if(!totalUsed||invoiceAlreadyClosed) return;
     setClosingInvoice(true);
-    // NOVO SISTEMA (Entrega 2): Fatura vira "billToPay" — não mexe no saldo até pagar
+    // Fatura vira SOMENTE billToPay. Nunca cria fixed marker (não duplica).
+    // Nome usa o mês de VENCIMENTO (nm/ny), não o mês em que foi gerada.
     const billToPay={
       id:invoiceId,
-      name:`Fatura ${selectedBank} — ${MONTHS_FULL[vm]}/${vy}`,
+      name:`Fatura ${selectedBank} — Vence ${MONTHS_FULL[nm]}/${ny}`,
       value:parseFloat(totalUsed.toFixed(2)),
-      bankCard:selectedBank, // cartão de origem
+      bankCard:selectedBank,
       paid:false,
-      paidBank:null, // banco que pagou (escolhido na hora de marcar paga)
+      paidBank:null,
       paidDate:null,
       dueMonth:nm,
       dueYear:ny,
+      generatedMonth:vm,
+      generatedYear:vy,
       createdAt:new Date().toISOString(),
       isCardInvoice:true,
     };
-    // Marca também como fixed (legado) só para o app saber que essa fatura "fechou"
-    // mas sem afetar o saldo já que o fixed só conta quando paid=true
-    const fixedMarker={
-      id:invoiceId,
-      name:billToPay.name,
-      value:parseFloat(totalUsed.toFixed(2)),
-      paid:false,
-      isAutoInvoice:true,
-      autoInvoiceKey:invoiceId,
-      isLegacyMarker:true, // novo: sinaliza que só é marker
-    };
-    setMonthData(d=>({...d,fixed:[...(d.fixed||[]),{...fixedMarker,closedInMonth:true}]}));
-    // Salva a billToPay nas settings
     setSettings(s=>{
       const bills=s.billsToPay||[];
       if(bills.some(b=>b.id===invoiceId)){setClosingInvoice(false);return s;}
@@ -1354,6 +1344,25 @@ function AppInner({session}){
       const r=await dbGet(monthKey(vy,vm));
       let loadedData=r||EMPTY_MONTH();
 
+      // ── LIMPEZA AUTOMÁTICA: remover markers legados de faturas ──
+      // Fatura de cartão NUNCA vive em "fixed". Só em settings.billsToPay.
+      // Se ainda existir algum marker antigo (isAutoInvoice, isCardInvoice,
+      // isLegacyMarker, ou nome começando com "Fatura "), removemos aqui.
+      if(loadedData.fixed&&loadedData.fixed.length>0){
+        const originalLen=loadedData.fixed.length;
+        loadedData.fixed=loadedData.fixed.filter(f=>{
+          if(f.isAutoInvoice) return false;
+          if(f.isCardInvoice) return false;
+          if(f.isLegacyMarker) return false;
+          if(typeof f.name==="string"&&f.name.startsWith("Fatura ")) return false;
+          return true;
+        });
+        if(loadedData.fixed.length!==originalLen){
+          // Salva a versão limpa no DB para não repetir a limpeza depois
+          dbSet(monthKey(vy,vm),loadedData);
+        }
+      }
+
       // ── Auto-copiar fixas recorrentes APENAS se este mês estiver VAZIO ──
       // (evita duplicar quando você já lançou as fixas manualmente)
       const isMonthEmpty=!loadedData.fixed||loadedData.fixed.length===0;
@@ -1362,12 +1371,17 @@ function AppInner({session}){
         const pmAuto=vm===0?11:vm-1, pyAuto=vm===0?vy-1:vy;
         const prev=await dbGet(monthKey(pyAuto,pmAuto));
         if(prev&&prev.fixed&&prev.fixed.length>0){
-          const recurringFixed=prev.fixed.filter(f=>
-            f.recurring!==false &&
-            !f.isAutoInvoice &&
-            !f.closedInMonth
-          );
-          const toAdd=recurringFixed.map(f=>({...f,id:uid(),paid:false,recurring:f.recurring!==false}));
+          const recurringFixed=prev.fixed.filter(f=>{
+            // Fatura de cartão NUNCA é recorrente
+            if(f.isAutoInvoice) return false;
+            if(f.isCardInvoice) return false;
+            if(f.isLegacyMarker) return false;
+            if(f.closedInMonth) return false;
+            if(typeof f.name==="string"&&f.name.startsWith("Fatura ")) return false;
+            // Só copia fixas explicitamente marcadas como recorrentes
+            return f.recurring!==false;
+          });
+          const toAdd=recurringFixed.map(f=>({...f,id:uid(),paid:false,bank:"",paidDate:null,recurring:f.recurring!==false}));
           if(toAdd.length>0){
             loadedData={...loadedData,fixed:toAdd,_autoCopyDone:true};
             await dbSet(monthKey(vy,vm),loadedData);
