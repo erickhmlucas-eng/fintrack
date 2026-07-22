@@ -1406,7 +1406,7 @@ function AppInner({session}){
           setPrevBalance(pr._balance);
         } else {
           const inc=(pr.incomes||[]).reduce((s,t)=>s+t.value,0);
-          const exp=(pr.expenses||[]).reduce((s,t)=>s+t.value,0);
+          const exp=(pr.expenses||[]).filter(t=>!t.isTransfer).reduce((s,t)=>s+t.value,0);
           const fix=(pr.fixed||[]).reduce((s,t)=>t.paid?(s+(t.value||0)):s,0);
           const inv=(pr.investments||[]).filter(e=>!isWithdrawal(e)).reduce((s,t)=>s+t.value,0);
           setPrevBalance(inc-exp-fix-inv); // permite negativo
@@ -1434,7 +1434,7 @@ function AppInner({session}){
     setSyncing(true);
     saveTimer.current=setTimeout(()=>{
       const inc=(data.incomes||[]).reduce((s,t)=>s+t.value,0);
-      const exp=(data.expenses||[]).reduce((s,t)=>s+t.value,0);
+      const exp=(data.expenses||[]).filter(t=>!t.isTransfer).reduce((s,t)=>s+t.value,0);
       const fix=(data.fixed||[]).reduce((s,t)=>t.paid?(s+(t.value||0)):s,0);
       const inv=(data.investments||[]).filter(e=>!isWithdrawal(e)).reduce((s,t)=>s+t.value,0);
       // Parcelas de dívidas pagas SEM expense entry (backward compat)
@@ -1603,8 +1603,7 @@ function AppInner({session}){
   const alerts=[];
   if(!loading&&rawIncome===0) alerts.push({type:"warn",msg:`Sem entradas em ${MONTHS_FULL[vm]}`});
   if(!loading&&balance<0&&rawIncome>0) alerts.push({type:"danger",msg:`Saldo negativo: ${fmt(Math.abs(balance))}`});
-  if(!loading&&balance>0&&rawIncome>0) alerts.push({type:"ok",msg:`Você guardou ${((balance/totalIncome)*100).toFixed(0)}% da renda 👏`});
-  if(!loading&&prevBalance>0) alerts.push({type:"ok",msg:`Saldo de ${MONTHS_FULL[vm===0?11:vm-1]}: +${fmt(prevBalance)}`});
+  if(!loading&&balance>0&&rawIncome>0) alerts.push({type:"ok",msg:`Você guardou ${rawIncome>0?((balance/rawIncome)*100).toFixed(0):0}% da renda 👏`});
   if(!loading&&unpaidFixed>0) alerts.push({type:"warn",msg:`${unpaidFixed} fixa(s)/fatura(s) pendente(s)`});
   bankCredit.forEach(b=>{if(b.limit>0&&b.spent>0){const p=(b.spent/b.limit)*100;if(p>=80)alerts.push({type:p>=100?"danger":"warn",msg:`${b.name}: ${p.toFixed(0)}% do limite`});}});
 
@@ -1716,7 +1715,7 @@ function AppInner({session}){
       const d=await dbGet(monthKey(vy,m));
       if(!d) continue;
       const inc=(d.incomes||[]).reduce((s,t)=>s+t.value,0);
-      const exp=(d.expenses||[]).reduce((s,t)=>s+t.value,0);
+      const exp=(d.expenses||[]).filter(t=>!t.isTransfer).reduce((s,t)=>s+t.value,0);
       const fix=(d.fixed||[]).filter(f=>f.paid).reduce((s,t)=>s+(t.value||0),0);
       const inv=(d.investments||[]).filter(e=>!isWithdrawal(e)).reduce((s,t)=>s+t.value,0);
       const mkStr=`${vy}-${m}`;
@@ -2110,9 +2109,9 @@ function AppInner({session}){
           <div className="metrics4">
             <div className="mc4 green">
               <div className="mc4-icon">📈</div>
-              <div className="mc4-label">Receita</div>
+              <div className="mc4-label">Receita do mês</div>
               <div className="mc4-value" style={{color:"var(--green)"}}>{fmt(rawIncome)}</div>
-              {prevBalance>0&&<div className="mc4-sub">+{fmt(prevBalance)} anterior</div>}
+              <div className="mc4-sub">{(data.incomes||[]).length} lançamento(s)</div>
             </div>
             <div className="mc4 red">
               <div className="mc4-icon">📉</div>
@@ -2472,8 +2471,9 @@ function AppInner({session}){
         {!loading&&page==="annual"&&(
           <div className="pg">
             <div className="st">Visão Anual — {vy}</div>
+            <div style={{fontSize:10,color:"var(--muted)",marginBottom:8,marginTop:-4}}>💡 "Sobrou" = fluxo do mês (entradas − saídas). Para o saldo real de cada banco, use a aba 💼 Carteira.</div>
             <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:7}}>
-              {[{l:"Entradas",v:fmt(annualInc),c:"g"},{l:"Saídas",v:fmt(annualOut),c:"w"},{l:"Saldo",v:fmt(annualInc-annualOut),c:"p"}].map(m=>(
+              {[{l:"Entradas",v:fmt(annualInc),c:"g"},{l:"Saídas",v:fmt(annualOut),c:"w"},{l:"Sobrou",v:fmt(annualInc-annualOut),c:"p"}].map(m=>(
                 <div key={m.l} className={`mc ${m.c}`}><div className="ml">{m.l}</div><div className={`mv ${m.c}`}>{m.v}</div></div>
               ))}
             </div>
@@ -2493,7 +2493,7 @@ function AppInner({session}){
             </div>
             <div className="card" style={{overflowX:"auto"}}>
               <table className="atable">
-                <thead><tr><th>Mês</th><th>Entrada</th><th>Gastos</th><th>Fixas</th><th>Invest.</th><th>Saldo</th></tr></thead>
+                <thead><tr><th>Mês</th><th>Entrada</th><th>Gastos</th><th>Fixas</th><th>Invest.</th><th>Sobrou</th></tr></thead>
                 <tbody>{annualRows.map(r=>(
                   <tr key={r.i} className={r.i===vm?"cur":""}>
                     <td>{MONTHS[r.i]}</td>
