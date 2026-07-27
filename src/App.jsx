@@ -1,147 +1,445 @@
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { createClient } from "@supabase/supabase-js";
+
+/* ════════════════════════════════════════════════════════════════════════════
+   FinTrack v2 — Controle financeiro pessoal
+   Arquitetura: bloco único de dados + tudo derivado (nada calculado é salvo)
+   ─ 1 chave no Supabase (fintrack:v2:data) salva atômica a cada mutação
+   ─ Saldo por conta, faturas, reservas e métricas SEMPRE recalculados na hora
+   ─ Contas e categorias referenciadas por ID (renomear não quebra histórico)
+   ─ Crédito mora no mesmo extrato (forma:"credito"); fatura = filtro por mês
+   ─ Migrador embutido lê os dados antigos (fintrack:*:v9) uma única vez
+   ════════════════════════════════════════════════════════════════════════════ */
 
 const SUPABASE_URL = "https://rjcgvlstriiepixogqnl.supabase.co";
 const SUPABASE_KEY = "sb_publishable_qmzTdrWgLlNUiihld4Q3nw_iz_ED6aS";
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+const DATA_KEY = "fintrack:v2:data";
 
-async function dbGet(key) {
-  try {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return null;
-    const { data } = await supabase.from("user_data").select("value").eq("key", key).eq("user_id", user.id).single();
-    return data?.value ?? null;
-  } catch(_) { return null; }
-}
-async function dbSet(key, value) {
-  try {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return;
-    await supabase.from("user_data").upsert(
-      { key, value, user_id: user.id, updated_at: new Date().toISOString() },
-      { onConflict: "user_id,key" }
-    );
-  } catch(_) {}
-}
-
-// ─── ERROR BOUNDARY ──────────────────────────────────────────────────────────
-class ErrorBoundary extends React.Component{
-  constructor(props){super(props);this.state={hasError:false,error:null};}
-  static getDerivedStateFromError(error){return{hasError:true,error};}
-  componentDidCatch(error,info){console.error("FinTrack Error:",error,info);}
-  render(){
-    if(this.state.hasError){
-      return(
-        <div style={{padding:24,background:"var(--card)",border:"1px solid var(--border)",borderRadius:14,margin:12}}>
-          <div style={{fontSize:14,fontWeight:700,color:"var(--wine)",marginBottom:8}}>⚠️ Erro nesta seção</div>
-          <div style={{fontSize:12,color:"var(--muted)",marginBottom:12}}>{String(this.state.error?.message||"Erro desconhecido")}</div>
-          <button onClick={()=>this.setState({hasError:false,error:null})} style={{background:"var(--accent)",border:"none",color:"#fff",fontFamily:"'Sora',sans-serif",fontSize:12,fontWeight:700,borderRadius:9,padding:"8px 16px",cursor:"pointer"}}>Tentar novamente</button>
-        </div>
-      );
-    }
-    return this.props.children;
-  }
-}
-
-// ─── CONSTANTS ────────────────────────────────────────────────────────────────
-const MONTHS_FULL = ["Janeiro","Fevereiro","Março","Abril","Maio","Junho","Julho","Agosto","Setembro","Outubro","Novembro","Dezembro"];
-const MONTHS = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"];
-
-const DEFAULT_BANKS = [
-  {id:"c6",name:"C6",color:"#2d2d2d",limit:0,currentBalance:0,adjustDate:null},
-  {id:"porto",name:"Porto",color:"#1a4fcc",limit:0,currentBalance:0,adjustDate:null},
-  {id:"santander",name:"Santander",color:"#e8001c",limit:0,currentBalance:0,adjustDate:null},
-  {id:"nubank",name:"Nubank",color:"#8a05be",limit:0,currentBalance:0,adjustDate:null},
-];
-
-const TRANSFER_CATEGORY = "🔄 Transferência entre contas";
-
-const DEFAULT_EXPENSE_CATS = [
-  {id:"alimentacao",name:"Alimentação",icon:"🍔",color:"#c0392b"},
-  {id:"transporte",name:"Transporte",icon:"🚌",color:"#922b21"},
-  {id:"gasolina",name:"Gasolina",icon:"⛽",color:"#a93226"},
-  {id:"farmacia",name:"Farmácia",icon:"💊",color:"#b03a2e"},
-  {id:"compras",name:"Compras online",icon:"📦",color:"#96281b"},
-  {id:"roupa",name:"Roupa / Tênis",icon:"👟",color:"#c0392b"},
-  {id:"cursos",name:"Cursos online",icon:"📚",color:"#00cec9"},
-  {id:"carro",name:"Carro / Seguro / IPVA",icon:"🚗",color:"#b2c6d8"},
-  {id:"cabelo",name:"Corte de cabelo",icon:"✂️",color:"#a04000"},
-  {id:"lazer",name:"Lazer",icon:"🎮",color:"#6c5ce7"},
-  {id:"saude",name:"Saúde",icon:"🏥",color:"#00b894"},
-  {id:"assinaturas",name:"Assinaturas",icon:"📺",color:"#74b9ff"},
-  {id:"moradia",name:"Moradia",icon:"🏠",color:"#784212"},
-  {id:"outros",name:"Outros",icon:"📌",color:"#7b241c"},
-];
-
-const INVEST_TYPES = ["Reserva de Emergência","Meta pessoal","CDB","Poupança","Tesouro Direto","Ações","Cripto","Outro","Retirada — Reserva","Retirada — Meta"];
-const METHODS = ["PIX","Débito","Dinheiro","Boleto"];
-const BANK_COLORS = ["#2d2d2d","#1a4fcc","#e8001c","#8a05be","#f78c00","#cc092f","#00b894","#6c5ce7","#555577"];
-const CAT_COLORS = ["#c0392b","#922b21","#a93226","#6c5ce7","#00b894","#74b9ff","#f78c00","#784212","#00cec9","#8a05be","#555577"];
-const CAT_ICONS = ["🍔","🚌","⛽","💊","📦","👟","📚","🚗","✂️","🎮","🏥","📺","🏠","📌","🎯","💡","🎁","🐾","✈️","🏋️","🎵","🛒"];
-
-const fmt = v => new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL"}).format(v||0);
-const uid = () => Math.random().toString(36).slice(2)+Date.now().toString(36);
-const today = new Date();
-const monthKey = (y,m) => `fintrack:month:${y}:${m}:v9`;
-const creditKey = (y,m) => `fintrack:credit:${y}:${m}:v9`;
-const SETTINGS_KEY = "fintrack:settings:v9";
-const DEBTS_KEY = "fintrack:debts:v9";
-const EMPTY_MONTH = () => ({incomes:[],expenses:[],fixed:[],investments:[],notes:""});
-const EMPTY_CREDIT = () => ({purchases:[]});
-const DEFAULT_SETTINGS = {
-  name:"",
-  emergencyGoal:10000,emergencyBase:0,emergencyDelta:0,
-  personalGoalName:"Meta X",personalGoalValue:100000,personalBase:0,personalDelta:0,
-  banks:DEFAULT_BANKS,catBudgets:{},expenseCats:DEFAULT_EXPENSE_CATS,
+/* ─── Helpers ─────────────────────────────────────────────────────────────── */
+const uid = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4);
+const fmt = (v) => new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(Number.isFinite(v) ? v : 0);
+const r2 = (v) => Math.round(v * 100) / 100;
+const MESES = ["Janeiro","Fevereiro","Março","Abril","Maio","Junho","Julho","Agosto","Setembro","Outubro","Novembro","Dezembro"];
+const MESES_C = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"];
+const hoje = () => { const t = new Date(); return `${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,"0")}-${String(t.getDate()).padStart(2,"0")}`; };
+const keyOf = (dt) => `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,"0")}`;
+const mesAtualKey = () => keyOf(new Date());
+const shiftKey = (mk, delta) => { const [y,m] = mk.split("-").map(Number); const d = new Date(y, m-1+delta, 1); return keyOf(d); };
+const labelKey = (mk) => { const [y,m] = mk.split("-"); return `${MESES[Number(m)-1]} ${y}`; };
+const curtoKey = (mk) => MESES_C[Number(mk.split("-")[1])-1];
+const dmy = (iso) => iso ? iso.slice(5).split("-").reverse().join("/") : "";
+const parseVal = (s) => {
+  if (typeof s === "number") return Math.abs(s);
+  let t = String(s||"").replace(/R\$\s*/gi,"").replace(/\s/g,"").trim();
+  if (/^-?\d{1,3}(\.\d{3})*,\d{1,2}$/.test(t)) return Math.abs(parseFloat(t.replace(/\./g,"").replace(",",".")));
+  if (/^-?\d{1,3}(,\d{3})*\.\d{1,2}$/.test(t)) return Math.abs(parseFloat(t.replace(/,/g,"")));
+  return Math.abs(parseFloat(t.replace(",","."))||0);
 };
+const FORMAS = [["pix","PIX"],["debito","Débito"],["dinheiro","Dinheiro"],["boleto","Boleto"]];
+const FORMA_LABEL = { pix:"PIX", debito:"Débito", dinheiro:"Dinheiro", boleto:"Boleto", credito:"Crédito" };
+const CORES = ["#6366f1","#8b5cf6","#0ea5e9","#22c55e","#f59e0b","#ef4444","#ec4899","#14b8a6","#a855f7","#2d2d2d","#1a4fcc","#e8001c","#8a05be","#64748b"];
+const ICONES = ["🍔","🚌","⛽","💊","📦","👟","📚","🚗","✂️","🎮","🏥","📺","🏠","📌","🎯","💡","🎁","🐾","✈️","🏋️","🎵","🛒","🥖","💈"];
 
-const NAV = [
-  {id:"dashboard",icon:"📊",label:"Início"},
-  {id:"wallet",   icon:"💼",label:"Carteira"},
-  {id:"bills",    icon:"📅",label:"A pagar"},
-  {id:"incomes",  icon:"📥",label:"Entradas"},
-  {id:"expenses", icon:"📤",label:"Gastos"},
-  {id:"fixed",    icon:"📋",label:"Fixas"},
-  {id:"cards",    icon:"💳",label:"Cartões"},
-  {id:"investments",icon:"💰",label:"Reservas"},
-  {id:"debts",    icon:"🔗",label:"Dívidas"},
-  {id:"planning", icon:"🎯",label:"Planejar"},
-  {id:"annual",   icon:"📅",label:"Anual"},
-  {id:"settings", icon:"⚙️",label:"Config"},
+const CATS_SEED = [
+  {nome:"Alimentação",icon:"🍔",cor:"#ef4444"},{nome:"Transporte",icon:"🚌",cor:"#f59e0b"},
+  {nome:"Gasolina",icon:"⛽",cor:"#ea580c"},{nome:"Farmácia",icon:"💊",cor:"#ec4899"},
+  {nome:"Compras online",icon:"📦",cor:"#8b5cf6"},{nome:"Roupa / Tênis",icon:"👟",cor:"#db2777"},
+  {nome:"Cursos online",icon:"📚",cor:"#14b8a6"},{nome:"Carro / Seguro / IPVA",icon:"🚗",cor:"#0ea5e9"},
+  {nome:"Corte de cabelo",icon:"✂️",cor:"#a855f7"},{nome:"Lazer",icon:"🎮",cor:"#6366f1"},
+  {nome:"Saúde",icon:"🏥",cor:"#22c55e"},{nome:"Assinaturas",icon:"📺",cor:"#2563eb"},
+  {nome:"Moradia",icon:"🏠",cor:"#ca8a04"},{nome:"Outros",icon:"📌",cor:"#64748b"},
 ];
 
-function isWithdrawal(e){ return e.type==="Retirada — Reserva"||e.type==="Retirada — Meta"; }
-function reserveDelta(entry,sign=1){
-  if(entry.type==="Reserva de Emergência") return {ed:sign*entry.value,pd:0};
-  if(entry.type==="Meta pessoal")          return {ed:0,pd:sign*entry.value};
-  if(entry.type==="Retirada — Reserva")    return {ed:-sign*entry.value,pd:0};
-  if(entry.type==="Retirada — Meta")       return {ed:0,pd:-sign*entry.value};
-  return {ed:0,pd:0};
+/* ─── Modelo de dados ─────────────────────────────────────────────────────── */
+/* Bloco único:
+   {
+     version: 2,
+     settings: { name, theme, emergencyGoal, personalGoalName, personalGoalValue,
+                 catBudgets: {catId: valor}, reservaAncora: {emergencia:{valor,data}, pessoal:{valor,data}} },
+     accounts: [ {id, nome, cor, saldoInicial, ancoraData, temCartao, limite, fechamento, vencimento} ],
+     cats:     [ {id, nome, icon, cor} ],
+     months:   { "2026-07": { entradas:[], gastos:[], fixas:[], reservas:[], faturasPagas:{}, notes:"" } },
+     dividas:  [ {id, nome, catId, total, parcelas, valorParcela, inicioMes, pagos:[], quitada} ],
+   }
+   Transação de gasto: {id, catId, descricao, valor, forma, accId, data,
+                        parcela:{i,n,grupo}|null, fixaId?, dividaId?, transferParaId?}
+   Entrada: {id, fonte, valor, data, accId}
+   Fixa:    {id, nome, valor, dia, catId, recorrente, pago, gastoId}
+   Reserva: {id, tipo:"emergencia"|"pessoal"|"outro", nome, valor, data, accId, retirada}
+   faturasPagas: { [cardAccId]: {contaId, data} }  → fatura DESTE mês paga por aquela conta
+*/
+
+const novoMes = () => ({ entradas:[], gastos:[], fixas:[], reservas:[], faturasPagas:{}, notes:"" });
+
+const seedData = () => ({
+  version: 2,
+  settings: {
+    name:"", theme:"dark",
+    emergencyGoal:10000, personalGoalName:"Meta pessoal", personalGoalValue:100000,
+    catBudgets:{}, reservaAncora:{ emergencia:{valor:0,data:null}, pessoal:{valor:0,data:null} },
+  },
+  accounts: [
+    {id:uid(),nome:"Nubank",cor:"#8a05be",saldoInicial:0,ancoraData:null,temCartao:true,limite:0,fechamento:1,vencimento:8},
+    {id:uid(),nome:"C6",cor:"#2d2d2d",saldoInicial:0,ancoraData:null,temCartao:true,limite:0,fechamento:1,vencimento:8},
+  ],
+  cats: CATS_SEED.map(c=>({id:uid(),...c})),
+  months: { [mesAtualKey()]: novoMes() },
+  dividas: [],
+});
+
+function ensureMonth(d, mk){ if(!d.months[mk]) d.months[mk]=novoMes(); const m=d.months[mk];
+  if(!m.entradas)m.entradas=[]; if(!m.gastos)m.gastos=[]; if(!m.fixas)m.fixas=[];
+  if(!m.reservas)m.reservas=[]; if(!m.faturasPagas)m.faturasPagas={}; return m; }
+
+/* migrate(): TODA evolução de schema acontece só aqui, na carga. */
+function migrate(d){
+  if(!d||typeof d!=="object") return seedData();
+  if(!d.settings) d.settings={};
+  const s=d.settings;
+  if(!s.theme) s.theme="dark";
+  if(s.emergencyGoal==null) s.emergencyGoal=10000;
+  if(!s.personalGoalName) s.personalGoalName="Meta pessoal";
+  if(s.personalGoalValue==null) s.personalGoalValue=100000;
+  if(!s.catBudgets) s.catBudgets={};
+  if(!s.reservaAncora) s.reservaAncora={emergencia:{valor:0,data:null},pessoal:{valor:0,data:null}};
+  if(!s.reservaAncora.emergencia) s.reservaAncora.emergencia={valor:0,data:null};
+  if(!s.reservaAncora.pessoal) s.reservaAncora.pessoal={valor:0,data:null};
+  if(!Array.isArray(d.accounts)||!d.accounts.length) d.accounts=seedData().accounts;
+  d.accounts.forEach(a=>{ if(a.temCartao==null)a.temCartao=true; if(a.fechamento==null)a.fechamento=1; if(a.vencimento==null)a.vencimento=8; if(a.saldoInicial==null)a.saldoInicial=0; });
+  if(!Array.isArray(d.cats)||!d.cats.length) d.cats=seedData().cats;
+  d.cats.forEach(c=>{ if(!c.id)c.id=uid(); });
+  if(!d.months) d.months={};
+  Object.keys(d.months).forEach(mk=>{
+    const m=ensureMonth(d,mk);
+    /* fixa paga sem gasto vinculado → cria o gasto (fonte única de verdade é o gasto) */
+    m.fixas.forEach(f=>{
+      if(f.pago&&!f.gastoId){
+        const gid=uid();
+        m.gastos.unshift({id:gid,catId:f.catId||d.cats[d.cats.length-1].id,descricao:f.nome,valor:f.valor||0,forma:"pix",accId:f.accIdPago||"",data:f.dataPago||hoje(),parcela:null,fixaId:f.id});
+        f.gastoId=gid;
+      }
+      if(!f.pago) f.gastoId=null;
+    });
+  });
+  if(!Array.isArray(d.dividas)) d.dividas=[];
+  d.version=2;
+  return d;
 }
 
-function calcMonthBalance(monthData){
-  if(!monthData) return 0;
-  const inc=(monthData.incomes||[]).reduce((s,t)=>s+t.value,0);
-  const exp=(monthData.expenses||[]).reduce((s,t)=>s+t.value,0);
-  const fix=(monthData.fixed||[]).reduce((s,t)=>s+(t.paid?(t.value||0):0),0);
-  const inv=(monthData.investments||[]).filter(e=>!isWithdrawal(e)).reduce((s,t)=>s+t.value,0);
-  return inc-exp-fix-inv;
+/* ─── Derivações (a contabilidade única do app) ───────────────────────────── */
+
+const contaById=(d,id)=>(d.accounts||[]).find(a=>a.id===id);
+const catById=(d,id)=>(d.cats||[]).find(c=>c.id===id)||{nome:"—",icon:"📌",cor:"#64748b"};
+
+/* Fatura do cartão X no mês mk = soma dos gastos de crédito daquele cartão no mês */
+function faturaDe(d, mk, cardId){
+  const m=d.months[mk]; if(!m) return 0;
+  return (m.gastos||[]).filter(g=>g.forma==="credito"&&g.accId===cardId).reduce((s,g)=>s+g.valor,0);
+}
+function gastosCartao(d, mk, cardId){
+  const m=d.months[mk]; if(!m) return [];
+  return (m.gastos||[]).filter(g=>g.forma==="credito"&&g.accId===cardId);
 }
 
-// ─── UI HELPERS ───────────────────────────────────────────────────────────────
-function Donut({data,size=140,thick=24,label,sublabel}){
+/* Em que mês de fatura cai uma compra feita em `dataCompra` num cartão com dia de fechamento F */
+function mesFaturaDe(dataCompra, fechamento){
+  const dt=new Date((dataCompra||hoje())+"T12:00");
+  let m=dt.getMonth(), y=dt.getFullYear();
+  if(fechamento>1 && dt.getDate()>=fechamento){ m++; if(m>11){m=0;y++;} }
+  else if(fechamento<=1 && false){ /* fechamento dia 1: compra sempre no mês corrente */ }
+  return `${y}-${String(m+1).padStart(2,"0")}`;
+}
+
+/* Saldo real de uma CONTA, sempre derivado:
+   saldoInicial (ancorado em ancoraData) + entradas − gastos débito/pix
+   ± transferências − faturas pagas por esta conta ∓ aportes/retiradas de reserva */
+function saldoConta(d, accId){
+  const acc=contaById(d,accId); if(!acc) return 0;
+  const anc=acc.ancoraData||null;
+  const conta=(dt)=>!anc||!dt||dt>=anc;
+  let s=acc.saldoInicial||0;
+  Object.entries(d.months||{}).forEach(([mk,m])=>{
+    (m.entradas||[]).forEach(e=>{ if(e.accId===accId&&conta(e.data)) s+=e.valor; });
+    (m.gastos||[]).forEach(g=>{
+      if(g.forma==="credito") return;            /* crédito só sai quando a fatura é paga */
+      if(!conta(g.data)) return;
+      if(g.transferParaId){ if(g.accId===accId)s-=g.valor; if(g.transferParaId===accId)s+=g.valor; return; }
+      if(g.accId===accId) s-=g.valor;
+    });
+    (m.reservas||[]).forEach(r=>{ if(r.accId!==accId||!conta(r.data)) return; s+=r.retirada?r.valor:-r.valor; });
+    Object.entries(m.faturasPagas||{}).forEach(([cardId,fp])=>{
+      if(fp&&fp.contaId===accId&&conta(fp.data)) s-=faturaDe(d,mk,cardId);
+    });
+  });
+  return r2(s);
+}
+
+/* Métricas de um mês — função pura, sem estado salvo.
+   Saídas do mês = débito/pix + faturas pagas + aportes. Crédito não pago = "comprometido". */
+function metricsMes(d, mk){
+  const m=d.months[mk];
+  if(!m) return {entradas:0,gastosDeb:0,faturasPagas:0,aportes:0,retiradas:0,saidas:0,sobra:0,comprometido:0,fixasPend:0,gastoCredito:0};
+  const entradas=(m.entradas||[]).reduce((s,e)=>s+e.valor,0);
+  const gastosDeb=(m.gastos||[]).filter(g=>g.forma!=="credito"&&!g.transferParaId).reduce((s,g)=>s+g.valor,0);
+  const gastoCredito=(m.gastos||[]).filter(g=>g.forma==="credito").reduce((s,g)=>s+g.valor,0);
+  let faturasPagasV=0, comprometido=0;
+  (d.accounts||[]).filter(a=>a.temCartao).forEach(a=>{
+    const fv=faturaDe(d,mk,a.id);
+    if(!fv) return;
+    if(m.faturasPagas&&m.faturasPagas[a.id]) faturasPagasV+=fv; else comprometido+=fv;
+  });
+  const aportes=(m.reservas||[]).filter(r=>!r.retirada).reduce((s,r)=>s+r.valor,0);
+  const retiradas=(m.reservas||[]).filter(r=>r.retirada).reduce((s,r)=>s+r.valor,0);
+  const fixasPend=(m.fixas||[]).filter(f=>!f.pago).length;
+  const saidas=gastosDeb+faturasPagasV+aportes;
+  return {entradas,gastosDeb,faturasPagas:faturasPagasV,aportes,retiradas,saidas,sobra:entradas-saidas,comprometido,fixasPend,gastoCredito};
+}
+
+/* Totais de reserva: âncora + aportes − retiradas depois da data da âncora */
+function reservaTotais(d){
+  const anc=d.settings.reservaAncora||{};
+  const calc=(tipo)=>{
+    const a=anc[tipo]||{valor:0,data:null};
+    let t=a.valor||0;
+    Object.values(d.months||{}).forEach(m=>(m.reservas||[]).forEach(r=>{
+      if(r.tipo!==tipo) return;
+      if(a.data&&r.data&&r.data<a.data) return;
+      t+=r.retirada?-r.valor:r.valor;
+    }));
+    return r2(t);
+  };
+  return {emergencia:calc("emergencia"), pessoal:calc("pessoal")};
+}
+
+/* Gastos por categoria de um mês (inclui crédito — é consumo real) */
+function gastosPorCat(d, mk){
+  const m=d.months[mk]; const o={};
+  if(!m) return o;
+  (m.gastos||[]).forEach(g=>{ if(g.transferParaId) return; o[g.catId]=(o[g.catId]||0)+g.valor; });
+  return o;
+}
+
+/* Alertas inteligentes derivados (média dos 3 meses anteriores) */
+function gerarAlertas(d, mk){
+  const out=[];
+  const met=metricsMes(d,mk);
+  const atual=gastosPorCat(d,mk);
+  const past={}; let n=0;
+  for(let i=1;i<=3;i++){ const k=shiftKey(mk,-i); const m=d.months[k]; if(!m) continue; n++;
+    const g=gastosPorCat(d,k); Object.entries(g).forEach(([c,v])=>{past[c]=(past[c]||0)+v;}); }
+  if(n>0){
+    Object.entries(atual).forEach(([c,v])=>{
+      const avg=(past[c]||0)/n;
+      if(avg>0&&v>=avg*2.5&&v>=100){ const cat=catById(d,c);
+        out.push({icon:"⚠️",tipo:"warn",msg:`${cat.icon} ${cat.nome}: ${fmt(v)} este mês (${(v/avg).toFixed(1)}x sua média de ${fmt(avg)})`}); }
+    });
+  }
+  const rt=reservaTotais(d);
+  if(d.settings.emergencyGoal>0&&rt.emergencia<d.settings.emergencyGoal*0.2)
+    out.push({icon:"🛡️",tipo:"warn",msg:`Reserva em ${((rt.emergencia/d.settings.emergencyGoal)*100).toFixed(0)}% da meta. Priorize aportes antes de parcelar compras novas.`});
+  /* parcelas de dívida vs renda média */
+  let inc=0,im=0;
+  for(let i=1;i<=3;i++){ const m=d.months[shiftKey(mk,-i)]; if(!m) continue;
+    const v=(m.entradas||[]).reduce((s,e)=>s+e.valor,0); if(v>0){inc+=v;im++;} }
+  const rendaMedia=im>0?inc/im:met.entradas;
+  const parcelasMes=d.dividas.filter(dv=>!dv.quitada).reduce((s,dv)=>{
+    const idx=idxParcela(dv,mk); return idx>=0&&idx<dv.parcelas?s+dv.valorParcela:s; },0);
+  if(rendaMedia>0&&parcelasMes>rendaMedia*0.3)
+    out.push({icon:"🔗",tipo:"warn",msg:`Parcelas de dívidas comprometem ${((parcelasMes/rendaMedia)*100).toFixed(0)}% da sua renda média. Evite novas dívidas.`});
+  if(met.comprometido>0&&rendaMedia>0&&met.comprometido>rendaMedia*0.5)
+    out.push({icon:"💳",tipo:"warn",msg:`Faturas em aberto somam ${fmt(met.comprometido)} — mais da metade da renda média.`});
+  return out.slice(0,4);
+}
+
+function idxParcela(dv, mk){
+  const [y,m]=mk.split("-").map(Number);
+  const [iy,im]=dv.inicioMes.split("-").map(Number);
+  return (y*12+m)-(iy*12+im);
+}
+
+/* Sugerir categoria pela memória de descrições já lançadas */
+function memoriaCategorias(d){
+  const mem={};
+  Object.values(d.months||{}).forEach(m=>(m.gastos||[]).forEach(g=>{
+    if(!g.descricao||!g.catId) return;
+    const k=g.descricao.toLowerCase().trim().slice(0,30);
+    if(!mem[k]) mem[k]={};
+    mem[k][g.catId]=(mem[k][g.catId]||0)+1;
+  }));
+  return mem;
+}
+function sugerirCat(desc, mem, def){
+  if(!desc) return def;
+  const k=desc.toLowerCase().trim().slice(0,30);
+  const top=(o)=>Object.entries(o).sort((a,b)=>b[1]-a[1])[0][0];
+  if(mem[k]) return top(mem[k]);
+  for(const mk in mem){ if(mk.length<4) continue; if(k.includes(mk)||mk.includes(k)) return top(mem[mk]); }
+  return def;
+}
+
+/* ─── Migrador do FinTrack antigo (v9) ────────────────────────────────────── */
+/* Lê todas as chaves fintrack:*:v9 do Supabase e converte para o modelo novo.
+   Importa transações reais; DESCARTA artefatos calculados:
+   ajustes de saldo, entradas automáticas de retirada, marcadores de fatura. */
+async function migrarLegado(){
+  const {data:{user}}=await supabase.auth.getUser();
+  if(!user) return null;
+  const {data:rows,error}=await supabase.from("user_data").select("key,value")
+    .eq("user_id",user.id).like("key","fintrack:%:v9");
+  if(error||!rows||!rows.length) return null;
+
+  const old={months:{},credits:{},settings:null,debts:[]};
+  rows.forEach(r=>{
+    const k=r.key;
+    let mm;
+    if(k==="fintrack:settings:v9") old.settings=r.value;
+    else if(k==="fintrack:debts:v9") old.debts=r.value||[];
+    else if((mm=k.match(/^fintrack:month:(\d+):(\d+):v9$/))) old.months[`${mm[1]}-${String(Number(mm[2])+1).padStart(2,"0")}`]=r.value;
+    else if((mm=k.match(/^fintrack:credit:(\d+):(\d+):v9$/))) old.credits[`${mm[1]}-${String(Number(mm[2])+1).padStart(2,"0")}`]=r.value;
+  });
+  if(!old.settings&&!Object.keys(old.months).length) return null;
+
+  const d=seedData();
+  const os=old.settings||{};
+  d.settings.name=os.name||"";
+  d.settings.emergencyGoal=os.emergencyGoal||10000;
+  d.settings.personalGoalName=os.personalGoalName||"Meta pessoal";
+  d.settings.personalGoalValue=os.personalGoalValue||100000;
+  /* âncoras de reserva: o total antigo (base+delta) vira a base de hoje */
+  d.settings.reservaAncora={
+    emergencia:{valor:r2((os.emergencyBase||0)+(os.emergencyDelta||0)),data:hoje()},
+    pessoal:{valor:r2((os.personalBase||0)+(os.personalDelta||0)),data:hoje()},
+  };
+
+  /* contas: bancos antigos → contas por ID, com cartão embutido */
+  const accByName={};
+  d.accounts=(os.banks||[]).map(b=>{
+    const a={id:uid(),nome:b.name,cor:b.color||"#6366f1",saldoInicial:b.currentBalance||0,
+      ancoraData:b.adjustDate||null,temCartao:true,limite:b.limit||0,fechamento:1,vencimento:8};
+    accByName[b.name]=a.id; return a;
+  });
+  if(!d.accounts.length) d.accounts=seedData().accounts;
+  const accId=(name)=>accByName[name]||"";
+
+  /* categorias antigas → por ID */
+  const catByName={};
+  d.cats=(os.expenseCats&&os.expenseCats.length?os.expenseCats:CATS_SEED).map(c=>{
+    const nc={id:uid(),nome:c.name||c.nome,icon:c.icon||"📌",cor:c.color||c.cor||"#64748b"};
+    catByName[nc.nome]=nc.id; return nc;
+  });
+  const catId=(name)=>catByName[name]||d.cats[d.cats.length-1].id;
+  d.settings.catBudgets={};
+  Object.entries(os.catBudgets||{}).forEach(([nome,v])=>{ if(v>0&&catByName[nome]) d.settings.catBudgets[catByName[nome]]=v; });
+
+  /* dívidas: paidMonths antigo usa mês 0-indexado ("2026-6") → converter */
+  const convMk=(s)=>{ const [y,m]=String(s).split("-").map(Number); return `${y}-${String(m+1).padStart(2,"0")}`; };
+  d.dividas=(old.debts||[]).map(dv=>({
+    id:dv.id||uid(),nome:dv.name,catId:catId(dv.category||"Outros"),total:dv.totalValue,
+    parcelas:dv.installments,valorParcela:dv.monthlyValue,
+    inicioMes:`${dv.startYear}-${String(Number(dv.startMonth)+1).padStart(2,"0")}`,
+    pagos:(dv.paidMonths||[]).map(convMk),quitada:!!dv.closed,
+  }));
+
+  /* meses antigos */
+  d.months={};
+  Object.entries(old.months).forEach(([mk,om])=>{
+    const m=ensureMonth(d,mk);
+    m.notes=om.notes||"";
+    (om.incomes||[]).forEach(e=>{
+      if(e.isAdjustment||e.autoFromWithdrawal) return;              /* artefatos: fora */
+      m.entradas.push({id:uid(),fonte:e.name||"Entrada",valor:e.value||0,data:e.date||"",accId:accId(e.bank)});
+    });
+    (om.expenses||[]).forEach(g=>{
+      if(g.isAdjustment) return;                                     /* artefato: fora */
+      const forma={PIX:"pix","Débito":"debito",Dinheiro:"dinheiro",Boleto:"boleto"}[g.method]||"pix";
+      const ng={id:uid(),catId:catId(g.category),descricao:g.description||g.category,valor:g.value||0,
+        forma,accId:accId(g.bank),data:g.date||"",parcela:null};
+      if(g.isTransfer&&g.transferTo){ ng.transferParaId=accId(g.transferTo); }
+      if(g.isDebtPayment&&g.debtId){ ng.dividaId=g.debtId; }
+      m.gastos.push(ng);
+    });
+    (om.fixed||[]).forEach(f=>{
+      /* marcadores de fatura de todas as gerações: fora */
+      if(f.isAutoInvoice||f.isCardInvoice||f.isLegacyMarker) return;
+      if(typeof f.name==="string"&&f.name.startsWith("Fatura ")) return;
+      const nf={id:uid(),nome:f.name,valor:f.value||0,dia:null,catId:d.cats[d.cats.length-1].id,
+        recorrente:f.recurring!==false,pago:!!f.paid,gastoId:null};
+      if(nf.pago){
+        const gid=uid();
+        m.gastos.push({id:gid,catId:nf.catId,descricao:nf.nome,valor:nf.valor,forma:"pix",
+          accId:accId(f.bank),data:f.paidDate||`${mk}-15`,parcela:null,fixaId:nf.id});
+        nf.gastoId=gid;
+      }
+      m.fixas.push(nf);
+    });
+    (om.investments||[]).forEach(iv=>{
+      const t=iv.type||"";
+      const tipo=t.includes("Emergência")||t==="Retirada — Reserva"?"emergencia"
+        :t==="Meta pessoal"||t==="Retirada — Meta"?"pessoal":"outro";
+      m.reservas.push({id:uid(),tipo,nome:iv.name||t,valor:iv.value||0,data:iv.date||"",
+        accId:accId(iv.bank),retirada:t.startsWith("Retirada")});
+    });
+  });
+
+  /* compras de crédito antigas → gastos forma "credito" no mês da fatura */
+  Object.entries(old.credits).forEach(([mk,oc])=>{
+    const m=ensureMonth(d,mk);
+    ((oc&&oc.purchases)||[]).forEach(p=>{
+      m.gastos.push({id:uid(),catId:catId(p.category),descricao:p.name,valor:p.monthlyValue||0,
+        forma:"credito",accId:accId(p.bank),data:p.date||"",
+        parcela:p.installments>1?{i:p.installmentNum||1,n:p.installments,grupo:p.groupId||null}:null});
+    });
+  });
+
+  /* faturas antigas já pagas (billsToPay) → faturasPagas no mês de vencimento */
+  (os.billsToPay||[]).forEach(b=>{
+    if(!b.paid) return;
+    const mk=`${b.dueYear}-${String(Number(b.dueMonth)+1).padStart(2,"0")}`;
+    const m=ensureMonth(d,mk);
+    const card=accId(b.bankCard);
+    if(card) m.faturasPagas[card]={contaId:accId(b.paidBank),data:b.paidDate||null};
+  });
+
+  ensureMonth(d,mesAtualKey());
+  return migrate(d);
+}
+
+/* ─── Persistência ────────────────────────────────────────────────────────── */
+async function dbLoad(){
+  try{
+    const {data:{user}}=await supabase.auth.getUser();
+    if(!user) return null;
+    const {data}=await supabase.from("user_data").select("value").eq("key",DATA_KEY).eq("user_id",user.id).single();
+    return data?.value??null;
+  }catch(_){ return null; }
+}
+async function dbSave(blob){
+  try{
+    const {data:{user}}=await supabase.auth.getUser();
+    if(!user) return false;
+    const {error}=await supabase.from("user_data").upsert(
+      {key:DATA_KEY,value:blob,user_id:user.id,updated_at:new Date().toISOString()},
+      {onConflict:"user_id,key"});
+    return !error;
+  }catch(_){ return false; }
+}
+
+/* ════════════════════════════ UI base ════════════════════════════ */
+
+function Donut({data,size=130,thick=22,label,sublabel}){
   const r=(size-thick)/2,cx=size/2,cy=size/2,circ=2*Math.PI*r;
-  const total=data.reduce((s,d)=>s+d.value,0);
+  const total=data.reduce((s,x)=>s+x.value,0);
   let off=0;
-  const segs=data.map(d=>{const dash=(total>0?d.value/total:0)*circ;const s={...d,dash,gap:circ-dash,offset:circ-off};off+=dash;return s;});
+  const segs=data.filter(x=>x.value>0).map(x=>{const dash=(total>0?x.value/total:0)*circ;const sg={...x,dash,gap:circ-dash,offset:circ-off};off+=dash;return sg;});
   return (
     <div style={{position:"relative",width:size,height:size,margin:"0 auto"}}>
       <svg width={size} height={size} style={{transform:"rotate(-90deg)"}}>
-        {total===0?<circle cx={cx} cy={cy} r={r} fill="none" stroke="#1e1e30" strokeWidth={thick}/>
+        {total===0?<circle cx={cx} cy={cy} r={r} fill="none" stroke="var(--border)" strokeWidth={thick}/>
           :segs.map((s,i)=><circle key={i} cx={cx} cy={cy} r={r} fill="none" stroke={s.color} strokeWidth={thick} strokeDasharray={`${s.dash} ${s.gap}`} strokeDashoffset={s.offset}/>)}
       </svg>
       <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:2,padding:"0 10px"}}>
-        {label&&<div style={{fontSize:12,fontWeight:700,color:"var(--text)",textAlign:"center",lineHeight:1.2}}>{label}</div>}
+        {label&&<div style={{fontSize:12,fontWeight:800,textAlign:"center",lineHeight:1.2}}>{label}</div>}
         {sublabel&&<div style={{fontSize:9,color:"var(--muted)",textAlign:"center"}}>{sublabel}</div>}
       </div>
     </div>
@@ -157,10 +455,10 @@ function GoalBar({label,icon,current,goal,color}){
         <span style={{fontSize:10,color:"var(--muted)"}}>{fmt(current)} / {fmt(goal)}</span>
       </div>
       <div style={{height:6,background:"var(--border)",borderRadius:3,overflow:"hidden"}}>
-        <div style={{height:"100%",width:`${pct}%`,background:color,borderRadius:3,transition:"width .6s"}}/>
+        <div style={{height:"100%",width:`${pct}%`,background:color,borderRadius:3,transition:"width .5s"}}/>
       </div>
       <div style={{display:"flex",justifyContent:"space-between",marginTop:3}}>
-        <span style={{fontSize:10,color,fontWeight:600}}>{pct.toFixed(1)}%</span>
+        <span style={{fontSize:10,color,fontWeight:700}}>{pct.toFixed(1)}%</span>
         <span style={{fontSize:10,color:"var(--muted)"}}>Faltam {fmt(Math.max(goal-current,0))}</span>
       </div>
     </div>
@@ -168,29 +466,27 @@ function GoalBar({label,icon,current,goal,color}){
 }
 
 function Toast({msg,onDone}){
-  useEffect(()=>{const t=setTimeout(onDone,2500);return()=>clearTimeout(t);},[onDone]);
-  return <div style={{position:"fixed",bottom:80,left:"50%",transform:"translateX(-50%)",background:"var(--green)",color:"#000",fontFamily:"'Sora',sans-serif",fontSize:12,fontWeight:700,padding:"10px 20px",borderRadius:20,zIndex:2000,whiteSpace:"nowrap"}}>{msg}</div>;
+  useEffect(()=>{const t=setTimeout(onDone,2400);return()=>clearTimeout(t);},[onDone]);
+  return <div className="toast">{msg}</div>;
 }
 
-function Modal({onClose,children,tall=false}){
+function Modal({onClose,children,tall}){
   useEffect(()=>{document.body.style.overflow="hidden";return()=>{document.body.style.overflow="";};},[]);
-  const theme=localStorage.getItem("ft_theme")||"dark";
   return (
-    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.75)",backdropFilter:"blur(8px)",zIndex:1000,display:"flex",alignItems:"flex-end",justifyContent:"center"}} onClick={e=>{if(e.target===e.currentTarget)onClose();}}>
-      <div className={`modal-surface ${theme}`} style={{borderRadius:"20px 20px 0 0",width:"100%",maxWidth:520,padding:"22px 20px 40px",maxHeight:tall?"95vh":"88vh",overflowY:"auto",color:theme==="dark"?"#f0f0ff":"#0f0f1a"}} onClick={e=>e.stopPropagation()}>
-        {children}
-      </div>
+    <div className="modal-bg" onClick={e=>{if(e.target===e.currentTarget)onClose();}}>
+      <div className="modal-surface" style={{maxHeight:tall?"95vh":"88vh"}} onClick={e=>e.stopPropagation()}>{children}</div>
     </div>
   );
 }
+const MHdr=({title,onClose})=>(
+  <div className="mhdr"><div className="mtitle">{title}</div><button className="mclose" onClick={onClose}>✕</button></div>
+);
 
+/* ════════════════════════════ Login ════════════════════════════ */
 function AuthScreen(){
   const [mode,setMode]=useState("login");
-  const [email,setEmail]=useState("");
-  const [password,setPassword]=useState("");
-  const [loading,setLoading]=useState(false);
-  const [error,setError]=useState("");
-  const [msg,setMsg]=useState("");
+  const [email,setEmail]=useState(""); const [password,setPassword]=useState("");
+  const [loading,setLoading]=useState(false); const [error,setError]=useState(""); const [msg,setMsg]=useState("");
   async function handle(){
     setLoading(true);setError("");setMsg("");
     try{
@@ -201,570 +497,1542 @@ function AuthScreen(){
     setLoading(false);
   }
   return (
-    <div style={{minHeight:"100vh",background:"#09090f",display:"flex",alignItems:"center",justifyContent:"center",padding:"20px"}}>
+    <div style={{minHeight:"100vh",background:"#09090f",display:"flex",alignItems:"center",justifyContent:"center",padding:20,fontFamily:"'Plus Jakarta Sans',sans-serif",color:"#f0f0ff"}}>
       <div style={{width:"100%",maxWidth:380}}>
-        <div style={{textAlign:"center",marginBottom:32}}>
-          <div style={{fontSize:28,fontWeight:700,letterSpacing:"-1px"}}>Fin<span style={{color:"var(--accent)"}}>Track</span></div>
-          <div style={{fontSize:13,color:"var(--muted)",marginTop:6}}>Controle financeiro pessoal</div>
+        <div style={{textAlign:"center",marginBottom:28}}>
+          <div style={{fontSize:28,fontWeight:800,letterSpacing:"-1px"}}>Fin<span style={{color:"#6366f1"}}>Track</span></div>
+          <div style={{fontSize:13,color:"#7070a0",marginTop:6}}>Controle financeiro pessoal</div>
         </div>
-        <div style={{background:"var(--card)",border:"1px solid var(--border)",borderRadius:20,padding:24}}>
+        <div style={{background:"#16161f",border:"1px solid rgba(255,255,255,.08)",borderRadius:20,padding:24}}>
           <div style={{display:"flex",gap:8,marginBottom:20}}>
             {[["login","Entrar"],["signup","Criar conta"]].map(([m,l])=>(
-              <button key={m} onClick={()=>{setMode(m);setError("");setMsg("");}} style={{flex:1,padding:"9px 0",borderRadius:10,border:"none",cursor:"pointer",fontFamily:"'Sora',sans-serif",fontSize:13,fontWeight:700,background:mode===m?"var(--accent)":"var(--surface)",color:mode===m?"#fff":"var(--muted)"}}>
-                {l}
-              </button>
+              <button key={m} onClick={()=>{setMode(m);setError("");setMsg("");}}
+                style={{flex:1,padding:"9px 0",borderRadius:10,border:"none",cursor:"pointer",fontFamily:"inherit",fontSize:13,fontWeight:700,
+                background:mode===m?"#6366f1":"#111118",color:mode===m?"#fff":"#7070a0"}}>{l}</button>
             ))}
           </div>
           <div style={{marginBottom:12}}>
-            <label style={{display:"block",fontSize:11,fontWeight:600,letterSpacing:".04em",color:"var(--text)",opacity:.7,marginBottom:5}}>E-mail</label>
-            <input value={email} onChange={e=>setEmail(e.target.value)} style={{width:"100%",background:"var(--surface)",border:"1px solid var(--border)",color:"var(--text)",fontFamily:"'Sora',sans-serif",fontSize:14,borderRadius:10,padding:"11px 12px",outline:"none",boxSizing:"border-box"}} placeholder="seu@email.com" type="email"/>
+            <label style={{display:"block",fontSize:11,fontWeight:700,opacity:.7,marginBottom:5}}>E-mail</label>
+            <input value={email} onChange={e=>setEmail(e.target.value)} type="email" placeholder="seu@email.com"
+              style={{width:"100%",background:"#111118",border:"1px solid rgba(255,255,255,.12)",color:"#f0f0ff",fontFamily:"inherit",fontSize:14,borderRadius:10,padding:"11px 12px",outline:"none",boxSizing:"border-box"}}/>
           </div>
           {mode!=="reset"&&(
             <div style={{marginBottom:16}}>
-              <label style={{display:"block",fontSize:11,fontWeight:600,letterSpacing:".04em",color:"var(--text)",opacity:.7,marginBottom:5}}>Senha</label>
-              <input value={password} onChange={e=>setPassword(e.target.value)} style={{width:"100%",background:"var(--surface)",border:"1px solid var(--border)",color:"var(--text)",fontFamily:"'Sora',sans-serif",fontSize:14,borderRadius:10,padding:"11px 12px",outline:"none",boxSizing:"border-box"}} placeholder="••••••••" type="password" onKeyDown={e=>e.key==="Enter"&&handle()}/>
+              <label style={{display:"block",fontSize:11,fontWeight:700,opacity:.7,marginBottom:5}}>Senha</label>
+              <input value={password} onChange={e=>setPassword(e.target.value)} type="password" placeholder="••••••••" onKeyDown={e=>e.key==="Enter"&&handle()}
+                style={{width:"100%",background:"#111118",border:"1px solid rgba(255,255,255,.12)",color:"#f0f0ff",fontFamily:"inherit",fontSize:14,borderRadius:10,padding:"11px 12px",outline:"none",boxSizing:"border-box"}}/>
             </div>
           )}
-          {error&&<div style={{background:"rgba(192,57,43,.15)",border:"1px solid rgba(192,57,43,.3)",borderRadius:9,padding:"9px 12px",fontSize:12,color:"var(--wine)",marginBottom:12}}>{error}</div>}
-          {msg&&<div style={{background:"rgba(0,214,143,.1)",border:"1px solid rgba(0,214,143,.2)",borderRadius:9,padding:"9px 12px",fontSize:12,color:"var(--green)",marginBottom:12}}>{msg}</div>}
-          <button onClick={handle} disabled={loading} style={{width:"100%",background:"var(--accent)",color:"#fff",border:"none",fontFamily:"'Sora',sans-serif",fontSize:14,fontWeight:700,borderRadius:11,padding:13,cursor:"pointer",opacity:loading?.6:1}}>
+          {error&&<div style={{background:"rgba(239,68,68,.12)",border:"1px solid rgba(239,68,68,.3)",borderRadius:9,padding:"9px 12px",fontSize:12,color:"#ef4444",marginBottom:12}}>{error}</div>}
+          {msg&&<div style={{background:"rgba(34,197,94,.1)",border:"1px solid rgba(34,197,94,.25)",borderRadius:9,padding:"9px 12px",fontSize:12,color:"#22c55e",marginBottom:12}}>{msg}</div>}
+          <button onClick={handle} disabled={loading}
+            style={{width:"100%",background:"#6366f1",color:"#fff",border:"none",fontFamily:"inherit",fontSize:14,fontWeight:700,borderRadius:11,padding:13,cursor:"pointer",opacity:loading?.6:1}}>
             {loading?"Aguarde...":{login:"Entrar",signup:"Criar conta",reset:"Enviar e-mail"}[mode]}
           </button>
-          {mode==="login"&&<button onClick={()=>{setMode("reset");setError("");setMsg("");}} style={{width:"100%",background:"none",border:"none",color:"var(--muted)",fontFamily:"'Sora',sans-serif",fontSize:12,cursor:"pointer",marginTop:12,padding:4}}>Esqueci minha senha</button>}
+          {mode==="login"&&<button onClick={()=>{setMode("reset");setError("");setMsg("");}}
+            style={{width:"100%",background:"none",border:"none",color:"#7070a0",fontFamily:"inherit",fontSize:12,cursor:"pointer",marginTop:12,padding:4}}>Esqueci minha senha</button>}
         </div>
       </div>
     </div>
   );
 }
 
-// ─── CARTÕES PAGE ─────────────────────────────────────────────────────────────
-function CartoesPage({banks,expenseCats,vm,vy,creditData,setCreditData,monthData,setMonthData,bankCredit,setSettings,settings}){
-  const [selectedBank,setSelectedBank]=useState(banks[0]?.name||"");
-  const [showAddModal,setShowAddModal]=useState(false);
-  const [showImportModal,setShowImportModal]=useState(false);
-  const [editingPurchase,setEditingPurchase]=useState(null);
-  const [closingInvoice,setClosingInvoice]=useState(false);
-  const [nextCreditData,setNextCreditData]=useState(null);
-  const [viewingHistory,setViewingHistory]=useState(false); // toggle histórico
-  const [sortPurchases,setSortPurchases]=useState("date_desc");
-  const [filterPurchasesText,setFilterPurchasesText]=useState("");
-  const [filterPurchasesCat,setFilterPurchasesCat]=useState("");
-  const catMap=Object.fromEntries(expenseCats.map(c=>[c.name,c]));
-
-  const nm=vm===11?0:vm+1, ny=vm===11?vy+1:vy;
-
-  const invoiceId=`invoice_${selectedBank}_${vy}_${vm}`;
-  const invoiceAlreadyClosed=((settings.billsToPay||[]).some(b=>b.id===invoiceId))||((monthData.fixed||[]).some(f=>f.id===invoiceId));
-
-  // Reset viewingHistory quando trocar de banco ou mês
-  useEffect(()=>{setViewingHistory(false);},[selectedBank,vm,vy]);
-
-  // Carregar dados do próximo mês UMA VEZ quando fatura fecha
+/* ════════════════════════════ App raiz ════════════════════════════ */
+export default function FinTrack(){
+  const [session,setSession]=useState(null);
+  const [authLoading,setAuthLoading]=useState(true);
   useEffect(()=>{
-    if(invoiceAlreadyClosed){
-      dbGet(creditKey(ny,nm)).then(d=>setNextCreditData(d||EMPTY_CREDIT()));
-    } else {
-      setNextCreditData(null);
-      setViewingHistory(false);
-    }
-  },[invoiceAlreadyClosed,nm,ny]); // removido selectedBank — não re-fetch ao trocar banco
+    supabase.auth.getSession().then(({data:{session}})=>{setSession(session);setAuthLoading(false);});
+    const {data:{subscription}}=supabase.auth.onAuthStateChange((_,s)=>setSession(s));
+    return ()=>subscription.unsubscribe();
+  },[]);
+  if(authLoading) return <div style={{minHeight:"100vh",background:"#09090f",display:"flex",alignItems:"center",justifyContent:"center",color:"#7070a0",fontFamily:"sans-serif"}}>Carregando…</div>;
+  if(!session) return <AuthScreen/>;
+  return <AppInner session={session}/>;
+}
 
-  // viewingHistory=true → mostra fatura fechada (mês atual)
-  // viewingHistory=false → mostra ciclo ativo (próximo mês se fechado)
-  const activeCreditData = viewingHistory ? creditData
-    : (invoiceAlreadyClosed && nextCreditData) ? nextCreditData
-    : creditData;
-  const activeMonth = viewingHistory ? vm : (invoiceAlreadyClosed ? nm : vm);
-  const activeYear  = viewingHistory ? vy : (invoiceAlreadyClosed ? ny : vy);
+function AppInner({session}){
+  const [data,setData]=useState(null);
+  const [loading,setLoading]=useState(true);
+  const [migrando,setMigrando]=useState(false);
+  const [mes,setMes]=useState(mesAtualKey());
+  const [page,setPage]=useState("resumo");
+  const [menuOpen,setMenuOpen]=useState(false);
+  const [saving,setSaving]=useState(false);
+  const [toast,setToast]=useState(null);
+  const [modal,setModal]=useState(null);
+  const saveChain=useRef(Promise.resolve());
 
-  const bank=banks?.find(b=>b.name===selectedBank)||banks?.[0];
-  const purchases=(activeCreditData?.purchases)||[];
-  const bankPurchases=purchases.filter(p=>p.bank===selectedBank);
-  const totalUsed=bankPurchases.reduce((s,p)=>s+p.monthlyValue,0);
-  const limit=bank?.limit||0;
-  const available=limit>0?Math.max(limit-totalUsed,0):null;
-  const pct=limit>0?Math.min((totalUsed/limit)*100,100):0;
+  /* Carga: blob novo; se não existir, tenta migrar do legado; senão seed */
+  useEffect(()=>{(async()=>{
+    let d=await dbLoad();
+    if(d){ setData(migrate(d)); setLoading(false); return; }
+    setMigrando(true);
+    d=await migrarLegado();
+    if(!d) d=seedData();
+    await dbSave(d);
+    setData(d); setMigrando(false); setLoading(false);
+  })();},[]);
 
-  const catBreak=expenseCats.map(c=>{
-    const val=bankPurchases.filter(p=>p.category===c.name).reduce((s,p)=>s+p.monthlyValue,0);
-    return {...c,val};
-  }).filter(c=>c.val>0).sort((a,b)=>b.val-a.val);
-
-  function closeInvoice(){
-    if(!totalUsed||invoiceAlreadyClosed) return;
-    setClosingInvoice(true);
-    // Fatura vira SOMENTE billToPay. Nunca cria fixed marker (não duplica).
-    // Nome usa o mês de VENCIMENTO (nm/ny), não o mês em que foi gerada.
-    const billToPay={
-      id:invoiceId,
-      name:`Fatura ${selectedBank} — Vence ${MONTHS_FULL[nm]}/${ny}`,
-      value:parseFloat(totalUsed.toFixed(2)),
-      bankCard:selectedBank,
-      paid:false,
-      paidBank:null,
-      paidDate:null,
-      dueMonth:nm,
-      dueYear:ny,
-      generatedMonth:vm,
-      generatedYear:vy,
-      createdAt:new Date().toISOString(),
-      isCardInvoice:true,
-    };
-    setSettings(s=>{
-      const bills=s.billsToPay||[];
-      if(bills.some(b=>b.id===invoiceId)){setClosingInvoice(false);return s;}
-      return{...s,billsToPay:[...bills,billToPay]};
+  /* mutate: ÚNICO caminho de alteração. Clona, altera, salva o bloco inteiro.
+     Salvamentos encadeados em fila — nunca dois uploads simultâneos. */
+  function mutate(updater){
+    setData(prev=>{
+      const next=migrate(updater(JSON.parse(JSON.stringify(prev))));
+      setSaving(true);
+      saveChain.current=saveChain.current.then(()=>dbSave(next)).then(ok=>{
+        setSaving(false);
+        if(!ok) setToast("⚠️ Falha ao salvar — verifique a conexão");
+      });
+      return next;
     });
-    setClosingInvoice(false);
   }
 
-  function reopenInvoice(){
-    if(!invoiceAlreadyClosed) return;
-    if(!confirm(`Reabrir a fatura de ${MONTHS_FULL[vm]}/${vy}? Você poderá adicionar/editar lançamentos novamente.`)) return;
-    // Remove o billToPay
-    setSettings(s=>({...s,billsToPay:(s.billsToPay||[]).filter(b=>b.id!==invoiceId)}));
-    // Remove o marker do fixed
-    setMonthData(d=>({...d,fixed:(d.fixed||[]).filter(f=>f.id!==invoiceId)}));
-    // Reset views
-    setViewingHistory(false);
-    setNextCreditData(null);
-  }
+  useEffect(()=>{ if(data&&!data.months[mes]) mutate(d=>{criarMesComFixas(d,mes);return d;}); },[mes,data]);
 
-  function addPurchase(purchase){
-    const [invoiceY,invoiceM]=purchase.invoiceMonth.split("-").map(Number);
-    // Determinar em qual state/DB salvar baseado no mês alvo
-    const isNextMonthTarget=(invoiceY===ny&&invoiceM===nm);
-    const isCurrentMonthTarget=(invoiceY===vy&&invoiceM===vm);
+  if(loading||!data) return (
+    <div style={{minHeight:"100vh",background:"#09090f",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:10,color:"#7070a0",fontFamily:"sans-serif",fontSize:14}}>
+      <div style={{fontSize:30}}>{migrando?"📦":"⏳"}</div>
+      {migrando?"Migrando seus dados antigos…":"Carregando…"}
+    </div>
+  );
 
-    if(purchase.installments>1){
-      const allParcels=[];
-      for(let i=0;i<purchase.installments;i++){
-        const totalM=invoiceM+i;
-        const m=totalM%12, y=invoiceY+Math.floor(totalM/12);
-        allParcels.push({
-          ...purchase,id:uid(),monthYear:`${y}-${m}`,
-          monthlyValue:parseFloat((purchase.totalValue/purchase.installments).toFixed(2)),
-          installmentNum:i+1,
-          name:`${purchase.name} (${i+1}/${purchase.installments})`,
-        });
-      }
-      // Salvar parcelas do mês correto no state imediatamente
-      const curParcels=allParcels.filter(p=>p.monthYear===`${vy}-${vm}`);
-      const nextParcels=allParcels.filter(p=>p.monthYear===`${ny}-${nm}`);
-      if(nextParcels.length>0&&invoiceAlreadyClosed){
-        setNextCreditData(d=>{
-          const updated={purchases:[...nextParcels,...(d?.purchases||[])]};
-          dbSet(creditKey(ny,nm),updated);
-          return updated;
-        });
-      }
-      if(curParcels.length>0){
-        setCreditData(d=>{
-          const updated={purchases:[...curParcels,...(d.purchases||[])]};
-          dbSet(creditKey(vy,vm),updated);
-          return updated;
-        });
-      }
-      // Salvar outros meses só no DB
-      const grouped={};
-      allParcels.forEach(p=>{if(!grouped[p.monthYear])grouped[p.monthYear]=[];grouped[p.monthYear].push(p);});
-      Object.entries(grouped).forEach(([key,ps])=>{
-        if(key===`${vy}-${vm}`||key===`${ny}-${nm}`) return; // já salvos acima
-        const [y,m]=key.split("-").map(Number);
-        dbGet(creditKey(y,m)).then(existing=>{
-          const ex=existing||EMPTY_CREDIT();
-          dbSet(creditKey(y,m),{purchases:[...(ex.purchases||[]).filter(ep=>ep.groupId!==purchase.groupId),...ps]});
-        });
-      });
-    } else {
-      const p={...purchase,id:uid(),monthYear:`${invoiceY}-${invoiceM}`,monthlyValue:purchase.totalValue,installmentNum:1};
-      if(isNextMonthTarget&&invoiceAlreadyClosed){
-        // Fatura fechada → salva no próximo mês (state + DB) imediatamente
-        setNextCreditData(d=>{
-          const updated={purchases:[p,...(d?.purchases||[])]};
-          dbSet(creditKey(ny,nm),updated);
-          return updated;
-        });
-      } else if(isCurrentMonthTarget){
-        setCreditData(d=>{
-          const updated={purchases:[p,...(d.purchases||[])]};
-          dbSet(creditKey(vy,vm),updated);
-          return updated;
-        });
-      } else {
-        // Mês futuro — só DB
-        dbGet(creditKey(invoiceY,invoiceM)).then(existing=>{
-          const ex=existing||EMPTY_CREDIT();
-          dbSet(creditKey(invoiceY,invoiceM),{purchases:[p,...(ex.purchases||[])]});
-        });
-      }
-    }
-    setShowAddModal(false);
-  }
+  const theme=data.settings.theme||"dark";
+  const m=data.months[mes]||novoMes();
+  const met=metricsMes(data,mes);
+  const rt=reservaTotais(data);
+  const totalContas=data.accounts.reduce((s,a)=>s+saldoConta(data,a.id),0);
+  const alerts=gerarAlertas(data,mes);
+  const mem=useMemo(()=>memoriaCategorias(data),[data]);
 
-  function deletePurchase(id){
-    if(invoiceAlreadyClosed&&!viewingHistory){
-      setNextCreditData(d=>{
-        const updated={purchases:(d?.purchases||[]).filter(p=>p.id!==id)};
-        dbSet(creditKey(ny,nm),updated);
-        return updated;
-      });
-    } else {
-      setCreditData(d=>{
-        const updated={purchases:(d.purchases||[]).filter(p=>p.id!==id)};
-        dbSet(creditKey(vy,vm),updated);
-        return updated;
-      });
-    }
-  }
+  const NAV=[
+    ["resumo","📊","Início"],["extrato","🧾","Extrato"],["apagar","📅","A pagar"],
+    ["cartoes","💳","Cartões"],["carteira","💼","Carteira"],["reservas","💰","Reservas"],
+    ["dividas","🔗","Dívidas"],["planejar","🎯","Planejar"],["anual","📈","Anual"],["config","⚙️","Config"],
+  ];
 
-  function savePurchaseEdit(updated){
-    const newMonthlyValue=updated.installments>1
-      ?parseFloat((updated.totalValue/updated.installments).toFixed(2))
-      :updated.totalValue;
-    if(invoiceAlreadyClosed&&!viewingHistory){
-      setNextCreditData(d=>{
-        const updated2={purchases:(d?.purchases||[]).map(p=>p.id===updated.id?{...p,...updated,monthlyValue:newMonthlyValue}:p)};
-        dbSet(creditKey(ny,nm),updated2);
-        return updated2;
-      });
-    } else {
-      setCreditData(d=>{
-        const updated2={purchases:(d.purchases||[]).map(p=>p.id===updated.id?{...p,...updated,monthlyValue:newMonthlyValue}:p)};
-        dbSet(creditKey(vy,vm),updated2);
-        return updated2;
-      });
-    }
-    setEditingPurchase(null);
-  }
+  const props={data,mutate,mes,setMes,setModal,setToast,mem,met,rt,totalContas};
 
-  if(!bank) return (
+  return (
+    <div className={theme}>
+      <Styles/>
+      {menuOpen&&<div className="sidebar-overlay" onClick={()=>setMenuOpen(false)}/>}
+      <div className={`sidebar${menuOpen?" open":""}`}>
+        <div className="sidebar-header">
+          <div className="logo">Fin<em>Track</em></div>
+          <div className="sidebar-user">
+            <div className="avatar">{(data.settings.name||"U").slice(0,2).toUpperCase()}</div>
+            <div style={{minWidth:0}}>
+              <div style={{fontSize:13,fontWeight:700,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{data.settings.name||"Usuário"}</div>
+              <div style={{fontSize:10,color:"var(--muted)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{session?.user?.email}</div>
+            </div>
+          </div>
+        </div>
+        <div className="sidebar-nav">
+          {NAV.map(([id,ic,lb])=>(
+            <button key={id} className={`snav${page===id?" active":""}`} onClick={()=>{setPage(id);setMenuOpen(false);}}>
+              <span className="snav-ic">{ic}</span>{lb}
+            </button>
+          ))}
+        </div>
+        <div className="sidebar-footer">
+          <div className="theme-toggle" onClick={()=>mutate(d=>{d.settings.theme=d.settings.theme==="dark"?"light":"dark";return d;})}>
+            <span style={{fontSize:13,fontWeight:600,color:"var(--text2)"}}>{theme==="dark"?"🌙 Tema escuro":"☀️ Tema claro"}</span>
+            <div className={`pill${theme==="light"?" on":""}`}/>
+          </div>
+          <button className="signout" onClick={()=>supabase.auth.signOut()}>🚪 Sair da conta</button>
+        </div>
+      </div>
+
+      <div className="main">
+        <div className="topbar">
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
+            <button className="hamburger" onClick={()=>setMenuOpen(o=>!o)}><span/><span/><span/></button>
+            <div className="logo">Fin<em>Track</em></div>
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            {saving&&<span title="Salvando…" style={{fontSize:13}}>☁️</span>}
+            <div className="avatar sm">{(data.settings.name||"U").slice(0,2).toUpperCase()}</div>
+          </div>
+        </div>
+
+        <div className="month-nav">
+          <button onClick={()=>setMes(shiftKey(mes,-1))}>‹</button>
+          <span className="month-label">{labelKey(mes)}{saving&&" ☁️"}</span>
+          <button onClick={()=>setMes(shiftKey(mes,1))}>›</button>
+        </div>
+
+        {page==="resumo"&&<PageResumo {...props} alerts={alerts} setPage={setPage}/>}
+        {page==="extrato"&&<PageExtrato {...props}/>}
+        {page==="apagar"&&<PageAPagar {...props}/>}
+        {page==="cartoes"&&<PageCartoes {...props}/>}
+        {page==="carteira"&&<PageCarteira {...props}/>}
+        {page==="reservas"&&<PageReservas {...props}/>}
+        {page==="dividas"&&<PageDividas {...props}/>}
+        {page==="planejar"&&<PagePlanejar {...props}/>}
+        {page==="anual"&&<PageAnual {...props}/>}
+        {page==="config"&&<PageConfig {...props} userEmail={session?.user?.email}/>}
+      </div>
+
+      {["resumo","extrato","cartoes","reservas"].includes(page)&&(
+        <button className="fab" onClick={()=>setModal({type:page==="cartoes"?"credito":page==="reservas"?"reserva":"gasto"})}>+</button>
+      )}
+      {toast&&<Toast msg={toast} onDone={()=>setToast(null)}/>}
+      {modal&&<ModalRouter modal={modal} setModal={setModal} data={data} mutate={mutate} mes={mes} mem={mem} setToast={setToast}/>}
+    </div>
+  );
+}
+
+/* ════════════════════════════ Página: Resumo ════════════════════════════ */
+function PageResumo({data,mutate,mes,met,rt,totalContas,alerts,setModal,setPage}){
+  const cards=data.accounts.filter(a=>a.temCartao);
+  const catTot=gastosPorCat(data,mes);
+  const catData=Object.entries(catTot).map(([id,v])=>({cat:catById(data,id),id,v,budget:data.settings.catBudgets[id]||0}))
+    .sort((a,b)=>b.v-a.v);
+  const maxCat=Math.max(...catData.map(c=>Math.max(c.v,c.budget)),1);
+  /* evolução anual do ano do mês visualizado */
+  const ano=mes.split("-")[0];
+  const rows=Array.from({length:12},(_,i)=>{const k=`${ano}-${String(i+1).padStart(2,"0")}`;const mm=metricsMes(data,k);return {k,i,...mm};});
+  const chartMax=Math.max(...rows.flatMap(r=>[r.entradas,r.saidas]),1);
+  const score=(()=>{ if(!met.entradas) return 50; let s=50; const sr=met.sobra/met.entradas;
+    if(sr>=0.3)s+=30; else if(sr>=0.2)s+=20; else if(sr>=0.1)s+=10; else if(sr<0)s-=20;
+    if(met.fixasPend===0)s+=10; else if(met.fixasPend<=2)s+=5;
+    const ep=rt.emergencia/(data.settings.emergencyGoal||10000);
+    if(ep>=1)s+=10; else if(ep>=0.5)s+=5;
+    return Math.max(0,Math.min(100,s)); })();
+  const scoreCor=score>=85?"#22c55e":score>=70?"#3b82f6":score>=50?"#f59e0b":"#ef4444";
+  const scoreLbl=score>=85?"Excelente":score>=70?"Ótimo":score>=50?"Bom":"Atenção";
+
+  return (
     <div className="pg">
-      <div className="empty">Nenhum cartão configurado.<br/>Vá em <strong style={{color:"var(--accent)"}}>⚙️ Config</strong> para adicionar seus bancos.</div>
+      <div className="hero">
+        <div className="hero-greet">Olá, {data.settings.name||"👋"}</div>
+        <div className="hero-sub">{labelKey(mes)} · {alerts.length>0?"⚠️ Atenção necessária":"Tudo em ordem"}</div>
+        <div className="hero-actions">
+          <button className="hbtn g" onClick={()=>setModal({type:"entrada"})}>+ Entrada</button>
+          <button className="hbtn r" onClick={()=>setModal({type:"gasto"})}>+ Gasto</button>
+          <button className="hbtn b" onClick={()=>setModal({type:"credito"})}>+ Crédito</button>
+        </div>
+      </div>
+
+      {alerts.length>0&&(
+        <div style={{display:"flex",flexDirection:"column",gap:6}}>
+          {alerts.map((a,i)=>(<div key={i} className="alert warn"><span>{a.icon}</span><div>{a.msg}</div></div>))}
+        </div>
+      )}
+
+      <div className="metrics4">
+        <div className="mc4" onClick={()=>setPage("carteira")} style={{cursor:"pointer"}}>
+          <div className="mc4-l">💼 Total nas contas</div>
+          <div className="mc4-v" style={{color:totalContas>=0?"var(--green)":"var(--red)"}}>{fmt(totalContas)}</div>
+          <div className="mc4-s">Saldo real · toque para ver</div>
+        </div>
+        <div className="mc4" onClick={()=>setPage("apagar")} style={{cursor:"pointer",borderColor:met.comprometido>0?"rgba(239,68,68,.3)":"var(--border)"}}>
+          <div className="mc4-l">💳 Faturas em aberto</div>
+          <div className="mc4-v" style={{color:met.comprometido>0?"var(--red)":"var(--muted)"}}>{fmt(met.comprometido)}</div>
+          <div className="mc4-s">Comprometido no crédito</div>
+        </div>
+        <div className="mc4">
+          <div className="mc4-l">📥 Entradas do mês</div>
+          <div className="mc4-v" style={{color:"var(--green)"}}>{fmt(met.entradas)}</div>
+          <div className="mc4-s">{(data.months[mes]?.entradas||[]).length} lançamento(s)</div>
+        </div>
+        <div className="mc4">
+          <div className="mc4-l">📤 Saídas do mês</div>
+          <div className="mc4-v" style={{color:"var(--red)"}}>{fmt(met.saidas)}</div>
+          <div className="mc4-s">{fmt(met.aportes)} guardado em reservas</div>
+        </div>
+      </div>
+
+      <div className="card" style={{display:"flex",alignItems:"center",gap:14}}>
+        {(()=>{const r=28,c=2*Math.PI*r,dash=(score/100)*c;return(
+          <div style={{position:"relative",width:60,height:60,flexShrink:0}}>
+            <svg width="60" height="60" viewBox="0 0 60 60" style={{transform:"rotate(-90deg)"}}>
+              <circle cx="30" cy="30" r={r} fill="none" stroke="var(--border)" strokeWidth="6"/>
+              <circle cx="30" cy="30" r={r} fill="none" stroke={scoreCor} strokeWidth="6" strokeDasharray={`${dash} ${c-dash}`} strokeLinecap="round"/>
+            </svg>
+            <div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,fontWeight:800,color:scoreCor}}>{score}</div>
+          </div>);})()}
+        <div>
+          <div className="st">Saúde financeira</div>
+          <div style={{fontSize:15,fontWeight:800,color:scoreCor}}>{scoreLbl}</div>
+          <div style={{fontSize:10,color:"var(--muted)"}}>Sobra do mês: <strong style={{color:met.sobra>=0?"var(--green)":"var(--red)"}}>{fmt(met.sobra)}</strong>{met.fixasPend>0?` · ${met.fixasPend} fixa(s) pendente(s)`:" · ✓ fixas em dia"}</div>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="st" style={{marginBottom:8}}>Evolução — {ano}</div>
+        <div style={{display:"flex",gap:10,marginBottom:6}}>
+          {[["var(--green)","Entradas"],["var(--red)","Saídas"]].map(([c,l])=>(
+            <span key={l} style={{display:"flex",alignItems:"center",gap:4,fontSize:10,color:"var(--muted)"}}><span style={{width:10,height:10,borderRadius:2,background:c}}/>{l}</span>
+          ))}
+        </div>
+        <div className="chart" style={{height:74}}>
+          {rows.map(r=>(
+            <div key={r.k} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center"}}>
+              <div className="cgrp">
+                <div className="cbar" style={{background:r.k===mes?"var(--green)":"rgba(34,197,94,.3)",height:`${Math.max((r.entradas/chartMax)*74,r.entradas>0?2:0)}px`}}/>
+                <div className="cbar" style={{background:r.k===mes?"var(--red)":"rgba(239,68,68,.3)",height:`${Math.max((r.saidas/chartMax)*74,r.saidas>0?2:0)}px`}}/>
+              </div>
+              <div className="clbl" style={{color:r.k===mes?"var(--accent)":"var(--muted)",fontWeight:r.k===mes?700:400}}>{MESES_C[r.i]}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {cards.length>0&&(
+        <div className="card">
+          <div className="st" style={{marginBottom:10}}>Crédito — faturas de {MESES[Number(mes.split("-")[1])-1]}</div>
+          {cards.map(a=>{
+            const fv=faturaDe(data,mes,a.id);
+            const paga=!!(data.months[mes]?.faturasPagas||{})[a.id];
+            if(!fv) return null;
+            const pct=a.limite>0?Math.min((fv/a.limite)*100,100):0;
+            return (
+              <div key={a.id} style={{marginBottom:11}}>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:3,alignItems:"center"}}>
+                  <span style={{display:"flex",alignItems:"center",gap:6,fontSize:12,fontWeight:700}}>
+                    <span style={{width:9,height:9,borderRadius:"50%",background:a.cor}}/>{a.nome}
+                    {paga&&<span className="chip" style={{background:"rgba(34,197,94,.15)",color:"var(--green)"}}>paga</span>}
+                  </span>
+                  <span style={{fontSize:12,fontWeight:800,color:paga?"var(--green)":"var(--red)"}}>{fmt(fv)}</span>
+                </div>
+                {a.limite>0&&<div style={{height:4,background:"var(--border)",borderRadius:2,overflow:"hidden"}}>
+                  <div style={{height:"100%",width:`${pct}%`,background:pct>90?"var(--red)":pct>70?"var(--gold)":a.cor,borderRadius:2}}/>
+                </div>}
+              </div>
+            );
+          })}
+          {cards.every(a=>!faturaDe(data,mes,a.id))&&<div style={{fontSize:11,color:"var(--green)",textAlign:"center",fontWeight:600}}>✅ Nenhum gasto de crédito neste mês</div>}
+        </div>
+      )}
+
+      <div className="card">
+        <div className="st" style={{marginBottom:10}}>Metas & reservas</div>
+        <GoalBar label="Reserva de emergência" icon="🛡️" current={rt.emergencia} goal={data.settings.emergencyGoal} color="var(--green)"/>
+        <GoalBar label={data.settings.personalGoalName} icon="🎯" current={rt.pessoal} goal={data.settings.personalGoalValue} color="var(--accent)"/>
+      </div>
+
+      {catData.length>0&&(
+        <div className="card">
+          <div className="st" style={{marginBottom:10}}>Gastos por categoria (inclui crédito)</div>
+          {catData.map(c=>{
+            const hasB=c.budget>0, pct=hasB?Math.min((c.v/c.budget)*100,100):0;
+            const over=hasB&&c.v>c.budget, warn=hasB&&pct>=80&&!over;
+            return (
+              <div key={c.id} style={{marginBottom:9}}>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:3,alignItems:"center"}}>
+                  <span style={{fontSize:11,fontWeight:500}}>{c.cat.icon} {c.cat.nome}</span>
+                  <span style={{fontSize:10,display:"flex",gap:5,alignItems:"center"}}>
+                    {over&&<span style={{color:"var(--red)",fontSize:9,fontWeight:700}}>⚠ estourou</span>}
+                    {warn&&<span style={{color:"var(--gold)",fontSize:9,fontWeight:700}}>⚡ quase</span>}
+                    <span style={{color:"var(--muted)"}}>{fmt(c.v)}{hasB?` / ${fmt(c.budget)}`:""}</span>
+                  </span>
+                </div>
+                <div style={{height:5,background:"var(--border)",borderRadius:3,overflow:"hidden"}}>
+                  <div style={{height:"100%",borderRadius:3,width:`${hasB?pct:(c.v/maxCat)*100}%`,background:over?"var(--red)":warn?"var(--gold)":c.cat.cor}}/>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <div className="card">
+        <div className="st" style={{marginBottom:8}}>Observações do mês</div>
+        <textarea className="notesarea" placeholder="Ajustes, decisões pro próximo mês…" value={data.months[mes]?.notes||""}
+          onChange={e=>{const v=e.target.value;mutate(d=>{ensureMonth(d,mes).notes=v;return d;});}}/>
+      </div>
+    </div>
+  );
+}
+
+/* ════════════════════════════ Página: Extrato ════════════════════════════ */
+function PageExtrato({data,mutate,mes,setModal,setToast}){
+  const [aba,setAba]=useState("gastos");
+  const [busca,setBusca]=useState("");
+  const [fCat,setFCat]=useState("");
+  const [fAcc,setFAcc]=useState("");
+  const [sort,setSort]=useState("date_desc");
+  const m=data.months[mes]||novoMes();
+
+  const aplicar=(items,nameF,valF="valor")=>{
+    let out=items.slice();
+    if(busca){const q=busca.toLowerCase();out=out.filter(i=>`${i[nameF]||""} ${catById(data,i.catId).nome} ${(contaById(data,i.accId)||{}).nome||""}`.toLowerCase().includes(q));}
+    if(fCat)out=out.filter(i=>i.catId===fCat);
+    if(fAcc)out=out.filter(i=>i.accId===fAcc);
+    const cmp={date_desc:(a,b)=>(b.data||"").localeCompare(a.data||""),date_asc:(a,b)=>(a.data||"").localeCompare(b.data||""),
+      value_desc:(a,b)=>(b[valF]||0)-(a[valF]||0),value_asc:(a,b)=>(a[valF]||0)-(b[valF]||0)}[sort];
+    if(cmp)out.sort(cmp);
+    return out;
+  };
+
+  const gastos=aplicar((m.gastos||[]).filter(g=>g.forma!=="credito"),"descricao");
+  const creditos=aplicar((m.gastos||[]).filter(g=>g.forma==="credito"),"descricao");
+  const entradas=aplicar(m.entradas||[],"fonte");
+  const totG=gastos.filter(g=>!g.transferParaId).reduce((s,g)=>s+g.valor,0);
+  const totE=entradas.reduce((s,e)=>s+e.valor,0);
+  const totC=creditos.reduce((s,g)=>s+g.valor,0);
+
+  function delGasto(id){
+    mutate(d=>{const mm=ensureMonth(d,mes);
+      const g=mm.gastos.find(x=>x.id===id);
+      if(g?.fixaId){const f=mm.fixas.find(x=>x.id===g.fixaId);if(f){f.pago=false;f.gastoId=null;}}
+      if(g?.dividaId){const dv=d.dividas.find(x=>x.id===g.dividaId);if(dv){dv.pagos=dv.pagos.filter(k=>k!==mes);}}
+      mm.gastos=mm.gastos.filter(x=>x.id!==id);return d;});
+  }
+  function delEntrada(id){ mutate(d=>{const mm=ensureMonth(d,mes);mm.entradas=mm.entradas.filter(x=>x.id!==id);return d;}); }
+
+  const Item=({g,tipo})=>{
+    const cat=catById(data,g.catId);
+    const acc=contaById(data,g.accId);
+    const dest=g.transferParaId?contaById(data,g.transferParaId):null;
+    return (
+      <div className="txi" onClick={()=>setModal(tipo==="entrada"?{type:"entrada",edit:g}:g.forma==="credito"?{type:"credito",edit:g}:{type:"gasto",edit:g})}>
+        <div className="txicon" style={{background:tipo==="entrada"?"rgba(34,197,94,.15)":g.transferParaId?"rgba(99,102,241,.15)":cat.cor+"30"}}>
+          {tipo==="entrada"?"💰":g.transferParaId?"🔄":cat.icon}
+        </div>
+        <div className="txinfo">
+          <div className="txd">{tipo==="entrada"?g.fonte:g.transferParaId?`${acc?.nome||"?"} → ${dest?.nome||"?"}`:(g.descricao||cat.nome)}</div>
+          <div className="txm">
+            <span>{dmy(g.data)}</span>
+            {tipo!=="entrada"&&!g.transferParaId&&<span className="chip" style={{background:(acc?.cor||"#888")+"30",color:acc?.cor||"var(--muted)"}}>{acc?.nome||"—"}</span>}
+            {tipo!=="entrada"&&<span>{g.transferParaId?"Transferência":FORMA_LABEL[g.forma]}</span>}
+            {g.parcela&&<span>parcela {g.parcela.i}/{g.parcela.n}</span>}
+            {g.fixaId&&<span className="chip" style={{background:"rgba(59,130,246,.15)",color:"var(--blue)"}}>fixa</span>}
+            {g.dividaId&&<span className="chip" style={{background:"rgba(99,102,241,.15)",color:"var(--accent)"}}>dívida</span>}
+          </div>
+        </div>
+        <div className="txa" style={{color:tipo==="entrada"?"var(--green)":g.transferParaId?"var(--muted)":"var(--red)"}}>
+          {tipo==="entrada"?"+":g.transferParaId?"":"-"}{fmt(g.valor)}
+        </div>
+        <button className="tdel" onClick={ev=>{ev.stopPropagation();tipo==="entrada"?delEntrada(g.id):delGasto(g.id);}}>✕</button>
+      </div>
+    );
+  };
+
+  return (
+    <div className="pg">
+      <div style={{display:"flex",gap:6}}>
+        {[["gastos",`Gastos · ${fmt(totG)}`],["credito",`Crédito · ${fmt(totC)}`],["entradas",`Entradas · ${fmt(totE)}`]].map(([id,lb])=>(
+          <button key={id} className={`tab${aba===id?" on":""}`} onClick={()=>setAba(id)}>{lb}</button>
+        ))}
+      </div>
+      <div style={{display:"flex",gap:6}}>
+        <input className="fi" placeholder="🔍 Buscar…" value={busca} onChange={e=>setBusca(e.target.value)} style={{flex:1,fontSize:12,padding:"8px 12px"}}/>
+        <select className="fi" value={sort} onChange={e=>setSort(e.target.value)} style={{flex:"0 0 120px",fontSize:11,padding:8}}>
+          <option value="date_desc">Mais recente</option><option value="date_asc">Mais antigo</option>
+          <option value="value_desc">Maior valor</option><option value="value_asc">Menor valor</option>
+        </select>
+      </div>
+      <div style={{display:"flex",gap:6}}>
+        <select className="fi" value={fCat} onChange={e=>setFCat(e.target.value)} style={{flex:1,fontSize:11,padding:8}}>
+          <option value="">Todas as categorias</option>
+          {data.cats.map(c=><option key={c.id} value={c.id}>{c.icon} {c.nome}</option>)}
+        </select>
+        <select className="fi" value={fAcc} onChange={e=>setFAcc(e.target.value)} style={{flex:1,fontSize:11,padding:8}}>
+          <option value="">Todas as contas</option>
+          {data.accounts.map(a=><option key={a.id} value={a.id}>{a.nome}</option>)}
+        </select>
+      </div>
+      <div style={{display:"flex",gap:8}}>
+        <button className="bulkbtn" onClick={()=>setModal({type:"bulk",destino:aba})}>📋 Colar em lote</button>
+        <button className="bulkbtn" style={{color:"var(--accent)",borderColor:"rgba(99,102,241,.3)"}} onClick={()=>setModal({type:"import",destino:aba})}>📂 Importar CSV/PDF</button>
+      </div>
+      <div className="txlist">
+        {aba==="gastos"&&(gastos.length?gastos.map(g=><Item key={g.id} g={g} tipo="gasto"/>):<div className="empty">Nenhum gasto em {labelKey(mes)}.<br/>Toque no <strong style={{color:"var(--accent)"}}>+</strong> para lançar.</div>)}
+        {aba==="credito"&&(creditos.length?creditos.map(g=><Item key={g.id} g={g} tipo="gasto"/>):<div className="empty">Nenhuma compra de crédito na fatura de {labelKey(mes)}.</div>)}
+        {aba==="entradas"&&(entradas.length?entradas.map(e=><Item key={e.id} g={e} tipo="entrada"/>):<div className="empty">Nenhuma entrada em {labelKey(mes)}.</div>)}
+      </div>
+    </div>
+  );
+}
+
+/* ════════════════════════════ Página: A pagar ════════════════════════════ */
+function PageAPagar({data,mutate,mes,setModal}){
+  const m=data.months[mes]||novoMes();
+  const cards=data.accounts.filter(a=>a.temCartao);
+  const contas=data.accounts;
+  const [pagando,setPagando]=useState(null);   /* {tipo:"fatura"|"fixa"|"divida", id} */
+  const [selConta,setSelConta]=useState("");
+  const [selForma,setSelForma]=useState("pix");
+
+  const faturas=cards.map(a=>({acc:a,valor:faturaDe(data,mes,a.id),paga:(m.faturasPagas||{})[a.id]||null}))
+    .filter(f=>f.valor>0);
+  const fixasPend=(m.fixas||[]).filter(f=>!f.pago);
+  const fixasPagas=(m.fixas||[]).filter(f=>f.pago);
+  const dividasMes=data.dividas.filter(dv=>!dv.quitada).map(dv=>{
+    const idx=idxParcela(dv,mes);
+    if(idx<0||idx>=dv.parcelas) return null;
+    return {dv,idx,paga:dv.pagos.includes(mes)};
+  }).filter(Boolean);
+
+  const totalPend=faturas.filter(f=>!f.paga).reduce((s,f)=>s+f.valor,0)
+    +fixasPend.reduce((s,f)=>s+(f.valor||0),0)
+    +dividasMes.filter(x=>!x.paga).reduce((s,x)=>s+x.dv.valorParcela,0);
+
+  function pagarFatura(cardId){
+    if(!selConta) return;
+    mutate(d=>{
+      const acc2=d.accounts.find(a=>a.id===cardId);
+      const dtPag=`${mes}-${String(Math.min(acc2?.vencimento||15,28)).padStart(2,"0")}`;
+      ensureMonth(d,mes).faturasPagas[cardId]={contaId:selConta,data:dtPag};return d;});
+    setPagando(null);setSelConta("");
+  }
+  function desfazerFatura(cardId){
+    mutate(d=>{delete ensureMonth(d,mes).faturasPagas[cardId];return d;});
+  }
+  function pagarFixa(fixaId){
+    if(!selConta) return;
+    mutate(d=>{
+      const mm=ensureMonth(d,mes);
+      const f=mm.fixas.find(x=>x.id===fixaId); if(!f) return d;
+      const gid=uid();
+      const dtPag=`${mes}-${String(Math.min(f.dia||15,28)).padStart(2,"0")}`;
+      mm.gastos.unshift({id:gid,catId:f.catId||d.cats[d.cats.length-1].id,descricao:f.nome,valor:f.valor||0,
+        forma:selForma,accId:selConta,data:dtPag,parcela:null,fixaId:f.id});
+      f.pago=true; f.gastoId=gid; return d;
+    });
+    setPagando(null);setSelConta("");
+  }
+  function desfazerFixa(fixaId){
+    mutate(d=>{const mm=ensureMonth(d,mes);const f=mm.fixas.find(x=>x.id===fixaId);
+      if(f){mm.gastos=mm.gastos.filter(g=>g.id!==f.gastoId);f.pago=false;f.gastoId=null;}return d;});
+  }
+  function pagarDivida(dvId){
+    if(!selConta) return;
+    mutate(d=>{
+      const dv=d.dividas.find(x=>x.id===dvId); if(!dv||dv.pagos.includes(mes)) return d;
+      const mm=ensureMonth(d,mes);
+      const idx=idxParcela(dv,mes);
+      const dtPag=`${mes}-15`;
+      mm.gastos.unshift({id:uid(),catId:dv.catId,descricao:`Parcela: ${dv.nome} (${idx+1}/${dv.parcelas})`,
+        valor:dv.valorParcela,forma:selForma,accId:selConta,data:dtPag,parcela:null,dividaId:dv.id});
+      dv.pagos.push(mes); return d;
+    });
+    setPagando(null);setSelConta("");
+  }
+  function desfazerDivida(dvId){
+    mutate(d=>{const dv=d.dividas.find(x=>x.id===dvId);
+      if(dv)dv.pagos=dv.pagos.filter(k=>k!==mes);
+      const mm=ensureMonth(d,mes);
+      mm.gastos=mm.gastos.filter(g=>g.dividaId!==dvId);
+      return d;});
+  }
+
+  const SeletorPagto=({onConfirm,pedirForma=true})=>(
+    <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap",marginTop:8}}>
+      <select className="fi" value={selConta} onChange={e=>setSelConta(e.target.value)} style={{flex:1,minWidth:130,fontSize:12,padding:"9px 10px"}}>
+        <option value="">— Conta que pagou —</option>
+        {contas.map(a=><option key={a.id} value={a.id}>{a.nome}</option>)}
+      </select>
+      {pedirForma&&<select className="fi" value={selForma} onChange={e=>setSelForma(e.target.value)} style={{flex:"0 0 100px",fontSize:12,padding:"9px 10px"}}>
+        {FORMAS.map(([v,l])=><option key={v} value={v}>{l}</option>)}
+      </select>}
+      <button className="btn-green" onClick={onConfirm} disabled={!selConta}>Confirmar</button>
+      <button className="btn-ghost" onClick={()=>{setPagando(null);setSelConta("");}}>✕</button>
     </div>
   );
 
   return (
     <div className="pg">
-      {/* Título com toggle histórico */}
-      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8}}>
-        <div className="st">
-          {viewingHistory
-            ? `Histórico — ${MONTHS_FULL[vm]} ${vy}`
-            : invoiceAlreadyClosed
-            ? `Cartões — ${MONTHS_FULL[nm]} ${activeYear} (fatura aberta)`
-            : `Cartões — ${MONTHS_FULL[vm]} ${vy}`}
-        </div>
-        {invoiceAlreadyClosed&&(
-          <button onClick={()=>setViewingHistory(v=>!v)}
-            style={{background:viewingHistory?"rgba(99,102,241,.15)":"rgba(255,255,255,.06)",border:`1px solid ${viewingHistory?"var(--accent)":"var(--border2)"}`,color:viewingHistory?"var(--accent)":"var(--muted)",fontFamily:"'Plus Jakarta Sans',sans-serif",fontSize:11,fontWeight:700,borderRadius:20,padding:"4px 12px",cursor:"pointer",whiteSpace:"nowrap"}}>
-            {viewingHistory?`← Voltar para ${MONTHS_FULL[nm]}`:`📅 Ver fatura de ${MONTHS_FULL[vm]}`}
-          </button>
-        )}
-      </div>
-
-      {/* Banner modo histórico */}
-      {viewingHistory&&(
-        <div style={{background:"rgba(245,158,11,.08)",border:"1px solid rgba(245,158,11,.25)",borderRadius:10,padding:"9px 13px",fontSize:12,color:"var(--gold)"}}>
-          📋 Você está vendo a fatura de <strong>{MONTHS_FULL[vm]}/{vy}</strong> (fechada).
-          {" "}O valor total foi para Fixas de {MONTHS_FULL[nm]}.
+      <div className="st">📅 A pagar — {labelKey(mes)}</div>
+      {totalPend>0&&(
+        <div className="card" style={{background:"rgba(239,68,68,.06)",borderColor:"rgba(239,68,68,.2)"}}>
+          <div className="st">Total pendente no mês</div>
+          <div style={{fontSize:24,fontWeight:800,color:"var(--red)"}}>{fmt(totalPend)}</div>
         </div>
       )}
 
-      {/* Bank selector */}
+      {faturas.length>0&&<div className="sep">Faturas de cartão</div>}
+      {faturas.map(({acc,valor,paga})=>(
+        <div key={acc.id} className="card">
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div>
+              <div style={{display:"flex",alignItems:"center",gap:7,fontSize:13,fontWeight:700}}>
+                <span style={{width:9,height:9,borderRadius:"50%",background:acc.cor}}/>Fatura {acc.nome}
+              </div>
+              <div style={{fontSize:10,color:paga?"var(--green)":"var(--muted)",marginTop:3}}>
+                {paga?`✓ Paga em ${dmy(paga.data)} via ${(contaById(data,paga.contaId)||{}).nome||"—"}`:`Vence dia ${acc.vencimento} · fecha dia ${acc.fechamento}`}
+              </div>
+            </div>
+            <div style={{fontSize:16,fontWeight:800,color:paga?"var(--green)":"var(--red)"}}>{fmt(valor)}</div>
+          </div>
+          {paga
+            ?<button className="btn-ghost" style={{marginTop:8,width:"100%"}} onClick={()=>desfazerFatura(acc.id)}>Desmarcar pagamento</button>
+            :pagando?.tipo==="fatura"&&pagando.id===acc.id
+              ?<SeletorPagto pedirForma={false} onConfirm={()=>pagarFatura(acc.id)}/>
+              :<button className="btn-green" style={{marginTop:8,width:"100%"}} onClick={()=>{setPagando({tipo:"fatura",id:acc.id});setSelConta("");}}>✓ Marcar fatura como paga</button>}
+        </div>
+      ))}
+
+      <div className="sep" style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+        <span>Despesas fixas</span>
+        <button className="btn-mini" onClick={()=>setModal({type:"fixa"})}>+ Nova fixa</button>
+      </div>
+      {fixasPend.length===0&&fixasPagas.length===0&&<div className="empty">Nenhuma fixa cadastrada neste mês.</div>}
+      {fixasPend.map(f=>(
+        <div key={f.id} className="card" style={{padding:"11px 13px"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div style={{fontSize:12,fontWeight:600}}>{f.nome}{f.recorrente&&<span style={{marginLeft:6,fontSize:9,color:"var(--accent)"}}>♻️</span>}{f.dia?<span style={{marginLeft:6,fontSize:9,color:"var(--muted)"}}>dia {f.dia}</span>:null}</div>
+            <div style={{display:"flex",gap:8,alignItems:"center"}}>
+              <span style={{fontSize:13,fontWeight:700,color:"var(--red)"}}>{fmt(f.valor)}</span>
+              <button className="tdel" onClick={()=>setModal({type:"fixa",edit:f})}>✏️</button>
+              <button className="tdel" onClick={()=>mutate(d=>{const mm=ensureMonth(d,mes);mm.fixas=mm.fixas.filter(x=>x.id!==f.id);return d;})}>✕</button>
+            </div>
+          </div>
+          {pagando?.tipo==="fixa"&&pagando.id===f.id
+            ?<SeletorPagto onConfirm={()=>pagarFixa(f.id)}/>
+            :<button className="btn-green" style={{marginTop:8,width:"100%"}} onClick={()=>{setPagando({tipo:"fixa",id:f.id});setSelConta("");}}>✓ Marcar como paga</button>}
+        </div>
+      ))}
+      {fixasPagas.map(f=>(
+        <div key={f.id} className="card" style={{padding:"11px 13px",opacity:.75}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div style={{fontSize:12,fontWeight:600,textDecoration:"line-through",color:"var(--muted)"}}>{f.nome}</div>
+            <div style={{display:"flex",gap:8,alignItems:"center"}}>
+              <span style={{fontSize:13,fontWeight:700,color:"var(--green)"}}>{fmt(f.valor)}</span>
+              <button className="btn-ghost" onClick={()=>desfazerFixa(f.id)} style={{fontSize:10,padding:"4px 8px"}}>desfazer</button>
+            </div>
+          </div>
+        </div>
+      ))}
+
+      {dividasMes.length>0&&<div className="sep">Parcelas de dívidas</div>}
+      {dividasMes.map(({dv,idx,paga})=>(
+        <div key={dv.id} className="card" style={{padding:"11px 13px"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div style={{fontSize:12,fontWeight:600,textDecoration:paga?"line-through":"none",color:paga?"var(--muted)":"var(--text)"}}>{dv.nome} ({idx+1}/{dv.parcelas})</div>
+            <span style={{fontSize:13,fontWeight:700,color:paga?"var(--green)":"var(--red)"}}>{fmt(dv.valorParcela)}</span>
+          </div>
+          {paga
+            ?<button className="btn-ghost" style={{marginTop:8,width:"100%"}} onClick={()=>desfazerDivida(dv.id)}>Desmarcar</button>
+            :pagando?.tipo==="divida"&&pagando.id===dv.id
+              ?<SeletorPagto onConfirm={()=>pagarDivida(dv.id)}/>
+              :<button className="btn-green" style={{marginTop:8,width:"100%"}} onClick={()=>{setPagando({tipo:"divida",id:dv.id});setSelConta("");}}>✓ Marcar parcela como paga</button>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ════════════════════════════ Página: Cartões ════════════════════════════ */
+function PageCartoes({data,mutate,mes,setModal}){
+  const cards=data.accounts.filter(a=>a.temCartao);
+  const [sel,setSel]=useState(cards[0]?.id||"");
+  useEffect(()=>{ if(!cards.find(c=>c.id===sel)&&cards[0]) setSel(cards[0].id); },[cards.length]);
+  const acc=cards.find(c=>c.id===sel);
+  if(!acc) return <div className="pg"><div className="empty">Nenhum cartão configurado.<br/>Vá em <strong style={{color:"var(--accent)"}}>⚙️ Config</strong> e ative o cartão em uma conta.</div></div>;
+
+  const compras=gastosCartao(data,mes,acc.id);
+  const total=compras.reduce((s,g)=>s+g.valor,0);
+  const paga=(data.months[mes]?.faturasPagas||{})[acc.id]||null;
+  const pct=acc.limite>0?Math.min((total/acc.limite)*100,100):0;
+  const proxima=faturaDe(data,shiftKey(mes,1),acc.id);
+  const catBreak=Object.entries(compras.reduce((o,g)=>{o[g.catId]=(o[g.catId]||0)+g.valor;return o;},{}))
+    .map(([id,v])=>({cat:catById(data,id),v})).sort((a,b)=>b.v-a.v);
+
+  function delCompra(id){ mutate(d=>{const mm=ensureMonth(d,mes);mm.gastos=mm.gastos.filter(g=>g.id!==id);return d;}); }
+
+  return (
+    <div className="pg">
+      <div className="st">💳 Cartões — fatura de {labelKey(mes)}</div>
       <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-        {banks.map(b=>{
-          const tot=purchases.filter(p=>p.bank===b.name).reduce((s,p)=>s+p.monthlyValue,0);
+        {cards.map(c=>{
+          const t=faturaDe(data,mes,c.id);
           return (
-            <button key={b.id} onClick={()=>setSelectedBank(b.name)}
-              style={{padding:"7px 14px",borderRadius:20,border:`2px solid ${selectedBank===b.name?b.color:"var(--border)"}`,background:selectedBank===b.name?b.color+"22":"var(--surface)",color:selectedBank===b.name?b.color:"var(--muted)",fontFamily:"'Sora',sans-serif",fontSize:12,fontWeight:700,cursor:"pointer"}}>
-              {b.name}{tot>0&&<span style={{marginLeft:5,fontSize:9,background:b.color,color:"#fff",padding:"1px 5px",borderRadius:10}}>{fmt(tot)}</span>}
+            <button key={c.id} onClick={()=>setSel(c.id)}
+              style={{padding:"7px 14px",borderRadius:20,border:`2px solid ${sel===c.id?c.cor:"var(--border)"}`,
+              background:sel===c.id?c.cor+"22":"var(--surface)",color:sel===c.id?c.cor:"var(--muted)",
+              fontFamily:"inherit",fontSize:12,fontWeight:700,cursor:"pointer"}}>
+              {c.nome}{t>0&&<span style={{marginLeft:5,fontSize:9,background:c.cor,color:"#fff",padding:"1px 5px",borderRadius:10}}>{fmt(t)}</span>}
             </button>
           );
         })}
       </div>
 
-      {/* Limit card */}
       <div className="card">
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
           <div>
             <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
-              <span style={{width:12,height:12,borderRadius:"50%",background:bank?.color,display:"inline-block"}}/>
-              <span style={{fontSize:14,fontWeight:700}}>{selectedBank}</span>
+              <span style={{width:12,height:12,borderRadius:"50%",background:acc.cor}}/>
+              <span style={{fontSize:14,fontWeight:700}}>{acc.nome}</span>
             </div>
-            <div style={{fontSize:11,color:invoiceAlreadyClosed?"var(--green)":"var(--muted)"}}>
-              {invoiceAlreadyClosed
-                ?viewingHistory
-                  ?`Fatura de ${MONTHS_FULL[vm]} (fechada)`
-                  :<span>✓ Fatura de <strong>{MONTHS_FULL[vm]}</strong> fechada — vendo <strong style={{color:"var(--accent)"}}>{MONTHS_FULL[nm]}</strong></span>
-                :`Fatura em aberto — ${MONTHS_FULL[vm]}`}
+            <div style={{fontSize:11,color:paga?"var(--green)":"var(--muted)"}}>
+              {paga?`✓ Fatura paga em ${dmy(paga.data)}`:`Fecha dia ${acc.fechamento} · vence dia ${acc.vencimento}`}
             </div>
           </div>
           <div style={{textAlign:"right"}}>
-            <div style={{fontSize:20,fontWeight:700,color:"var(--wine)"}}>{fmt(totalUsed)}</div>
-            {limit>0&&<div style={{fontSize:10,color:"var(--muted)"}}>de {fmt(limit)} de limite</div>}
+            <div style={{fontSize:20,fontWeight:800,color:paga?"var(--green)":"var(--red)"}}>{fmt(total)}</div>
+            {acc.limite>0&&<div style={{fontSize:10,color:"var(--muted)"}}>de {fmt(acc.limite)} de limite</div>}
           </div>
         </div>
-        {limit>0&&<>
+        {acc.limite>0&&<>
           <div style={{height:8,background:"var(--border)",borderRadius:4,overflow:"hidden",marginBottom:6}}>
-            <div style={{height:"100%",width:`${pct}%`,borderRadius:4,transition:"width .4s",background:pct>90?"var(--wine)":pct>70?"var(--gold)":bank?.color}}/>
+            <div style={{height:"100%",width:`${pct}%`,borderRadius:4,background:pct>90?"var(--red)":pct>70?"var(--gold)":acc.cor}}/>
           </div>
           <div style={{display:"flex",justifyContent:"space-between",fontSize:11}}>
-            <span style={{color:pct>90?"var(--wine)":pct>70?"var(--gold)":"var(--muted)"}}>{pct.toFixed(0)}% usado</span>
-            <span style={{color:"var(--green)",fontWeight:600}}>{fmt(available)} disponível</span>
+            <span style={{color:pct>90?"var(--red)":pct>70?"var(--gold)":"var(--muted)"}}>{pct.toFixed(0)}% usado</span>
+            <span style={{color:"var(--green)",fontWeight:600}}>{fmt(Math.max(acc.limite-total,0))} disponível</span>
           </div>
         </>}
+        {proxima>0&&<div style={{marginTop:10,fontSize:11,color:"var(--muted)"}}>Próxima fatura ({labelKey(shiftKey(mes,1))}): <strong style={{color:"var(--text)"}}>{fmt(proxima)}</strong> já comprometidos</div>}
       </div>
 
-      {/* Actions — ocultar no histórico */}
-      {!viewingHistory&&(
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
-          <button onClick={()=>setShowAddModal(true)}
-            style={{background:"var(--accent)",border:"none",color:"#fff",fontFamily:"'Sora',sans-serif",fontSize:12,fontWeight:700,borderRadius:11,padding:"12px 8px",cursor:"pointer"}}>
-            + Lançar compra
-          </button>
-          <button onClick={()=>invoiceAlreadyClosed?reopenInvoice():closeInvoice()} disabled={(!totalUsed&&!invoiceAlreadyClosed)||closingInvoice}
-            style={{background:invoiceAlreadyClosed?"rgba(245,158,11,.1)":"var(--surface)",border:`1px solid ${invoiceAlreadyClosed?"var(--gold)":"var(--border)"}`,color:invoiceAlreadyClosed?"var(--gold)":"var(--muted)",fontFamily:"'Sora',sans-serif",fontSize:12,fontWeight:700,borderRadius:11,padding:"12px 8px",cursor:"pointer",opacity:(!totalUsed&&!invoiceAlreadyClosed)?0.5:1}}>
-            {invoiceAlreadyClosed?`↺ Reabrir fatura de ${MONTHS_FULL[vm]}`:`Fechar fatura → ${MONTHS_FULL[nm]}`}
-          </button>
-          <button onClick={()=>setShowImportModal(true)}
-            style={{background:"rgba(99,102,241,.1)",border:"1px solid rgba(99,102,241,.3)",color:"var(--accent)",fontFamily:"'Sora',sans-serif",fontSize:12,fontWeight:700,borderRadius:11,padding:"12px 8px",cursor:"pointer"}}>
-            📂 Importar fatura
-          </button>
-        </div>
-      )}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+        <button className="btn-accent" onClick={()=>setModal({type:"credito",cardId:acc.id})}>+ Lançar compra</button>
+        <button className="bulkbtn" style={{color:"var(--accent)",borderColor:"rgba(99,102,241,.3)"}} onClick={()=>setModal({type:"import",destino:"credito",cardId:acc.id})}>📂 Importar fatura</button>
+      </div>
 
-      {/* Category breakdown */}
       {catBreak.length>0&&(
         <div className="card">
-          <div className="st" style={{marginBottom:10}}>Por categoria {viewingHistory&&`— ${MONTHS_FULL[vm]}`}</div>
-          <div style={{display:"flex",justifyContent:"center",marginBottom:14}}>
-            <Donut size={130} thick={22} data={catBreak.map(c=>({color:c.color,value:c.val}))} label={fmt(totalUsed)} sublabel={selectedBank}/>
+          <div className="st" style={{marginBottom:10}}>Por categoria</div>
+          <div style={{marginBottom:14}}>
+            <Donut size={126} thick={21} data={catBreak.map(c=>({color:c.cat.cor,value:c.v}))} label={fmt(total)} sublabel={acc.nome}/>
           </div>
           {catBreak.map(c=>(
-            <div key={c.name} style={{marginBottom:9}}>
+            <div key={c.cat.id} style={{marginBottom:8}}>
               <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
-                <span style={{fontSize:11,fontWeight:500}}>{c.icon} {c.name}</span>
-                <span style={{fontSize:11,fontWeight:600,color:"var(--wine)"}}>{fmt(c.val)}</span>
+                <span style={{fontSize:11}}>{c.cat.icon} {c.cat.nome}</span>
+                <span style={{fontSize:11,fontWeight:600,color:"var(--red)"}}>{fmt(c.v)}</span>
               </div>
               <div style={{height:5,background:"var(--border)",borderRadius:3,overflow:"hidden"}}>
-                <div style={{height:"100%",width:`${totalUsed>0?(c.val/totalUsed)*100:0}%`,background:c.color,borderRadius:3}}/>
+                <div style={{height:"100%",width:`${total>0?(c.v/total)*100:0}%`,background:c.cat.cor,borderRadius:3}}/>
               </div>
             </div>
           ))}
         </div>
       )}
 
-      {/* Purchases list */}
-      {bankPurchases.length>0&&(
-        <div>
-          <div className="st" style={{marginBottom:8}}>Lançamentos ({bankPurchases.length}){viewingHistory&&` — ${MONTHS_FULL[vm]}`}</div>
-          {bankPurchases.length>0&&<ListControls sortBy={sortPurchases} setSortBy={setSortPurchases} filterText={filterPurchasesText} setFilterText={setFilterPurchasesText} filterCategory={filterPurchasesCat} setFilterCategory={setFilterPurchasesCat} expenseCats={expenseCats} banks={banks} showBank={false}/>}
-          <div className="txlist">
-            {applyFilters(bankPurchases,{sortBy:sortPurchases,filterText:filterPurchasesText,filterCategory:filterPurchasesCat,nameField:"name",valueField:"monthlyValue"}).map(p=>{
-              const cat=catMap[p.category]||{icon:"📌",color:"#888"};
-              const d=p.date?p.date.slice(5).split("-").reverse().join("/"):"";
-              return (
-                <div key={p.id} style={{display:"flex",alignItems:"center",gap:8,padding:"10px",background:"var(--surface)",border:"1px solid var(--border)",borderRadius:11}}>
-                  <div style={{width:32,height:32,borderRadius:9,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,flexShrink:0,background:cat.color+"33"}}>{cat.icon}</div>
-                  <div style={{flex:1,minWidth:0}}>
-                    <div style={{fontSize:12,fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.name}</div>
-                    <div style={{fontSize:9,color:"var(--muted)",marginTop:2}}>{d} · {p.category}{p.installments>1&&` · parcela ${p.installmentNum}/${p.installments}`}</div>
-                  </div>
-                  <div style={{fontSize:12,fontWeight:700,color:"var(--wine)",flexShrink:0}}>-{fmt(p.monthlyValue)}</div>
-                  {!viewingHistory&&<>
-                    <button onClick={()=>setEditingPurchase(p)} style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:13,padding:"5px 4px",flexShrink:0}}>✏️</button>
-                    <button onClick={()=>deletePurchase(p.id)} style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:13,padding:"5px 4px",flexShrink:0}}>✕</button>
-                  </>}
+      {compras.length>0?(
+        <div className="txlist">
+          {compras.slice().sort((a,b)=>(b.data||"").localeCompare(a.data||"")).map(g=>{
+            const cat=catById(data,g.catId);
+            return (
+              <div key={g.id} className="txi" onClick={()=>setModal({type:"credito",edit:g})}>
+                <div className="txicon" style={{background:cat.cor+"30"}}>{cat.icon}</div>
+                <div className="txinfo">
+                  <div className="txd">{g.descricao}</div>
+                  <div className="txm"><span>{dmy(g.data)}</span><span>{cat.nome}</span>{g.parcela&&<span>parcela {g.parcela.i}/{g.parcela.n}</span>}</div>
                 </div>
-              );
-            })}
+                <div className="txa" style={{color:"var(--red)"}}>-{fmt(g.valor)}</div>
+                <button className="tdel" onClick={ev=>{ev.stopPropagation();delCompra(g.id);}}>✕</button>
+              </div>
+            );
+          })}
+        </div>
+      ):<div className="empty">Nenhum lançamento na fatura de {labelKey(mes)}.<br/>Compras após o fechamento (dia {acc.fechamento}) caem automaticamente na fatura seguinte.</div>}
+    </div>
+  );
+}
+
+/* ════════════════════════════ Página: Carteira ════════════════════════════ */
+function PageCarteira({data,mutate,totalContas}){
+  const [editando,setEditando]=useState(null);
+  const [valor,setValor]=useState("");
+  function salvar(accId){
+    const v=parseVal(valor);
+    mutate(d=>{const a=d.accounts.find(x=>x.id===accId);if(a){a.saldoInicial=v;a.ancoraData=hoje();}return d;});
+    setEditando(null);setValor("");
+  }
+  return (
+    <div className="pg">
+      <div className="card" style={{background:"linear-gradient(135deg,rgba(99,102,241,.15),rgba(139,92,246,.06))",borderColor:"rgba(99,102,241,.25)"}}>
+        <div className="st">💼 Total nas contas</div>
+        <div style={{fontSize:26,fontWeight:800,color:totalContas>=0?"var(--green)":"var(--red)"}}>{fmt(totalContas)}</div>
+        <div style={{fontSize:10,color:"var(--muted)",marginTop:4}}>Sempre derivado: saldo definido + todas as movimentações desde então</div>
+      </div>
+      <div className="st">Saldo por conta</div>
+      {data.accounts.map(a=>{
+        const s=saldoConta(data,a.id);
+        const isEd=editando===a.id;
+        return (
+          <div key={a.id} className="card">
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+              <div style={{display:"flex",alignItems:"center",gap:8,fontSize:14,fontWeight:700}}>
+                <span style={{width:10,height:10,borderRadius:"50%",background:a.cor}}/>{a.nome}
+              </div>
+              <div style={{fontSize:17,fontWeight:800,color:s>=0?"var(--green)":"var(--red)"}}>{fmt(s)}</div>
+            </div>
+            <div style={{fontSize:10,color:"var(--muted)",marginBottom:8,lineHeight:1.5}}>
+              {a.ancoraData
+                ?<>Saldo definido em {dmy(a.ancoraData)}: {fmt(a.saldoInicial||0)} + movimentações desde então</>
+                :<>⚠ Saldo ainda não definido. Digite o saldo real de hoje para ancorar.</>}
+            </div>
+            {isEd
+              ?<div style={{display:"flex",gap:6}}>
+                <input className="fi" inputMode="decimal" placeholder="Ex: 1.234,56" value={valor} onChange={e=>setValor(e.target.value)} autoFocus style={{flex:1}}/>
+                <button className="btn-green" onClick={()=>salvar(a.id)}>Salvar</button>
+                <button className="btn-ghost" onClick={()=>{setEditando(null);setValor("");}}>✕</button>
+              </div>
+              :<button className="btn-ghost" style={{width:"100%",color:a.ancoraData?"var(--accent)":"var(--green)",borderColor:a.ancoraData?"rgba(99,102,241,.3)":"rgba(34,197,94,.3)"}}
+                onClick={()=>{setEditando(a.id);setValor(String(a.saldoInicial||""));}}>
+                {a.ancoraData?"🔧 Ajustar saldo (digitar o real de hoje)":"➕ Definir saldo atual"}
+              </button>}
           </div>
+        );
+      })}
+      <div className="hint">
+        <strong style={{color:"var(--accent)"}}>Como funciona:</strong> definir o saldo cria uma âncora na data de hoje. Lançamentos anteriores à âncora ficam no histórico para análise mas não mexem no saldo; tudo dali em diante atualiza automaticamente. Se divergir do banco real, é sinal de lançamento faltando — ou é só redefinir a âncora.
+      </div>
+    </div>
+  );
+}
+
+/* ════════════════════════════ Página: Reservas ════════════════════════════ */
+function PageReservas({data,mutate,mes,rt,setModal}){
+  const m=data.months[mes]||novoMes();
+  const [corrigindo,setCorrigindo]=useState(null); /* "emergencia"|"pessoal" */
+  const [valor,setValor]=useState("");
+  function corrigir(tipo){
+    const v=parseVal(valor);
+    mutate(d=>{d.settings.reservaAncora[tipo]={valor:v,data:hoje()};return d;});
+    setCorrigindo(null);setValor("");
+  }
+  function del(id){
+    mutate(d=>{const mm=ensureMonth(d,mes);mm.reservas=mm.reservas.filter(r=>r.id!==id);return d;});
+  }
+  return (
+    <div className="pg">
+      <div className="st">💰 Reservas & investimentos</div>
+      <div className="card">
+        <GoalBar label="Reserva de emergência" icon="🛡️" current={rt.emergencia} goal={data.settings.emergencyGoal} color="var(--green)"/>
+        <GoalBar label={data.settings.personalGoalName} icon="🎯" current={rt.pessoal} goal={data.settings.personalGoalValue} color="var(--accent)"/>
+        <div style={{display:"flex",gap:6,marginTop:4}}>
+          {[["emergencia","Corrigir reserva"],["pessoal","Corrigir meta"]].map(([t,l])=>(
+            <button key={t} className="btn-ghost" style={{flex:1,fontSize:10}} onClick={()=>{setCorrigindo(t);setValor("");}}>🔧 {l}</button>
+          ))}
+        </div>
+        {corrigindo&&(
+          <div style={{marginTop:10,background:"rgba(99,102,241,.07)",border:"1px solid rgba(99,102,241,.2)",borderRadius:10,padding:12}}>
+            <div style={{fontSize:11,color:"var(--muted)",marginBottom:8}}>Digite o saldo real que você tem hoje em <strong>{corrigindo==="emergencia"?"reserva de emergência":data.settings.personalGoalName}</strong>. Vira a nova âncora; aportes futuros somam em cima.</div>
+            <div style={{display:"flex",gap:6}}>
+              <input className="fi" inputMode="decimal" placeholder="Ex: 2.500,00" value={valor} onChange={e=>setValor(e.target.value)} autoFocus style={{flex:1}}/>
+              <button className="btn-green" onClick={()=>corrigir(corrigindo)}>Definir</button>
+              <button className="btn-ghost" onClick={()=>setCorrigindo(null)}>✕</button>
+            </div>
+          </div>
+        )}
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+        <button className="btn-accent" onClick={()=>setModal({type:"reserva"})}>+ Aporte</button>
+        <button className="btn-ghost" style={{color:"var(--gold)",borderColor:"rgba(245,158,11,.3)"}} onClick={()=>setModal({type:"reserva",retirada:true})}>📤 Retirada</button>
+      </div>
+      {(m.reservas||[]).length===0?<div className="empty">Nenhum lançamento em {labelKey(mes)}.</div>
+        :<div className="txlist">
+          {(m.reservas||[]).map(r=>{
+            const acc=contaById(data,r.accId);
+            return (
+              <div key={r.id} className="txi" style={{cursor:"default"}}>
+                <div className="txicon" style={{background:r.retirada?"rgba(239,68,68,.15)":"rgba(245,158,11,.15)"}}>{r.retirada?"📤":"💰"}</div>
+                <div className="txinfo">
+                  <div className="txd">{r.nome||({emergencia:"Reserva de emergência",pessoal:data.settings.personalGoalName,outro:"Investimento"})[r.tipo]}</div>
+                  <div className="txm"><span>{dmy(r.data)}</span><span>{({emergencia:"🛡️ Emergência",pessoal:"🎯 Meta",outro:"Outro"})[r.tipo]}</span>{acc&&<span className="chip" style={{background:acc.cor+"30",color:acc.cor}}>{acc.nome}</span>}</div>
+                </div>
+                <div className="txa" style={{color:r.retirada?"var(--red)":"var(--gold)"}}>{r.retirada?"-":"+"}{fmt(r.valor)}</div>
+                <button className="tdel" onClick={()=>del(r.id)}>✕</button>
+              </div>
+            );
+          })}
+        </div>}
+      <div className="hint">Aporte sai do saldo da conta escolhida; retirada volta para ela. Sem lançamentos duplicados — o saldo da Carteira e o total da reserva são derivados do mesmo registro.</div>
+    </div>
+  );
+}
+
+/* ════════════════════════════ Página: Dívidas ════════════════════════════ */
+function PageDividas({data,mutate,mes}){
+  const [showForm,setShowForm]=useState(false);
+  const [f,setF]=useState({nome:"",total:"",parcelas:"",inicio:mes,catId:""});
+  const ativas=data.dividas.filter(d=>!d.quitada);
+  const quitadas=data.dividas.filter(d=>d.quitada);
+  const tv=parseVal(f.total), np=parseInt(f.parcelas)||0, vp=np>0?r2(tv/np):0;
+
+  function add(){
+    if(!f.nome||!tv||!np) return;
+    mutate(d=>{d.dividas.push({id:uid(),nome:f.nome,catId:f.catId||d.cats[d.cats.length-1].id,
+      total:tv,parcelas:np,valorParcela:vp,inicioMes:f.inicio,pagos:[],quitada:false});return d;});
+    setF({nome:"",total:"",parcelas:"",inicio:mes,catId:""});setShowForm(false);
+  }
+  return (
+    <div className="pg">
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div className="st">🔗 Dívidas & parcelamentos</div>
+        <button className="btn-mini" onClick={()=>setShowForm(s=>!s)}>{showForm?"Cancelar":"+ Nova"}</button>
+      </div>
+      {showForm&&(
+        <div className="card">
+          <div className="fg"><label className="fl">Nome</label><input className="fi" placeholder="Ex: Carro, Funileiro…" value={f.nome} onChange={e=>setF(p=>({...p,nome:e.target.value}))}/></div>
+          <div className="fg"><label className="fl">Categoria</label>
+            <select className="fi" value={f.catId} onChange={e=>setF(p=>({...p,catId:e.target.value}))}>
+              <option value="">— Selecione —</option>
+              {data.cats.map(c=><option key={c.id} value={c.id}>{c.icon} {c.nome}</option>)}
+            </select></div>
+          <div className="frow">
+            <div className="fg"><label className="fl">Valor total (R$)</label><input className="fi" inputMode="decimal" value={f.total} onChange={e=>setF(p=>({...p,total:e.target.value}))}/></div>
+            <div className="fg"><label className="fl">Parcelas</label><input className="fi" type="number" inputMode="numeric" value={f.parcelas} onChange={e=>setF(p=>({...p,parcelas:e.target.value}))}/></div>
+          </div>
+          {vp>0&&<div className="hint" style={{marginBottom:10}}>Parcela mensal: <strong style={{color:"var(--accent)"}}>{fmt(vp)}</strong></div>}
+          <div className="fg"><label className="fl">Mês da 1ª parcela</label><input className="fi" type="month" value={f.inicio} onChange={e=>setF(p=>({...p,inicio:e.target.value}))}/></div>
+          <button className="savebtn" onClick={add} disabled={!f.nome||!tv||!np}>Adicionar dívida</button>
         </div>
       )}
-
-      {bankPurchases.length===0&&(
-        <div className="empty">
-          {viewingHistory
-            ?`Nenhum lançamento em ${MONTHS_FULL[vm]}.`
-            :`Nenhum lançamento de crédito em ${MONTHS_FULL[activeMonth]}.\nToque em `}{!viewingHistory&&<strong style={{color:"var(--accent)"}}>+ Lançar compra</strong>}{!viewingHistory&&" para adicionar."}
+      {ativas.length===0&&!showForm&&<div className="empty">Nenhuma dívida ativa. 🎉</div>}
+      {ativas.map(dv=>{
+        const pagas=dv.pagos.length;
+        const pct=Math.min((pagas/dv.parcelas)*100,100);
+        const restante=r2(dv.total-pagas*dv.valorParcela);
+        const idx=idxParcela(dv,mes);
+        const vigente=idx>=0&&idx<dv.parcelas;
+        const pagaMes=dv.pagos.includes(mes);
+        return (
+          <div key={dv.id} className="card">
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
+              <div>
+                <div style={{fontSize:13,fontWeight:700}}>{dv.nome}</div>
+                <div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>{dv.parcelas}x de {fmt(dv.valorParcela)} · Total {fmt(dv.total)} · início {labelKey(dv.inicioMes)}</div>
+              </div>
+              <div style={{textAlign:"right"}}>
+                <div style={{fontSize:12,fontWeight:700,color:"var(--red)"}}>{fmt(Math.max(restante,0))}</div>
+                <div style={{fontSize:9,color:"var(--muted)"}}>restando</div>
+              </div>
+            </div>
+            <div style={{height:6,background:"var(--border)",borderRadius:3,overflow:"hidden",marginBottom:4}}>
+              <div style={{height:"100%",width:`${pct}%`,background:"var(--green)",borderRadius:3}}/>
+            </div>
+            <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:"var(--muted)",marginBottom:8}}>
+              <span>{pagas}/{dv.parcelas} pagas ({pct.toFixed(0)}%)</span>
+              {vigente&&<span style={{color:pagaMes?"var(--green)":"var(--gold)",fontWeight:700}}>{pagaMes?"✓ Paga este mês":"⚡ Vence este mês — marque em A pagar"}</span>}
+            </div>
+            <div style={{display:"flex",gap:7}}>
+              <button className="btn-ghost" style={{flex:1,color:"var(--green)",borderColor:"rgba(34,197,94,.3)"}}
+                onClick={()=>mutate(d=>{const x=d.dividas.find(y=>y.id===dv.id);if(x)x.quitada=true;return d;})}>✓ Quitar tudo</button>
+              <button className="btn-ghost" style={{color:"var(--red)",borderColor:"rgba(239,68,68,.3)"}}
+                onClick={()=>{if(confirm("Apagar esta dívida? (os pagamentos já lançados no extrato permanecem)"))mutate(d=>{d.dividas=d.dividas.filter(y=>y.id!==dv.id);return d;});}}>Apagar</button>
+            </div>
+          </div>
+        );
+      })}
+      {quitadas.map(dv=>(
+        <div key={dv.id} className="card" style={{opacity:.6,padding:"10px 13px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div>
+            <div style={{fontSize:12,fontWeight:600,textDecoration:"line-through",color:"var(--muted)"}}>{dv.nome}</div>
+            <div style={{fontSize:10,color:"var(--muted)"}}>{dv.parcelas}x de {fmt(dv.valorParcela)}</div>
+          </div>
+          <button className="tdel" onClick={()=>mutate(d=>{d.dividas=d.dividas.filter(y=>y.id!==dv.id);return d;})}>✕</button>
         </div>
-      )}
+      ))}
+    </div>
+  );
+}
 
-      {showAddModal&&(
-        <Modal onClose={()=>setShowAddModal(false)} tall>
-          <CreditPurchaseForm banks={banks} expenseCats={expenseCats} selectedBank={selectedBank} vm={activeMonth} vy={activeYear} onSave={addPurchase} onClose={()=>setShowAddModal(false)} defaultInvoiceMonth={`${activeYear}-${activeMonth}`}/>
-        </Modal>
-      )}
-      {showImportModal&&(
-        <Modal onClose={()=>setShowImportModal(false)} tall>
-          <ImportModal banks={banks} expenseCats={expenseCats} importType="credit" defaultBank={selectedBank} vm={activeMonth} vy={activeYear} onClose={()=>setShowImportModal(false)} onImport={(type,entries)=>{
-            if(invoiceAlreadyClosed){
-              setNextCreditData(d=>{const updated={purchases:[...entries,...(d?.purchases||[])]};dbSet(creditKey(ny,nm),updated);return updated;});
-            } else {
-              setCreditData(d=>{const updated={purchases:[...entries,...(d.purchases||[])]};dbSet(creditKey(vy,vm),updated);return updated;});
-            }
-            setShowImportModal(false);
-          }}/>
-        </Modal>
-      )}
-      {editingPurchase&&(
-        <Modal onClose={()=>setEditingPurchase(null)} tall>
-          <CreditPurchaseForm banks={banks} expenseCats={expenseCats} selectedBank={selectedBank} vm={activeMonth} vy={activeYear}
-            onSave={savePurchaseEdit} onClose={()=>setEditingPurchase(null)}
-            defaultInvoiceMonth={`${activeYear}-${activeMonth}`} initialData={editingPurchase} isEdit/>
-        </Modal>
+/* ════════════════════════════ Página: Planejar ════════════════════════════ */
+function PagePlanejar({data,mes,rt}){
+  const [tab,setTab]=useState("sim");
+  const [simV,setSimV]=useState(""); const [simP,setSimP]=useState("10");
+  const tv=parseVal(simV), np=parseInt(simP)||1, vp=np>0?tv/np:0;
+
+  /* médias dos últimos meses com dado */
+  let inc=0,out=0,n=0;
+  for(let i=1;i<=6;i++){ const k=shiftKey(mes,-i); if(!data.months[k]) continue;
+    const mm=metricsMes(data,k); if(mm.entradas>0||mm.saidas>0){inc+=mm.entradas;out+=mm.saidas;n++;} }
+  const metAtual=metricsMes(data,mes);
+  if(n===0){inc=metAtual.entradas;out=metAtual.saidas;n=metAtual.entradas>0?1:0;}
+  const rendaM=n>0?inc/n:0, saidaM=n>0?out/n:0, folga=rendaM-saidaM;
+
+  let verdict=null;
+  if(tv>0&&vp>0){
+    const nova=folga-vp;
+    if(nova>=vp*0.5) verdict={cor:"var(--green)",bg:"rgba(34,197,94,.08)",bd:"rgba(34,197,94,.3)",t:"💚 Pode parcelar tranquilo",s:`Sobra mensal estimada após a parcela: ${fmt(nova)}`};
+    else if(nova>=0) verdict={cor:"var(--gold)",bg:"rgba(245,158,11,.08)",bd:"rgba(245,158,11,.3)",t:"⚠️ Vai apertar",s:`Sobra cai para ${fmt(nova)} — pouca folga para imprevistos`};
+    else verdict={cor:"var(--red)",bg:"rgba(239,68,68,.08)",bd:"rgba(239,68,68,.3)",t:"🔴 Não recomendado",s:`Você ficaria ${fmt(Math.abs(nova))} no negativo todo mês`};
+  }
+  const aVistaDepois=rt.emergencia-tv;
+  const aVistaOk=aVistaDepois>=(data.settings.emergencyGoal||0)*0.3;
+
+  /* análise de categorias: mês atual vs média 3 meses */
+  const atual=gastosPorCat(data,mes);
+  const past={}; let pn=0;
+  for(let i=1;i<=3;i++){ const k=shiftKey(mes,-i); if(!data.months[k]) continue; pn++;
+    Object.entries(gastosPorCat(data,k)).forEach(([c,v])=>{past[c]=(past[c]||0)+v;}); }
+  const catAvg=Object.entries(past).map(([id,t])=>({id,cat:catById(data,id),avg:t/Math.max(pn,1),cur:atual[id]||0}))
+    .sort((a,b)=>b.avg-a.avg);
+
+  return (
+    <div className="pg">
+      <div className="st">🎯 Planejar</div>
+      <div style={{display:"flex",gap:6}}>
+        <button className={`tab${tab==="sim"?" on":""}`} onClick={()=>setTab("sim")}>💳 Simulador</button>
+        <button className={`tab${tab==="ana"?" on":""}`} onClick={()=>setTab("ana")}>📊 Análise</button>
+      </div>
+
+      {tab==="sim"&&<>
+        <div className="card">
+          <div style={{fontSize:13,fontWeight:700,marginBottom:10}}>Posso parcelar essa compra?</div>
+          <div className="frow">
+            <div className="fg"><label className="fl">Valor total (R$)</label><input className="fi" inputMode="decimal" placeholder="Ex: 3.000,00" value={simV} onChange={e=>setSimV(e.target.value)}/></div>
+            <div className="fg"><label className="fl">Parcelas</label><input className="fi" inputMode="numeric" placeholder="Ex: 10" value={simP} onChange={e=>setSimP(e.target.value)}/></div>
+          </div>
+          {tv>0&&<div className="hint">Parcela mensal: <strong style={{color:"var(--accent)"}}>{fmt(vp)}</strong> · {np}x até {labelKey(shiftKey(mes,np-1))}</div>}
+        </div>
+        {verdict&&(
+          <div className="card" style={{background:verdict.bg,borderColor:verdict.bd}}>
+            <div style={{fontSize:14,fontWeight:800,color:verdict.cor,marginBottom:6}}>{verdict.t}</div>
+            <div style={{fontSize:12,lineHeight:1.6}}>{verdict.s}</div>
+          </div>
+        )}
+        {tv>0&&(
+          <div className="card">
+            <div style={{fontSize:13,fontWeight:700,marginBottom:10}}>Parcelar × à vista</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+              <div style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:9,padding:10}}>
+                <div style={{fontSize:10,color:"var(--muted)",fontWeight:700,marginBottom:4}}>💳 PARCELAR</div>
+                <div style={{fontSize:11,marginBottom:3}}>Saída/mês: <strong style={{color:"var(--red)"}}>{fmt(vp)}</strong></div>
+                <div style={{fontSize:11}}>Reserva mantida: <strong style={{color:"var(--green)"}}>{fmt(rt.emergencia)}</strong></div>
+              </div>
+              <div style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:9,padding:10}}>
+                <div style={{fontSize:10,color:"var(--muted)",fontWeight:700,marginBottom:4}}>💰 À VISTA</div>
+                <div style={{fontSize:11,marginBottom:3}}>Reserva após: <strong style={{color:aVistaDepois<0?"var(--red)":aVistaOk?"var(--green)":"var(--gold)"}}>{fmt(aVistaDepois)}</strong></div>
+                <div style={{fontSize:10,color:aVistaOk?"var(--green)":"var(--gold)"}}>{aVistaOk?"✓ Mantém saúde da reserva":"⚠ Impacta a reserva"}</div>
+              </div>
+            </div>
+          </div>
+        )}
+        <div className="card">
+          <div className="st" style={{marginBottom:10}}>Seu panorama (média dos últimos meses)</div>
+          {[["Renda média mensal",fmt(rendaM),"var(--green)"],["Saídas médias mensais",fmt(saidaM),"var(--red)"],["Folga mensal média",fmt(folga),folga>=0?"var(--green)":"var(--red)"],["🛡️ Reserva atual",fmt(rt.emergencia),"var(--accent)"]].map(([l,v,c])=>(
+            <div key={l} style={{display:"flex",justifyContent:"space-between",fontSize:11,marginBottom:6}}>
+              <span style={{color:"var(--muted)"}}>{l}</span><span style={{fontWeight:700,color:c}}>{v}</span>
+            </div>
+          ))}
+        </div>
+      </>}
+
+      {tab==="ana"&&(pn<1
+        ?<div className="empty">Precisa de pelo menos 1 mês anterior com dados para comparar.</div>
+        :<div className="card">
+          <div style={{fontSize:13,fontWeight:700,marginBottom:10}}>Categorias: este mês × média</div>
+          {catAvg.slice(0,10).map(c=>{
+            const diff=c.cur-c.avg, pctD=c.avg>0?(diff/c.avg)*100:0;
+            const over=c.cur>c.avg*1.15, under=c.cur<c.avg*0.85&&c.cur>0;
+            return (
+              <div key={c.id} style={{marginBottom:10,paddingBottom:10,borderBottom:"1px solid var(--border)"}}>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+                  <span style={{fontSize:12,fontWeight:600}}>{c.cat.icon} {c.cat.nome}</span>
+                  <span style={{fontSize:11,fontWeight:700,color:"var(--red)"}}>{fmt(c.avg)}/mês</span>
+                </div>
+                <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:"var(--muted)"}}>
+                  <span>Este mês: <strong style={{color:over?"var(--red)":under?"var(--green)":"var(--text2)"}}>{fmt(c.cur)}</strong></span>
+                  <span style={{color:over?"var(--red)":under?"var(--green)":"var(--muted)"}}>{c.cur>0?(diff>=0?"+":"")+pctD.toFixed(0)+"% vs média":"—"}</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
       )}
     </div>
   );
 }
 
-
-function CreditPurchaseForm({banks,expenseCats,selectedBank,vm,vy,onSave,onClose,defaultInvoiceMonth,initialData,isEdit}){
-  const dd=`${vy}-${String(vm+1).padStart(2,"0")}-${String(today.getDate()).padStart(2,"0")}`;
-  const invoiceOptions=Array.from({length:4},(_,i)=>{
-    const m=(vm+i)%12, y=vy+Math.floor((vm+i)/12);
-    return {label:`Fatura de ${MONTHS_FULL[m]} ${y}`,value:`${y}-${m}`};
-  });
-  const defInvoice=defaultInvoiceMonth||`${vy}-${vm}`;
-  const [form,setForm]=useState(()=>{
-    if(initialData) return{...initialData,totalValue:String(initialData.totalValue??initialData.monthlyValue??""),installments:String(initialData.installments||1),invoiceMonth:initialData.monthYear||defInvoice};
-    return{name:"",category:expenseCats[0]?.name||"Outros",bank:selectedBank,totalValue:"",installments:"1",date:dd,invoiceMonth:defaultInvoiceMonth||defInvoice};
-  });
-  const upd=(k,v)=>setForm(f=>({...f,[k]:v}));
-  const tv=parseFloat(String(form.totalValue||"0").replace(",","."))||0;
-  const inst=parseInt(form.installments||"1")||1;
-  const monthly=inst>0?tv/inst:0;
-  function save(){
-    if(!form.name||!tv) return;
-    onSave(isEdit
-      ?{...form,totalValue:tv,installments:inst,id:initialData.id}
-      :{...form,totalValue:tv,installments:inst,groupId:uid()});
-  }
+/* ════════════════════════════ Página: Anual ════════════════════════════ */
+function PageAnual({data,mes}){
+  const ano=mes.split("-")[0];
+  const rows=Array.from({length:12},(_,i)=>{const k=`${ano}-${String(i+1).padStart(2,"0")}`;return {k,i,...metricsMes(data,k)};});
+  const tInc=rows.reduce((s,r)=>s+r.entradas,0), tOut=rows.reduce((s,r)=>s+r.saidas,0);
+  const chartMax=Math.max(...rows.flatMap(r=>[r.entradas,r.saidas]),1);
   return (
-    <>
-      <div className="mhdr"><div className="mtitle">{isEdit?"✏️ Editar lançamento":"💳 Nova compra no crédito"}</div><button className="mclose" onClick={onClose}>✕</button></div>
-      <div className="fg"><label className="fl">Descrição</label><input className="fi" placeholder="Ex: Tênis Nike, iFood, Netflix…" value={form.name} onChange={e=>upd("name",e.target.value)} autoFocus/></div>
-      <div className="fg"><label className="fl">Categoria</label>
-        <div className="catgrid">{expenseCats.map(c=>(
-          <button type="button" key={c.id||c.name} className={`catopt${form.category===c.name?" selected":""}`} onClick={()=>upd("category",c.name)}>{c.icon} {c.name}</button>
-        ))}</div>
+    <div className="pg">
+      <div className="st">📈 Visão anual — {ano}</div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:7}}>
+        {[["Entradas",fmt(tInc),"var(--green)"],["Saídas",fmt(tOut),"var(--red)"],["Sobrou",fmt(tInc-tOut),tInc-tOut>=0?"var(--accent)":"var(--red)"]].map(([l,v,c])=>(
+          <div key={l} className="card" style={{padding:11}}><div className="st">{l}</div><div style={{fontSize:13,fontWeight:800,color:c}}>{v}</div></div>
+        ))}
       </div>
-      <div className="fg"><label className="fl">Cartão</label>
-        <select className="fi" value={form.bank} onChange={e=>upd("bank",e.target.value)}>
-          {banks.map(b=><option key={b.id} value={b.name}>{b.name}</option>)}
-        </select>
-      </div>
-      <div className="fg"><label className="fl">Cai na fatura de</label>
-        <select className="fi" value={form.invoiceMonth} onChange={e=>upd("invoiceMonth",e.target.value)}>
-          {invoiceOptions.map(o=><option key={o.value} value={o.value}>{o.label}</option>)}
-        </select>
-      </div>
-      <div className="frow">
-        <div className="fg"><label className="fl">Valor total (R$)</label><input className="fi" type="text" inputMode="decimal" pattern="[0-9.,]*" placeholder="0,00" value={form.totalValue} onChange={e=>upd("totalValue",e.target.value)}/></div>
-        <div className="fg"><label className="fl">Parcelas</label><input className="fi" type="number" inputMode="numeric" min="1" max="48" value={form.installments} onChange={e=>upd("installments",e.target.value)}/></div>
-      </div>
-      {inst>1&&monthly>0&&<div style={{background:"rgba(155,140,255,.1)",border:"1px solid rgba(155,140,255,.25)",borderRadius:9,padding:"8px 11px",marginBottom:10,fontSize:12,color:"var(--accent)",fontWeight:600}}>{inst}x de {fmt(monthly)} · A partir da fatura selecionada</div>}
-      <div className="fg"><label className="fl">Data da compra</label><input className="fi" type="date" value={form.date} onChange={e=>upd("date",e.target.value)}/></div>
-      <button className="savebtn" onClick={save} disabled={!form.name||!tv}>{isEdit?"Salvar alterações":`Adicionar ${inst>1?`(${inst}x de ${fmt(monthly)})`:`(${fmt(tv)})`}`}</button>
-    </>
-  );
-}
-
-// ─── BULK PANEL ───────────────────────────────────────────────────────────────
-function BulkPanel({type,banks,expenseCats,vy,vm,onConfirm,onClose}){
-  const [text,setText]=useState("");
-  const [preview,setPreview]=useState([]);
-  const [processed,setProcessed]=useState(false);
-  const labels={income:"Entradas",expense:"Gastos",fixed:"Despesas Fixas",investment:"Reservas"};
-  const examples={
-    income:"Salário 5000 05/04\nFreela Cliente X 1200 10/04",
-    expense:"iFood 45.90 alimentação pix 01/04\nMercado 200 alimentação débito 02/04",
-    fixed:"Parcela carro 850\nSeguro celular 49.90",
-    investment:"Reserva de Emergência 500 01/04\nCDB 200 05/04",
-  };
-  function parseLine(line){
-    const valMatch=line.match(/\b(\d{1,6}[.,]\d{2}|\d{1,6})\b/);
-    if(!valMatch) return null;
-    const value=parseFloat(valMatch[1].replace(",","."));
-    if(!value||value<=0) return null;
-    const dateMatch=line.match(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/);
-    let date=`${vy}-${String(vm+1).padStart(2,"0")}-${String(today.getDate()).padStart(2,"0")}`;
-    if(dateMatch){const d=String(dateMatch[1]).padStart(2,"0"),m=String(dateMatch[2]).padStart(2,"0");const y=dateMatch[3]?(dateMatch[3].length===2?"20"+dateMatch[3]:dateMatch[3]):vy;date=`${y}-${m}-${d}`;}
-    let rem=line.replace(valMatch[0]," ").replace(dateMatch?dateMatch[0]:""," ").replace(/\s+/g," ").trim();
-    if(type==="income") return {id:uid(),name:rem||"Entrada",value,date};
-    if(type==="fixed")  return {id:uid(),name:rem||"Despesa fixa",value,paid:false,recurring:false};
-    if(type==="expense"){
-      let category=expenseCats[expenseCats.length-1]?.name||"Outros",method="PIX",bank=banks[0]?.name||"";
-      for(const cat of expenseCats){const key=cat.name.toLowerCase().split(/[\/\s,]/)[0];if(key.length>3&&rem.toLowerCase().includes(key)){category=cat.name;rem=rem.replace(new RegExp(key,"gi"),"").replace(/\s+/g," ").trim();break;}}
-      for(const b of banks){if(rem.toLowerCase().includes(b.name.toLowerCase())){bank=b.name;rem=rem.replace(new RegExp(b.name,"gi"),"").replace(/\s+/g," ").trim();break;}}
-      const mm={pix:"PIX",débito:"Débito",debito:"Débito",dinheiro:"Dinheiro",boleto:"Boleto"};
-      for(const [k,v] of Object.entries(mm)){if(rem.toLowerCase().includes(k)){method=v;rem=rem.replace(new RegExp(k,"gi"),"").replace(/\s+/g," ").trim();break;}}
-      return {id:uid(),category,description:rem||category,value,date,bank,method,essential:false};
-    }
-    if(type==="investment"){
-      let invType="Outro";
-      for(const t of INVEST_TYPES){if(rem.toLowerCase().includes(t.toLowerCase().split(/[\s—]/)[0])){invType=t;break;}}
-      return {id:uid(),name:rem||"Investimento",type:invType,value,date};
-    }
-    return null;
-  }
-  function process(){setPreview(text.split("\n").map(l=>l.trim()).filter(Boolean).map(parseLine).filter(Boolean));setProcessed(true);}
-  const catMap=Object.fromEntries(expenseCats.map(c=>[c.name,c]));
-  return (
-    <>
-      <div className="mhdr"><div className="mtitle">📋 Colar em lote — {labels[type]}</div><button className="mclose" onClick={onClose}>✕</button></div>
-      {!processed?(
-        <>
-          <div style={{background:"var(--card2)",border:"1px solid var(--border2)",borderRadius:10,padding:12,marginBottom:10,fontSize:11,color:"var(--text2)",lineHeight:1.9,fontFamily:"monospace",fontWeight:500}}>{examples[type]}</div>
-          <textarea style={{width:"100%",background:"var(--card2)",border:"1px solid var(--border2)",color:"var(--text)",fontFamily:"'Plus Jakarta Sans',sans-serif",fontSize:13,borderRadius:12,padding:12,resize:"vertical",minHeight:130,outline:"none",fontWeight:500}} placeholder={`Cole aqui...\n\nEx:\n${examples[type]}`} value={text} onChange={e=>setText(e.target.value)} autoFocus/>
-          <button className="savebtn" style={{marginTop:10}} onClick={process} disabled={!text.trim()}>Processar →</button>
-        </>
-      ):(
-        <>
-          <div style={{fontSize:11,color:"var(--muted)",marginBottom:10}}>{preview.length} lançamento(s) identificado(s):</div>
-          {preview.length===0?<div style={{textAlign:"center",color:"var(--wine)",padding:"20px 0",fontSize:13}}>Nenhum reconhecido.</div>
-            :<div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:14}}>
-              {preview.map((p,i)=>{
-                const cat=type==="expense"?(catMap[p.category]||{icon:"📌"}):null;
-                return (
-                  <div key={i} style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:10,padding:"9px 11px",display:"flex",alignItems:"center",gap:9}}>
-                    {cat&&<span style={{fontSize:16}}>{cat.icon}</span>}
-                    <div style={{flex:1,minWidth:0}}>
-                      <div style={{fontSize:12,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.name||p.description||p.type}</div>
-                      <div style={{fontSize:9,color:"var(--muted)",marginTop:1}}>{p.date&&p.date.slice(5).split("-").reverse().join("/")}{p.category&&` · ${p.category}`}{p.bank&&` · ${p.bank}`}</div>
-                    </div>
-                    <div style={{fontWeight:700,fontSize:13,flexShrink:0,color:type==="income"?"var(--green)":type==="investment"?"var(--gold)":"var(--wine)"}}>{fmt(p.value)}</div>
-                  </div>
-                );
-              })}
+      <div className="card">
+        <div className="chart" style={{height:90}}>
+          {rows.map(r=>(
+            <div key={r.k} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center"}}>
+              <div className="cgrp">
+                <div className="cbar" style={{background:r.k===mes?"var(--green)":"rgba(34,197,94,.3)",height:`${Math.max((r.entradas/chartMax)*90,r.entradas>0?2:0)}px`}}/>
+                <div className="cbar" style={{background:r.k===mes?"var(--red)":"rgba(239,68,68,.3)",height:`${Math.max((r.saidas/chartMax)*90,r.saidas>0?2:0)}px`}}/>
+              </div>
+              <div className="clbl">{MESES_C[r.i]}</div>
             </div>
-          }
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:9}}>
-            <button onClick={()=>setProcessed(false)} style={{background:"var(--surface)",border:"1px solid var(--border)",color:"var(--muted)",fontFamily:"'Sora',sans-serif",fontSize:13,fontWeight:600,borderRadius:10,padding:12,cursor:"pointer"}}>← Corrigir</button>
-            <button className="savebtn" style={{margin:0}} onClick={()=>onConfirm(preview)} disabled={preview.length===0}>Confirmar {preview.length}</button>
+          ))}
+        </div>
+      </div>
+      <div className="card" style={{overflowX:"auto"}}>
+        <table className="atable">
+          <thead><tr><th>Mês</th><th>Entradas</th><th>Débito/PIX</th><th>Faturas</th><th>Reservas</th><th>Sobrou</th></tr></thead>
+          <tbody>{rows.map(r=>(
+            <tr key={r.k} className={r.k===mes?"cur":""}>
+              <td>{MESES_C[r.i]}</td>
+              <td style={{color:"var(--green)"}}>{r.entradas>0?fmt(r.entradas):"—"}</td>
+              <td style={{color:"var(--red)"}}>{r.gastosDeb>0?fmt(r.gastosDeb):"—"}</td>
+              <td style={{color:"var(--blue)"}}>{r.faturasPagas>0?fmt(r.faturasPagas):"—"}</td>
+              <td style={{color:"var(--gold)"}}>{r.aportes>0?fmt(r.aportes):"—"}</td>
+              <td style={{color:r.sobra>=0?(r.entradas>0?"var(--green)":"var(--muted)"):"var(--red)"}}>{r.entradas>0||r.saidas>0?fmt(r.sobra):"—"}</td>
+            </tr>
+          ))}</tbody>
+          <tfoot><tr><td>Total</td>
+            <td style={{color:"var(--green)"}}>{fmt(tInc)}</td>
+            <td style={{color:"var(--red)"}}>{fmt(rows.reduce((s,r)=>s+r.gastosDeb,0))}</td>
+            <td style={{color:"var(--blue)"}}>{fmt(rows.reduce((s,r)=>s+r.faturasPagas,0))}</td>
+            <td style={{color:"var(--gold)"}}>{fmt(rows.reduce((s,r)=>s+r.aportes,0))}</td>
+            <td style={{color:tInc>=tOut?"var(--green)":"var(--red)"}}>{fmt(tInc-tOut)}</td>
+          </tr></tfoot>
+        </table>
+      </div>
+      <div className="hint">💡 "Sobrou" = fluxo do mês (entradas − saídas). O saldo real de cada banco fica na aba 💼 Carteira. Fatura conta como saída no mês em que foi PAGA.</div>
+    </div>
+  );
+}
+
+/* ════════════════════════════ Página: Config ════════════════════════════ */
+function PageConfig({data,mutate,userEmail,setToast}){
+  const [novaCat,setNovaCat]=useState({nome:"",icon:"📌",cor:"#64748b"});
+  const [showCat,setShowCat]=useState(false);
+  const [remigrando,setRemigrando]=useState(false);
+  return (
+    <div className="pg">
+      <div className="st">Conta</div>
+      <div className="card">
+        <div style={{fontSize:11,color:"var(--muted)"}}>Logado como</div>
+        <div style={{fontSize:13,fontWeight:600,marginTop:4}}>{userEmail}</div>
+        <div className="fg" style={{marginTop:12}}><label className="fl">Como quer ser chamado</label>
+          <input className="fi" value={data.settings.name} onChange={e=>{const v=e.target.value;mutate(d=>{d.settings.name=v;return d;});}}/></div>
+        <button className="btn-ghost" style={{color:"var(--red)",borderColor:"rgba(239,68,68,.3)"}} onClick={()=>supabase.auth.signOut()}>Sair da conta</button>
+      </div>
+
+      <div className="st">Metas de reserva</div>
+      <div className="card">
+        <div className="frow">
+          <div className="fg"><label className="fl">🛡️ Meta da emergência (R$)</label>
+            <input className="fi" inputMode="decimal" value={data.settings.emergencyGoal||""} onChange={e=>{const v=parseVal(e.target.value);mutate(d=>{d.settings.emergencyGoal=v;return d;});}}/></div>
+          <div className="fg"><label className="fl">🎯 Meta pessoal (R$)</label>
+            <input className="fi" inputMode="decimal" value={data.settings.personalGoalValue||""} onChange={e=>{const v=parseVal(e.target.value);mutate(d=>{d.settings.personalGoalValue=v;return d;});}}/></div>
+        </div>
+        <div className="fg"><label className="fl">Nome da meta pessoal</label>
+          <input className="fi" value={data.settings.personalGoalName} onChange={e=>{const v=e.target.value;mutate(d=>{d.settings.personalGoalName=v;return d;});}}/></div>
+        <div className="hint">Para corrigir o saldo atual das reservas, use o botão 🔧 na aba 💰 Reservas.</div>
+      </div>
+
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div className="st">Contas & cartões</div>
+        <button className="btn-mini" onClick={()=>mutate(d=>{d.accounts.push({id:uid(),nome:"Nova conta",cor:"#64748b",saldoInicial:0,ancoraData:null,temCartao:false,limite:0,fechamento:1,vencimento:8});return d;})}>+ Adicionar</button>
+      </div>
+      <div className="card">
+        {data.accounts.map(a=>(
+          <div key={a.id} style={{marginBottom:16,paddingBottom:16,borderBottom:"1px solid var(--border)"}}>
+            <div style={{display:"flex",gap:6,alignItems:"center",marginBottom:8,flexWrap:"wrap"}}>
+              {CORES.map(c=>(
+                <button key={c} onClick={()=>mutate(d=>{const x=d.accounts.find(y=>y.id===a.id);if(x)x.cor=c;return d;})}
+                  style={{width:17,height:17,borderRadius:"50%",background:c,border:"none",cursor:"pointer",outline:a.cor===c?"2px solid var(--text)":"none",outlineOffset:1}}/>
+              ))}
+              <button className="btn-mini" style={{marginLeft:"auto",background:"none",border:"1px solid var(--red)",color:"var(--red)"}}
+                onClick={()=>{if(confirm(`Apagar a conta ${a.nome}? Os lançamentos antigos ficam sem conta vinculada.`))mutate(d=>{d.accounts=d.accounts.filter(y=>y.id!==a.id);return d;});}}>Apagar</button>
+            </div>
+            <div className="frow">
+              <div className="fg" style={{margin:0}}><label className="fl">Nome</label>
+                <input className="fi" value={a.nome} onChange={e=>{const v=e.target.value;mutate(d=>{const x=d.accounts.find(y=>y.id===a.id);if(x)x.nome=v;return d;});}}/></div>
+              <div className="fg" style={{margin:0}}>
+                <label className="fl">Tem cartão de crédito?</label>
+                <button className="fi" style={{textAlign:"left",cursor:"pointer",color:a.temCartao?"var(--green)":"var(--muted)"}}
+                  onClick={()=>mutate(d=>{const x=d.accounts.find(y=>y.id===a.id);if(x)x.temCartao=!x.temCartao;return d;})}>
+                  {a.temCartao?"✓ Sim":"✗ Não"}</button>
+              </div>
+            </div>
+            {a.temCartao&&(
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginTop:10}}>
+                <div className="fg" style={{margin:0}}><label className="fl">Limite (R$)</label>
+                  <input className="fi" inputMode="decimal" placeholder="0 = sem" value={a.limite||""} onChange={e=>{const v=parseVal(e.target.value);mutate(d=>{const x=d.accounts.find(y=>y.id===a.id);if(x)x.limite=v;return d;});}}/></div>
+                <div className="fg" style={{margin:0}}><label className="fl">Fecha dia</label>
+                  <input className="fi" type="number" min="1" max="28" value={a.fechamento} onChange={e=>{const v=Math.min(28,Math.max(1,parseInt(e.target.value)||1));mutate(d=>{const x=d.accounts.find(y=>y.id===a.id);if(x)x.fechamento=v;return d;});}}/></div>
+                <div className="fg" style={{margin:0}}><label className="fl">Vence dia</label>
+                  <input className="fi" type="number" min="1" max="28" value={a.vencimento} onChange={e=>{const v=Math.min(28,Math.max(1,parseInt(e.target.value)||1));mutate(d=>{const x=d.accounts.find(y=>y.id===a.id);if(x)x.vencimento=v;return d;});}}/></div>
+              </div>
+            )}
           </div>
-        </>
+        ))}
+        <div className="hint">Compra feita no dia do fechamento ou depois cai automaticamente na fatura do mês seguinte. Renomear uma conta não afeta o histórico (tudo é vinculado por ID).</div>
+      </div>
+
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div className="st">Categorias de gasto</div>
+        <button className="btn-mini" onClick={()=>setShowCat(s=>!s)}>{showCat?"Cancelar":"+ Nova"}</button>
+      </div>
+      {showCat&&(
+        <div className="card">
+          <div className="frow">
+            <div className="fg"><label className="fl">Nome</label><input className="fi" placeholder="Ex: Pet, Academia…" value={novaCat.nome} onChange={e=>setNovaCat(c=>({...c,nome:e.target.value}))}/></div>
+            <div className="fg"><label className="fl">Ícone</label><select className="fi" value={novaCat.icon} onChange={e=>setNovaCat(c=>({...c,icon:e.target.value}))}>{ICONES.map(i=><option key={i} value={i}>{i}</option>)}</select></div>
+          </div>
+          <div className="fg"><label className="fl">Cor</label>
+            <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+              {CORES.map(c=><button key={c} onClick={()=>setNovaCat(nc=>({...nc,cor:c}))} style={{width:20,height:20,borderRadius:"50%",background:c,border:"none",cursor:"pointer",outline:novaCat.cor===c?"2px solid var(--text)":"none",outlineOffset:1}}/>)}
+            </div>
+          </div>
+          <button className="savebtn" disabled={!novaCat.nome.trim()}
+            onClick={()=>{mutate(d=>{d.cats.push({id:uid(),...novaCat});return d;});setNovaCat({nome:"",icon:"📌",cor:"#64748b"});setShowCat(false);}}>Adicionar categoria</button>
+        </div>
       )}
+      <div className="card">
+        {data.cats.map(c=>(
+          <div key={c.id} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 0",borderBottom:"1px solid var(--border)"}}>
+            <span style={{fontSize:18}}>{c.icon}</span>
+            <div style={{flex:1,fontSize:12,fontWeight:500}}>{c.nome}</div>
+            <span style={{width:12,height:12,borderRadius:"50%",background:c.cor}}/>
+            <button className="tdel" onClick={()=>mutate(d=>{d.cats=d.cats.filter(x=>x.id!==c.id);return d;})}>✕</button>
+          </div>
+        ))}
+      </div>
+
+      <div className="st">Orçamento por categoria 🎯</div>
+      <div className="card">
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+          {data.cats.map(c=>(
+            <div key={c.id} className="fg" style={{margin:0}}><label className="fl">{c.icon} {c.nome}</label>
+              <input className="fi" inputMode="decimal" placeholder="sem limite" value={data.settings.catBudgets[c.id]||""}
+                onChange={e=>{const v=parseVal(e.target.value);mutate(d=>{if(v>0)d.settings.catBudgets[c.id]=v;else delete d.settings.catBudgets[c.id];return d;});}}/></div>
+          ))}
+        </div>
+      </div>
+
+      <div className="st">Dados</div>
+      <div className="card" style={{background:"rgba(99,102,241,.05)",borderColor:"rgba(99,102,241,.25)"}}>
+        <div style={{fontSize:12,fontWeight:700,color:"var(--accent)",marginBottom:6}}>📦 Reimportar dados do FinTrack antigo</div>
+        <div style={{fontSize:11,color:"var(--muted)",lineHeight:1.6,marginBottom:10}}>
+          Lê de novo as chaves antigas (fintrack:*:v9) e SUBSTITUI todos os dados atuais pela conversão. Use só se a primeira migração deu problema.
+        </div>
+        <button className="btn-accent" disabled={remigrando} onClick={async()=>{
+          if(!confirm("Substituir TODOS os dados atuais pela reimportação do app antigo?"))return;
+          setRemigrando(true);
+          const d=await migrarLegado();
+          if(d){await dbSave(d);window.location.reload();}
+          else{setToast("Nenhum dado antigo encontrado");setRemigrando(false);}
+        }}>{remigrando?"⏳ Migrando…":"📦 Reimportar do app antigo"}</button>
+      </div>
+    </div>
+  );
+}
+
+/* ════════════════════════════ Modais de lançamento ════════════════════════════ */
+function ModalRouter({modal,setModal,data,mutate,mes,mem,setToast}){
+  const close=()=>setModal(null);
+  const t=modal.type;
+  if(t==="entrada"||t==="gasto"||t==="fixa"||t==="reserva") return <Modal onClose={close} tall={t==="gasto"}><EntryModal type={t} modal={modal} data={data} mutate={mutate} mes={mes} mem={mem} onClose={close}/></Modal>;
+  if(t==="credito") return <Modal onClose={close} tall><CreditoModal modal={modal} data={data} mutate={mutate} mes={mes} mem={mem} onClose={close}/></Modal>;
+  if(t==="bulk") return <Modal onClose={close} tall><BulkPanel destino={modal.destino} data={data} mutate={mutate} mes={mes} mem={mem} onClose={close} setToast={setToast}/></Modal>;
+  if(t==="import") return <Modal onClose={close} tall><ImportModal destino={modal.destino} cardId={modal.cardId} data={data} mutate={mutate} mes={mes} onClose={close} setToast={setToast}/></Modal>;
+  return null;
+}
+
+function EntryModal({type,modal,data,mutate,mes,mem,onClose}){
+  const edit=modal.edit||null;
+  const dd=`${mes}-${String(new Date().getDate()).padStart(2,"0")}`;
+  const [f,setF]=useState(()=>{
+    if(edit) return {...edit,valor:String(edit.valor??"")};
+    if(type==="entrada") return {fonte:"",valor:"",data:dd,accId:data.accounts[0]?.id||""};
+    if(type==="gasto")   return {catId:data.cats[0]?.id||"",descricao:"",valor:"",data:dd,forma:"pix",accId:data.accounts[0]?.id||"",isTransfer:false,transferParaId:""};
+    if(type==="fixa")    return {nome:"",valor:"",dia:"",catId:data.cats[data.cats.length-1]?.id||"",recorrente:true};
+    if(type==="reserva") return {tipo:"emergencia",nome:"",valor:"",data:dd,accId:data.accounts[0]?.id||"",retirada:!!modal.retirada};
+    return {};
+  });
+  const upd=(k,v)=>setF(p=>({...p,[k]:v}));
+  const titulos={entrada:"Entrada",gasto:"Gasto (Débito/PIX)",fixa:"Despesa fixa",reserva:f.retirada?"Retirada de reserva":"Aporte em reserva"};
+
+  function save(){
+    const valor=parseVal(f.valor);
+    if(!valor&&type!=="fixa") return;
+    mutate(d=>{
+      const mm=ensureMonth(d,mes);
+      if(type==="entrada"){
+        const item={id:edit?edit.id:uid(),fonte:f.fonte||"Entrada",valor,data:f.data,accId:f.accId};
+        if(edit){const i=mm.entradas.findIndex(x=>x.id===edit.id);if(i>=0)mm.entradas[i]=item;}
+        else mm.entradas.unshift(item);
+      }
+      if(type==="gasto"){
+        const item={id:edit?edit.id:uid(),catId:f.catId,descricao:f.descricao,valor,data:f.data,
+          forma:f.forma,accId:f.accId,parcela:edit?.parcela||null,
+          fixaId:edit?.fixaId,dividaId:edit?.dividaId,
+          transferParaId:f.isTransfer&&f.transferParaId?f.transferParaId:undefined};
+        if(edit){const i=mm.gastos.findIndex(x=>x.id===edit.id);if(i>=0)mm.gastos[i]=item;}
+        else mm.gastos.unshift(item);
+      }
+      if(type==="fixa"){
+        const item={id:edit?edit.id:uid(),nome:f.nome,valor,dia:f.dia?parseInt(f.dia):null,
+          catId:f.catId,recorrente:f.recorrente!==false,pago:edit?.pago||false,gastoId:edit?.gastoId||null};
+        if(edit){const i=mm.fixas.findIndex(x=>x.id===edit.id);if(i>=0)mm.fixas[i]=item;
+          if(item.gastoId){const g=mm.gastos.find(x=>x.id===item.gastoId);if(g){g.descricao=item.nome;g.valor=valor;}}}
+        else mm.fixas.push(item);
+      }
+      if(type==="reserva"){
+        mm.reservas.unshift({id:uid(),tipo:f.tipo,nome:f.nome,valor,data:f.data,accId:f.accId,retirada:!!f.retirada});
+      }
+      return d;
+    });
+    onClose();
+  }
+
+  return (
+    <>
+      <MHdr title={`${edit?"Editar":"Nova"} — ${titulos[type]}`} onClose={onClose}/>
+      {type==="entrada"&&<>
+        <div className="fg"><label className="fl">Nome / fonte</label><input className="fi" placeholder="Ex: Salário, Freela…" value={f.fonte} onChange={e=>upd("fonte",e.target.value)} autoFocus/></div>
+        <div className="frow">
+          <div className="fg"><label className="fl">Valor (R$)</label><input className="fi" inputMode="decimal" placeholder="0,00" value={f.valor} onChange={e=>upd("valor",e.target.value)}/></div>
+          <div className="fg"><label className="fl">Data</label><input className="fi" type="date" value={f.data} onChange={e=>upd("data",e.target.value)}/></div>
+        </div>
+        <div className="fg"><label className="fl">Conta onde caiu</label>
+          <select className="fi" value={f.accId} onChange={e=>upd("accId",e.target.value)}>
+            <option value="">— Selecione —</option>
+            {data.accounts.map(a=><option key={a.id} value={a.id}>{a.nome}</option>)}
+          </select></div>
+      </>}
+      {type==="gasto"&&<>
+        <div className="hint" style={{marginBottom:10}}>💳 Compra no crédito? Use <strong>+ Crédito</strong> — cai direto na fatura certa.</div>
+        <div className="fg"><label className="fl">Categoria</label>
+          <div className="catgrid">{data.cats.map(c=>(
+            <button type="button" key={c.id} className={`catopt${f.catId===c.id?" selected":""}`} onClick={()=>upd("catId",c.id)}>{c.icon} {c.nome}</button>
+          ))}</div></div>
+        <div className="fg"><label className="fl">Descrição</label>
+          <input className="fi" placeholder="Ex: Mercado, Uber, Farmácia…" value={f.descricao} onChange={e=>{
+            const v=e.target.value; upd("descricao",v);
+            if(v.length>=3){const s=sugerirCat(v,mem,f.catId);if(s&&s!==f.catId)upd("catId",s);}
+          }}/></div>
+        <div className="frow">
+          <div className="fg"><label className="fl">Valor (R$)</label><input className="fi" inputMode="decimal" placeholder="0,00" value={f.valor} onChange={e=>upd("valor",e.target.value)}/></div>
+          <div className="fg"><label className="fl">Data</label><input className="fi" type="date" value={f.data} onChange={e=>upd("data",e.target.value)}/></div>
+        </div>
+        <div className="frow">
+          <div className="fg"><label className="fl">Conta</label>
+            <select className="fi" value={f.accId} onChange={e=>upd("accId",e.target.value)}>
+              {data.accounts.map(a=><option key={a.id} value={a.id}>{a.nome}</option>)}
+            </select></div>
+          <div className="fg"><label className="fl">Forma</label>
+            <select className="fi" value={f.forma} onChange={e=>upd("forma",e.target.value)}>
+              {FORMAS.map(([v,l])=><option key={v} value={v}>{l}</option>)}
+            </select></div>
+        </div>
+        <div className="fg" style={{background:"rgba(99,102,241,.05)",border:"1px solid rgba(99,102,241,.18)",borderRadius:10,padding:"10px 12px"}}>
+          <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:12}}>
+            <input type="checkbox" checked={!!f.isTransfer||!!f.transferParaId} onChange={e=>{upd("isTransfer",e.target.checked);if(!e.target.checked)upd("transferParaId","");}} style={{width:16,height:16,accentColor:"var(--accent)"}}/>
+            <span><strong>🔄 Transferência entre minhas contas</strong></span>
+          </label>
+          {(f.isTransfer||f.transferParaId)&&(
+            <div style={{marginTop:8}}>
+              <label className="fl">Para qual conta?</label>
+              <select className="fi" value={f.transferParaId||""} onChange={e=>upd("transferParaId",e.target.value)}>
+                <option value="">— Selecione —</option>
+                {data.accounts.filter(a=>a.id!==f.accId).map(a=><option key={a.id} value={a.id}>{a.nome}</option>)}
+              </select>
+            </div>
+          )}
+        </div>
+      </>}
+      {type==="fixa"&&<>
+        <div className="fg"><label className="fl">Nome</label><input className="fi" placeholder="Ex: Aluguel, Internet…" value={f.nome} onChange={e=>upd("nome",e.target.value)} autoFocus/></div>
+        <div className="frow">
+          <div className="fg"><label className="fl">Valor (R$)</label><input className="fi" inputMode="decimal" placeholder="0,00" value={f.valor} onChange={e=>upd("valor",e.target.value)}/></div>
+          <div className="fg"><label className="fl">Dia do vencimento</label><input className="fi" type="number" min="1" max="31" placeholder="opcional" value={f.dia||""} onChange={e=>upd("dia",e.target.value)}/></div>
+        </div>
+        <div className="fg"><label className="fl">Categoria</label>
+          <select className="fi" value={f.catId} onChange={e=>upd("catId",e.target.value)}>
+            {data.cats.map(c=><option key={c.id} value={c.id}>{c.icon} {c.nome}</option>)}
+          </select></div>
+        <div className="fg" style={{background:"rgba(99,102,241,.06)",border:"1px solid rgba(99,102,241,.2)",borderRadius:10,padding:"10px 12px"}}>
+          <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:12}}>
+            <input type="checkbox" checked={f.recorrente!==false} onChange={e=>upd("recorrente",e.target.checked)} style={{width:16,height:16,accentColor:"var(--accent)"}}/>
+            <span><strong>♻️ Recorrente</strong> — copiar para os próximos meses</span>
+          </label>
+        </div>
+      </>}
+      {type==="reserva"&&<>
+        <div className="fg"><label className="fl">Tipo</label>
+          <select className="fi" value={f.tipo} onChange={e=>upd("tipo",e.target.value)}>
+            <option value="emergencia">🛡️ Reserva de emergência</option>
+            <option value="pessoal">🎯 {data.settings.personalGoalName}</option>
+            <option value="outro">💡 Outro investimento</option>
+          </select></div>
+        <div className="fg"><label className="fl">Descrição</label><input className="fi" placeholder="Ex: CDB Nubank, Aporte mensal…" value={f.nome} onChange={e=>upd("nome",e.target.value)}/></div>
+        <div className="frow">
+          <div className="fg"><label className="fl">Valor (R$)</label><input className="fi" inputMode="decimal" placeholder="0,00" value={f.valor} onChange={e=>upd("valor",e.target.value)}/></div>
+          <div className="fg"><label className="fl">Data</label><input className="fi" type="date" value={f.data} onChange={e=>upd("data",e.target.value)}/></div>
+        </div>
+        <div className="fg"><label className="fl">{f.retirada?"Conta que recebe":"Conta de origem"}</label>
+          <select className="fi" value={f.accId} onChange={e=>upd("accId",e.target.value)}>
+            <option value="">— Selecione —</option>
+            {data.accounts.map(a=><option key={a.id} value={a.id}>{a.nome}</option>)}
+          </select></div>
+        <div className="fg">
+          <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:12}}>
+            <input type="checkbox" checked={!!f.retirada} onChange={e=>upd("retirada",e.target.checked)} style={{width:16,height:16,accentColor:"var(--gold)"}}/>
+            <span><strong>📤 É uma retirada</strong> (o dinheiro volta para a conta)</span>
+          </label>
+        </div>
+      </>}
+      <button className="savebtn" onClick={save}>{edit?"Salvar alterações":"Adicionar"}</button>
     </>
   );
 }
 
+/* Compra no crédito: cai automaticamente na fatura certa pelo dia de fechamento */
+function CreditoModal({modal,data,mutate,mes,mem,onClose}){
+  const edit=modal.edit||null;
+  const cards=data.accounts.filter(a=>a.temCartao);
+  const dd=hoje();
+  const [f,setF]=useState(()=>{
+    if(edit) return {...edit,valor:String(edit.parcela?edit.valor*edit.parcela.n:edit.valor),parcelas:String(edit.parcela?.n||1),cardId:edit.accId,faturaMes:mes};
+    const cardId=modal.cardId||cards[0]?.id||"";
+    const card=cards.find(c=>c.id===cardId);
+    return {descricao:"",catId:data.cats[0]?.id||"",cardId,valor:"",parcelas:"1",data:dd,
+      faturaMes:card?mesFaturaDe(dd,card.fechamento):mes};
+  });
+  const upd=(k,v)=>setF(p=>({...p,[k]:v}));
+  const card=cards.find(c=>c.id===f.cardId);
+  const tv=parseVal(f.valor), np=parseInt(f.parcelas)||1, vp=np>0?tv/np:0;
+  const opcoes=[...new Set([f.faturaMes,mes,shiftKey(mes,1),shiftKey(mes,2),shiftKey(mes,3)])];
 
-// ─── IMPORT MODAL (CSV/PDF regex + Imagem via IA) ───────────────────────────
+  /* recalcula fatura sugerida quando muda data ou cartão */
+  useEffect(()=>{ if(!edit&&card) upd("faturaMes",mesFaturaDe(f.data,card.fechamento)); },[f.data,f.cardId]);
 
+  function save(){
+    if(!f.descricao||!tv||!f.cardId) return;
+    mutate(d=>{
+      if(edit){
+        const mm=ensureMonth(d,mes);
+        const g=mm.gastos.find(x=>x.id===edit.id);
+        if(g){g.descricao=f.descricao;g.catId=f.catId;g.accId=f.cardId;g.data=f.data;
+          g.valor=edit.parcela?r2(tv/edit.parcela.n):tv;}
+        return d;
+      }
+      const grupo=np>1?uid():null;
+      const base=r2(tv/np);
+      for(let i=0;i<np;i++){
+        const mk=shiftKey(f.faturaMes,i);
+        const mm=ensureMonth(d,mk);
+        const v=i===np-1?r2(tv-base*(np-1)):base;   /* última parcela absorve o resto do arredondamento */
+        mm.gastos.unshift({id:uid(),catId:f.catId,descricao:f.descricao+(np>1?` (${i+1}/${np})`:""),
+          valor:v,forma:"credito",accId:f.cardId,data:i===0?f.data:"",
+          parcela:np>1?{i:i+1,n:np,grupo}:null});
+      }
+      return d;
+    });
+    onClose();
+  }
+
+  if(!cards.length) return <><MHdr title="💳 Compra no crédito" onClose={onClose}/><div className="empty">Nenhum cartão configurado. Ative em ⚙️ Config.</div></>;
+  return (
+    <>
+      <MHdr title={edit?"✏️ Editar compra":"💳 Nova compra no crédito"} onClose={onClose}/>
+      <div className="fg"><label className="fl">Descrição</label>
+        <input className="fi" placeholder="Ex: Tênis Nike, iFood…" value={f.descricao} autoFocus onChange={e=>{
+          const v=e.target.value;upd("descricao",v);
+          if(v.length>=3){const s=sugerirCat(v,mem,f.catId);if(s&&s!==f.catId)upd("catId",s);}
+        }}/></div>
+      <div className="fg"><label className="fl">Categoria</label>
+        <div className="catgrid">{data.cats.map(c=>(
+          <button type="button" key={c.id} className={`catopt${f.catId===c.id?" selected":""}`} onClick={()=>upd("catId",c.id)}>{c.icon} {c.nome}</button>
+        ))}</div></div>
+      <div className="fg"><label className="fl">Cartão</label>
+        <select className="fi" value={f.cardId} onChange={e=>upd("cardId",e.target.value)} disabled={!!edit}>
+          {cards.map(c=><option key={c.id} value={c.id}>{c.nome} (fecha dia {c.fechamento})</option>)}
+        </select></div>
+      <div className="frow">
+        <div className="fg"><label className="fl">Valor total (R$)</label><input className="fi" inputMode="decimal" placeholder="0,00" value={f.valor} onChange={e=>upd("valor",e.target.value)}/></div>
+        <div className="fg"><label className="fl">Parcelas</label><input className="fi" type="number" min="1" max="48" value={f.parcelas} onChange={e=>upd("parcelas",e.target.value)} disabled={!!edit}/></div>
+      </div>
+      <div className="fg"><label className="fl">Data da compra</label><input className="fi" type="date" value={f.data} onChange={e=>upd("data",e.target.value)}/></div>
+      {!edit&&<div className="fg"><label className="fl">Cai na fatura de</label>
+        <select className="fi" value={f.faturaMes} onChange={e=>upd("faturaMes",e.target.value)}>
+          {opcoes.map(k=><option key={k} value={k}>{labelKey(k)}{card&&k===mesFaturaDe(f.data,card.fechamento)?" (sugerido)":""}</option>)}
+        </select></div>}
+      {np>1&&vp>0&&<div className="hint" style={{marginBottom:10}}>{np}x de <strong style={{color:"var(--accent)"}}>{fmt(vp)}</strong> · a partir da fatura de {labelKey(f.faturaMes)}</div>}
+      <button className="savebtn" onClick={save} disabled={!f.descricao||!tv}>{edit?"Salvar alterações":`Adicionar ${np>1?`(${np}x de ${fmt(vp)})`:`(${fmt(tv)})`}`}</button>
+    </>
+  );
+}
+
+/* ════════════════════════════ Colar em lote ════════════════════════════ */
+function BulkPanel({destino,data,mutate,mes,mem,onClose,setToast}){
+  const [texto,setTexto]=useState("");
+  const [preview,setPreview]=useState(null);
+  const labels={gastos:"Gastos (Débito/PIX)",credito:"Compras no crédito",entradas:"Entradas"};
+  const exemplos={
+    gastos:"iFood 45,90 01/07\nMercado 200 02/07",
+    credito:"Tênis Nike 350 05/07\nNetflix 39,90 10/07",
+    entradas:"Salário 5000 05/07\nFreela Cliente X 1200 10/07",
+  };
+  function parseLinha(l){
+    const vm=l.match(/\b(\d{1,6}[.,]\d{2}|\d{1,6})\b/);
+    if(!vm) return null;
+    const valor=parseVal(vm[1]); if(!valor) return null;
+    const dm=l.match(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/);
+    let dataI=`${mes}-${String(new Date().getDate()).padStart(2,"0")}`;
+    if(dm){const dd2=String(dm[1]).padStart(2,"0"),mm2=String(dm[2]).padStart(2,"0");
+      const y=dm[3]?(dm[3].length===2?"20"+dm[3]:dm[3]):mes.split("-")[0];dataI=`${y}-${mm2}-${dd2}`;}
+    let desc=l.replace(vm[0]," ").replace(dm?dm[0]:""," ").replace(/\s+/g," ").trim()||"Importado";
+    if(destino==="entradas") return {id:uid(),fonte:desc,valor,data:dataI,accId:data.accounts[0]?.id||""};
+    const catId=sugerirCat(desc,mem,data.cats[data.cats.length-1]?.id||"");
+    return {id:uid(),catId,descricao:desc,valor,data:dataI,
+      forma:destino==="credito"?"credito":"pix",
+      accId:destino==="credito"?(data.accounts.find(a=>a.temCartao)?.id||""):(data.accounts[0]?.id||""),parcela:null};
+  }
+  function processar(){ setPreview(texto.split("\n").map(l=>l.trim()).filter(Boolean).map(parseLinha).filter(Boolean)); }
+  function confirmar(){
+    mutate(d=>{const mm=ensureMonth(d,mes);
+      if(destino==="entradas") mm.entradas=[...preview,...mm.entradas];
+      else mm.gastos=[...preview,...mm.gastos];
+      return d;});
+    setToast(`✅ ${preview.length} lançamento(s) adicionado(s)`);
+    onClose();
+  }
+  return (
+    <>
+      <MHdr title={`📋 Colar em lote — ${labels[destino]||destino}`} onClose={onClose}/>
+      {!preview?(<>
+        <div style={{background:"var(--card2)",border:"1px solid var(--border)",borderRadius:10,padding:12,marginBottom:10,fontSize:11,color:"var(--text2)",lineHeight:1.9,fontFamily:"monospace"}}>{exemplos[destino]}</div>
+        <textarea className="notesarea" style={{minHeight:130}} placeholder="Cole aqui, um por linha…" value={texto} onChange={e=>setTexto(e.target.value)} autoFocus/>
+        <button className="savebtn" onClick={processar} disabled={!texto.trim()}>Processar →</button>
+      </>):(<>
+        <div style={{fontSize:11,color:"var(--muted)",marginBottom:10}}>{preview.length} lançamento(s) identificado(s):</div>
+        <div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:14,maxHeight:"46vh",overflowY:"auto"}}>
+          {preview.map((p,i)=>{
+            const cat=p.catId?catById(data,p.catId):null;
+            return (
+              <div key={i} style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:10,padding:"9px 11px",display:"flex",alignItems:"center",gap:9}}>
+                {cat&&<span style={{fontSize:16}}>{cat.icon}</span>}
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontSize:12,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.fonte||p.descricao}</div>
+                  <div style={{fontSize:9,color:"var(--muted)"}}>{dmy(p.data)}{cat?` · ${cat.nome}`:""}</div>
+                </div>
+                <div style={{fontWeight:700,fontSize:13,color:destino==="entradas"?"var(--green)":"var(--red)"}}>{fmt(p.valor)}</div>
+                <button className="tdel" onClick={()=>setPreview(pv=>pv.filter((_,j)=>j!==i))}>✕</button>
+              </div>
+            );
+          })}
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:9}}>
+          <button className="btn-ghost" onClick={()=>setPreview(null)}>← Corrigir</button>
+          <button className="savebtn" style={{margin:0}} onClick={confirmar} disabled={!preview.length}>Confirmar {preview.length}</button>
+        </div>
+      </>)}
+    </>
+  );
+}
+
+/* ════════════════════════════ Importar CSV / PDF ════════════════════════════ */
 async function loadPDFJS(){
   if(window.pdfjsLib) return window.pdfjsLib;
-  return new Promise((resolve,reject)=>{
+  return new Promise((res,rej)=>{
     const s=document.createElement("script");
     s.src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
-    s.onload=()=>{window.pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";resolve(window.pdfjsLib);};
-    s.onerror=()=>reject(new Error("PDF.js não carregou"));
+    s.onload=()=>{window.pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";res(window.pdfjsLib);};
+    s.onerror=()=>rej(new Error("PDF.js não carregou"));
     document.head.appendChild(s);
   });
 }
-
-async function extractPDFText(file){
+async function extrairTextoPDF(file){
   const pdfjs=await loadPDFJS();
   const buf=await file.arrayBuffer();
   const pdf=await pdfjs.getDocument({data:buf}).promise;
@@ -773,2870 +2041,360 @@ async function extractPDFText(file){
     const page=await pdf.getPage(i);
     const content=await page.getTextContent();
     const byY={};
-    content.items.forEach(item=>{
-      const y=Math.round(item.transform[5]);
-      if(!byY[y])byY[y]=[];
-      byY[y].push({x:Math.round(item.transform[4]),str:item.str});
-    });
-    Object.keys(byY).sort((a,b)=>b-a).forEach(y=>{
-      const lineItems=byY[y].sort((a,b)=>a.x-b.x);
-      full+=lineItems.map(i=>i.str).join(" ")+"\n";
-    });
+    content.items.forEach(it=>{const y=Math.round(it.transform[5]);if(!byY[y])byY[y]=[];byY[y].push({x:Math.round(it.transform[4]),str:it.str});});
+    Object.keys(byY).sort((a,b)=>b-a).forEach(y=>{full+=byY[y].sort((a,b)=>a.x-b.x).map(i2=>i2.str).join(" ")+"\n";});
     full+="\n";
   }
   return full;
 }
+function parseDataBR(s,ano){
+  if(!s) return null; s=String(s).trim();
+  const mo={JAN:"01",FEV:"02",MAR:"03",ABR:"04",MAI:"05",JUN:"06",JUL:"07",AGO:"08",SET:"09",OUT:"10",NOV:"11",DEZ:"12"};
+  let m;
+  if((m=s.match(/^(\d{2})[\/\-](\d{2})[\/\-](\d{4})$/))) return `${m[3]}-${m[2]}-${m[1]}`;
+  if((m=s.match(/^(\d{4})[\/\-](\d{2})[\/\-](\d{2})$/))) return `${m[1]}-${m[2]}-${m[3]}`;
+  if((m=s.match(/^(\d{2})[\/\-](\d{2})$/))) return `${ano}-${m[2]}-${m[1]}`;
+  if((m=s.match(/^(\d{2})\s+(JAN|FEV|MAR|ABR|MAI|JUN|JUL|AGO|SET|OUT|NOV|DEZ)(?:\s+(\d{2,4}))?$/i))){
+    const y=m[3]?(m[3].length===2?"20"+m[3]:m[3]):String(ano);return `${y}-${mo[m[2].toUpperCase()]}-${m[1]}`;}
+  if((m=s.match(/(\d{2})[\/\-](\d{2})[\/\-](\d{4})/))) return `${m[3]}-${m[2]}-${m[1]}`;
+  if((m=s.match(/(\d{2})[\/\-](\d{2})[\/\-](\d{2})/))) return `20${m[3]}-${m[2]}-${m[1]}`;
+  return null;
+}
+function parsePDFTx(texto,ano){
+  const linhas=texto.split("\n").map(l=>l.trim()).filter(l=>l.length>2);
+  const rows=[];
+  const valPat=/(-?\s*\d{1,3}(?:\.\d{3})*,\d{2})\s*$/;
+  const datePat=/\b(\d{2}[\/\-]\d{2}(?:[\/\-]\d{2,4})?|\d{2}\s+(?:JAN|FEV|MAR|ABR|MAI|JUN|JUL|AGO|SET|OUT|NOV|DEZ)(?:\s+\d{2,4})?)\b/i;
+  const skipPat=/\b(total|saldo|limite|fatura|pagamento|vencimento|cpf|cnpj|agência|conta corrente|poupança|página|page)\b/i;
+  for(let i=0;i<linhas.length;i++){
+    const l=linhas[i];
+    if(skipPat.test(l)) continue;
+    const vm=l.match(valPat); if(!vm) continue;
+    const val=parseVal(vm[1]); if(!val||val>50000) continue;
+    const dm=l.match(datePat); if(!dm) continue;
+    const dataI=parseDataBR(dm[1],ano)||`${ano}-01-01`;
+    let desc=l.replace(vm[0],"").replace(dm[0],"").replace(/R\$/g,"").replace(/\s{2,}/g," ").replace(/^\s*[-•·]\s*/,"").trim();
+    if(desc.length<4&&i>0&&!linhas[i-1].match(valPat)) desc=(linhas[i-1].replace(/\s{2,}/g," ").trim()+" "+desc).trim();
+    if(!desc||desc.length<2) desc="Importado";
+    rows.push({data:dataI,descricao:desc,valor:val});
+  }
+  return rows;
+}
+function parseCSVTx(texto){
+  const linhas=texto.trim().split(/\r?\n/).filter(l=>l.trim());
+  if(linhas.length<2) return [];
+  const sep=linhas[0].includes(";")?";":",";
+  const hs=linhas[0].split(sep).map(h=>h.replace(/['"]/g,"").trim().toLowerCase());
+  let di=hs.findIndex(h=>/\bdata\b|date|\bdt\b/.test(h));
+  let de=hs.findIndex(h=>/títul|titulo|descri|memo|lancam|estabele|histor|narrat|lançam/.test(h));
+  let vi=hs.findIndex(h=>/^valor$|^value$|^amount$/.test(h));
+  if(vi===-1) vi=hs.findIndex(h=>/valor|value|amount|debito/.test(h));
+  if(di===-1) di=0;
+  if(de===-1) de=Math.min(1,hs.length-1);
+  if(vi===-1) throw new Error("Coluna de valor não encontrada no CSV.");
+  const rows=[];
+  for(let i=1;i<linhas.length;i++){
+    const cols=linhas[i].split(sep).map(c=>c.replace(/['"]/g,"").trim());
+    if(cols.length<=vi) continue;
+    const val=parseVal(cols[vi]||"0"); if(!val) continue;
+    rows.push({data:cols[di]||"",descricao:cols[de]||`Item ${i}`,valor:val});
+  }
+  return rows;
+}
 
 async function fileToBase64(file){
-  return new Promise((resolve,reject)=>{
+  return new Promise((res,rej)=>{
     const r=new FileReader();
-    r.onload=e=>resolve(e.target.result.split(",")[1]);
-    r.onerror=()=>reject(new Error("Erro ao ler arquivo"));
+    r.onload=e=>res(e.target.result.split(",")[1]);
+    r.onerror=()=>rej(new Error("Erro ao ler arquivo"));
     r.readAsDataURL(file);
   });
 }
-
-async function callClaudeImage(base64,mediaType){
+/* Foto de extrato/fatura → IA extrai as transações.
+   Funciona no ambiente onde o app já rodava com essa função; se a chamada
+   falhar (rede/CORS), cai num erro claro orientando exportar CSV. */
+async function lerFotoComIA(file){
+  const b64=await fileToBase64(file);
   const prompt=`Analise esta imagem de extrato ou fatura bancária. Extraia TODAS as transações individuais.
 Retorne APENAS um array JSON válido, sem markdown: [{"date":"DD/MM/YYYY","description":"estabelecimento","value":99.90}]
 Regras: value numérico positivo, inclua TODAS as compras, ignore totais/saldos/cabeçalhos, para parcelas use o valor da parcela.`;
   const resp=await fetch("https://api.anthropic.com/v1/messages",{
-    method:"POST",
-    headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({
-      model:"claude-sonnet-4-20250514",max_tokens:2000,
+    method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:2000,
       messages:[{role:"user",content:[
-        {type:"image",source:{type:"base64",media_type:mediaType,data:base64}},
-        {type:"text",text:prompt}
-      ]}]
-    })
+        {type:"image",source:{type:"base64",media_type:file.type||"image/jpeg",data:b64}},
+        {type:"text",text:prompt}]}]})
   });
-  if(!resp.ok){const err=await resp.text();throw new Error(`API ${resp.status}: ${err.slice(0,100)}`);}
-  const data=await resp.json();
-  const txt=data.content?.find(c=>c.type==="text")?.text||"[]";
-  return JSON.parse(txt.replace(/```json?|```/g,"").trim());
+  if(!resp.ok) throw new Error(`API ${resp.status}`);
+  const dd=await resp.json();
+  const txt=dd.content?.find(c=>c.type==="text")?.text||"[]";
+  const arr=JSON.parse(txt.replace(/```json?|```/g,"").trim());
+  return arr.map(t=>({data:t.date,descricao:t.description,valor:t.value}));
 }
 
-function parseValue(v){
-  if(typeof v==="number")return Math.abs(v);
-  const s=String(v).replace(/R\$\s*/gi,"").replace(/\s/g,"").trim();
-  if(/^\-?\d{1,3}(\.\d{3})*,\d{2}$/.test(s))return Math.abs(parseFloat(s.replace(/\./g,"").replace(",",".")));
-  if(/^\-?\d{1,3}(,\d{3})*\.\d{2}$/.test(s))return Math.abs(parseFloat(s.replace(/,/g,"")));
-  if(/^\-?\d+,\d{1,2}$/.test(s))return Math.abs(parseFloat(s.replace(",",".")));
-  return Math.abs(parseFloat(s.replace(",","."))||0);
-}
-
-function parseBRDateFull(s,vy){
-  if(!s)return null;s=String(s).trim();
-  const mo={JAN:"01",FEV:"02",MAR:"03",ABR:"04",MAI:"05",JUN:"06",JUL:"07",AGO:"08",SET:"09",OUT:"10",NOV:"11",DEZ:"12"};
-  let m;
-  m=s.match(/^(\d{2})[\/\-](\d{2})[\/\-](\d{4})$/);if(m)return `${m[3]}-${m[2]}-${m[1]}`;
-  m=s.match(/^(\d{4})[\/\-](\d{2})[\/\-](\d{2})$/);if(m)return `${m[1]}-${m[2]}-${m[3]}`;
-  m=s.match(/^(\d{2})[\/\-](\d{2})$/);if(m){return `${vy}-${m[2]}-${m[1]}`;}
-  m=s.match(/^(\d{2})\s+(JAN|FEV|MAR|ABR|MAI|JUN|JUL|AGO|SET|OUT|NOV|DEZ)(?:\s+(\d{2,4}))?$/i);
-  if(m){const y=m[3]?(m[3].length===2?"20"+m[3]:m[3]):String(vy);return `${y}-${mo[m[2].toUpperCase()]}-${m[1]}`;}
-  m=s.match(/(\d{2})[\/\-](\d{2})[\/\-](\d{4})/);if(m)return `${m[3]}-${m[2]}-${m[1]}`;
-  m=s.match(/(\d{2})[\/\-](\d{2})[\/\-](\d{2})/);if(m)return `20${m[3]}-${m[2]}-${m[1]}`;
-  return null;
-}
-
-function guessCategory(desc,expenseCats){
-  const d=(desc||"").toLowerCase();
-  const kw={
-    "alimentação":["ifood","rappi","uber eats","mcdonalds","burger","pizza","restaurante","lanchonete","padaria","mercado","supermercado","carrefour","atacadao","comida","sushi","acai","cafe"],
-    "gasolina":["posto","shell","petrobras","ipiranga","vibra","gasolina","combustivel","br mania","ale","raizen"],
-    "transporte":["uber","99app","taxi","onibus","metro","passagem","estacionamento","99 tecnologia","cabify"],
-    "farmácia":["drogaria","farmacia","droga","ultrafarma","pacheco","raia","drogasil","panvel"],
-    "saúde":["hospital","clinica","medico","consulta","exame","laboratorio","odonto","dentista","unimed","amil"],
-    "assinaturas":["netflix","spotify","amazon prime","youtube","adobe","microsoft","apple","google one","disney","hbo","globoplay","deezer","icloud","canva","chatgpt","openai"],
-    "lazer":["cinema","teatro","show","evento","ingresso","ticket","sympla","boliche","parque","bar ","balada","role"],
-    "compras online":["amazon","shopee","aliexpress","americanas","magazine luiza","mercado livre","shein","magalu"],
-    "roupa / tênis":["nike","adidas","puma","vans","converse","hering","riachuelo","c&a","renner","zara","farm","arezzo"],
-    "moradia":["aluguel","condominio","iptu","energia","enel","sabesp","comgas"],
-    "cursos online":["udemy","coursera","alura","rocketseat","hotmart","eduzz","origamid"],
-    "carro / seguro / ipva":["seguro auto","ipva","detran","mecanico","borracharia","lavagem"],
-    "corte de cabelo":["barbearia","salao","hair","cabelo","barba"],
-  };
-  for(const [cat,keys] of Object.entries(kw)){
-    if(keys.some(k=>d.includes(k))){
-      const found=expenseCats.find(c=>c.name.toLowerCase()===cat.toLowerCase()||c.name.toLowerCase().startsWith(cat.split("/")[0].trim().toLowerCase()));
-      if(found)return found.name;
-    }
-  }
-  return expenseCats[expenseCats.length-1]?.name||"Outros";
-}
-
-function parsePDFTransactions(text,vy){
-  const lines=text.split("\n").map(l=>l.trim()).filter(l=>l.length>2);
-  const rows=[];
-  const valPat=/(-?\s*\d{1,3}(?:\.\d{3})*,\d{2})\s*$/;
-  const datePat=/\b(\d{2}[\/\-]\d{2}(?:[\/\-]\d{2,4})?|\d{2}\s+(?:JAN|FEV|MAR|ABR|MAI|JUN|JUL|AGO|SET|OUT|NOV|DEZ)(?:\s+\d{2,4})?)\b/i;
-  const skipPat=/\b(total|saldo|limite|fatura|pagamento|vencimento|cpf|cnpj|obrigado|agência|conta corrente|poupança|página|page)\b/i;
-  for(let i=0;i<lines.length;i++){
-    const line=lines[i];
-    if(skipPat.test(line))continue;
-    const valMatch=line.match(valPat);
-    if(!valMatch)continue;
-    const val=parseValue(valMatch[1]);
-    if(!val||val>50000)continue; // ignora valores absurdos
-    const dateMatch=line.match(datePat);
-    if(!dateMatch)continue;
-    const dateStr=parseBRDateFull(dateMatch[1],vy)||`${vy}-${String(new Date().getMonth()+1).padStart(2,"0")}-01`;
-    let desc=line
-      .replace(valMatch[0],"")
-      .replace(dateMatch[0],"")
-      .replace(/R\$/g,"")
-      .replace(/\s{2,}/g," ")
-      .replace(/^\s*[-•·]\s*/,"")
-      .trim();
-    // se descrição curta, pega linha anterior como complemento
-    if(desc.length<4&&i>0&&!lines[i-1].match(valPat)){
-      desc=(lines[i-1].replace(/\s{2,}/g," ").trim()+" "+desc).trim();
-    }
-    if(!desc||desc.length<2)desc="Importado";
-    rows.push({date:dateStr,description:desc,value:val});
-  }
-  return rows;
-}
-
-function parseCSVTransactions(text){
-  const lines=text.trim().split(/\r?\n/).filter(l=>l.trim());
-  if(lines.length<2)return[];
-  const sep=lines[0].includes(";")?";":",";
-  const headers=lines[0].split(sep).map(h=>h.replace(/['"]/g,"").trim().toLowerCase());
-  let dateIdx=headers.findIndex(h=>/\bdata\b|date|\bdt\b/.test(h));
-  let descIdx=headers.findIndex(h=>/títul|titulo|descri|memo|lancam|estabele|histor|narrat|lançam/.test(h));
-  let valIdx=headers.findIndex(h=>/^valor$|^value$|^amount$/.test(h));
-  if(valIdx===-1)valIdx=headers.findIndex(h=>/valor|value|amount|debito/.test(h));
-  if(dateIdx===-1)dateIdx=0;
-  if(descIdx===-1)descIdx=Math.min(1,headers.length-1);
-  if(valIdx===-1)throw new Error("Coluna de valor não encontrada. Verifique o CSV.");
-  const rows=[];
-  for(let i=1;i<lines.length;i++){
-    const cols=lines[i].split(sep).map(c=>c.replace(/['"]/g,"").trim());
-    if(cols.length<=valIdx)continue;
-    const val=parseValue(cols[valIdx]||"0");
-    if(!val)continue;
-    rows.push({date:cols[dateIdx]||"",description:cols[descIdx]||`Item ${i}`,value:val});
-  }
-  return rows;
-}
-
-function toEntries(transactions,importType,expenseCats,selBank,vm,vy){
-  const todayStr=`${vy}-${String(vm+1).padStart(2,"0")}-${String(new Date().getDate()).padStart(2,"0")}`;
-  return transactions
-    .filter(t=>parseValue(t.value||0)>0)
-    .map(t=>{
-      const val=parseValue(t.value);
-      const date=parseBRDateFull(String(t.date||""),vy)||todayStr;
-      const desc=String(t.description||t.desc||"Importado").trim();
-      const cat=guessCategory(desc,expenseCats);
-      if(importType==="credit")return{id:uid(),name:desc,category:cat,bank:selBank,totalValue:val,monthlyValue:val,installments:1,installmentNum:1,date,monthYear:`${vy}-${vm}`,groupId:uid()};
-      if(importType==="expense")return{id:uid(),category:cat,description:desc,value:val,date,bank:selBank,method:"PIX",essential:false};
-      return{id:uid(),name:desc,value:val,date};
-    });
-}
-
-function ImportModal({banks,expenseCats,importType,defaultBank,vm,vy,onClose,onImport}){
+function ImportModal({destino,cardId,data,mutate,mes,onClose,setToast}){
   const [step,setStep]=useState("upload");
-  const [fileError,setFileError]=useState("");
+  const [erro,setErro]=useState("");
   const [preview,setPreview]=useState([]);
-  const [selBank,setSelBank]=useState(defaultBank||banks[0]?.name||"");
   const [editCats,setEditCats]=useState({});
-  const [loadingMsg,setLoadingMsg]=useState("");
-  const [loadingDetail,setLoadingDetail]=useState("");
-  const inputRef=React.useRef();
-  const IMG_EXTS=["jpg","jpeg","png","gif","webp","heic","jfif"];
+  const [loadMsg,setLoadMsg]=useState("");
+  const inputRef=useRef();
+  const cards=data.accounts.filter(a=>a.temCartao);
+  const [selCard,setSelCard]=useState(cardId||cards[0]?.id||"");
+  const [selConta,setSelConta]=useState(data.accounts[0]?.id||"");
+  const ehCredito=destino==="credito";
+  const ehEntrada=destino==="entradas";
+  const mem=useMemo(()=>memoriaCategorias(data),[data]);
+  const ano=mes.split("-")[0];
 
-  async function processFile(file){
+  async function processarArquivo(file){
     const ext=file.name.split(".").pop().toLowerCase();
-    if(IMG_EXTS.includes(ext)||file.type.startsWith("image/")){
-      // Imagem → IA (pode falhar em produção sem proxy — mostra erro claro)
-      try{
-        const b64=await fileToBase64(file);
-        return await callClaudeImage(b64,file.type||"image/jpeg");
-      }catch(err){
-        if(err.message.includes("Failed to fetch")||err.message.includes("CORS")||err.message.includes("401")||err.message.includes("403")){
-          throw new Error("Para importar fotos, exporte o extrato como CSV no app do banco e importe o arquivo CSV — funciona perfeitamente.");
-        }
-        throw err;
-      }
-    }
     if(ext==="pdf"){
-      const text=await extractPDFText(file);
-      const rows=parsePDFTransactions(text,vy);
-      if(!rows.length)throw new Error("Nenhuma transação reconhecida no PDF. Tente exportar como CSV no app do banco.");
+      const txt=await extrairTextoPDF(file);
+      const rows=parsePDFTx(txt,ano);
+      if(!rows.length) throw new Error("Nenhuma transação reconhecida no PDF. Tente exportar como CSV no app do banco.");
       return rows;
     }
-    // CSV / TXT / OFX
+    if(["jpg","jpeg","png","gif","webp","heic","jfif"].includes(ext)||file.type.startsWith("image/")){
+      try{ return await lerFotoComIA(file); }
+      catch(err){
+        throw new Error("A leitura por foto não respondeu aqui. Exporte como CSV no app do banco que funciona sempre. ("+err.message+")");
+      }
+    }
     return await new Promise((res,rej)=>{
       const r=new FileReader();
-      r.onload=e=>{try{res(parseCSVTransactions(e.target.result));}catch(err){rej(err);}};
+      r.onload=e=>{try{res(parseCSVTx(e.target.result));}catch(err){rej(err);}};
       r.onerror=()=>rej(new Error("Erro ao ler o arquivo."));
       r.readAsText(file,"UTF-8");
     });
   }
-
-  async function handleFiles(fileList){
-    const files=Array.from(fileList);
-    if(!files.length)return;
-    setFileError("");setStep("loading");
-    const allEntries=[];
-    const errors=[];
+  async function handleFiles(list){
+    const files=Array.from(list); if(!files.length) return;
+    setErro("");setStep("loading");
+    const all=[]; const erros=[];
     for(let i=0;i<files.length;i++){
-      const file=files[i];
-      setLoadingMsg(files.length>1?`Processando ${i+1} de ${files.length}…`:"Processando…");
-      setLoadingDetail(file.name);
+      setLoadMsg(files.length>1?`Processando ${i+1} de ${files.length} — ${files[i].name}`:`Processando ${files[i].name}…`);
       try{
-        const transactions=await processFile(file);
-        const entries=toEntries(transactions,importType,expenseCats,selBank,vm,vy);
-        allEntries.push(...entries);
-      }catch(err){
-        errors.push(`${file.name}: ${err.message}`);
-      }
+        const tx=await processarArquivo(files[i]);
+        tx.forEach(t=>{
+          const dataI=parseDataBR(String(t.data||""),ano)||`${mes}-15`;
+          if(ehEntrada) all.push({id:uid(),fonte:t.descricao,valor:t.valor,data:dataI,accId:selConta});
+          else all.push({id:uid(),catId:sugerirCat(t.descricao,mem,data.cats[data.cats.length-1]?.id||""),
+            descricao:t.descricao,valor:t.valor,data:dataI,
+            forma:ehCredito?"credito":"pix",accId:ehCredito?selCard:selConta,parcela:null});
+        });
+      }catch(err){erros.push(`${files[i].name}: ${err.message}`);}
     }
-    if(errors.length)setFileError(errors.join(" | "));
-    if(!allEntries.length){setStep("upload");return;}
-    setPreview(allEntries);
-    setStep("preview");
+    if(erros.length) setErro(erros.join(" | "));
+    if(!all.length){setStep("upload");return;}
+    setPreview(all);setStep("preview");
   }
-
-  function confirm(){
-    const final=preview.map((p,i)=>({...p,category:editCats[i]||p.category}));
-    onImport(importType,final);
+  function confirmar(){
+    const final=preview.map((p,i)=>({...p,catId:editCats[i]||p.catId}));
+    mutate(d=>{const mm=ensureMonth(d,mes);
+      if(ehEntrada) mm.entradas=[...final,...mm.entradas];
+      else mm.gastos=[...final,...mm.gastos];
+      return d;});
+    setToast(`✅ ${final.length} lançamento(s) importado(s) em ${labelKey(mes)}`);
+    onClose();
   }
-
-  const catMap=Object.fromEntries(expenseCats.map(c=>[c.name,c]));
-  const typeLabel={expense:"Gastos (Débito/PIX)",income:"Entradas",credit:"Lançamentos no crédito"};
-  const totalValue=preview.reduce((s,p)=>s+(p.value||p.monthlyValue||0),0);
-
-  return(
+  const total=preview.reduce((s,p)=>s+p.valor,0);
+  return (
     <>
-      <div className="mhdr">
-        <div className="mtitle">📂 Importar — {typeLabel[importType]||importType}</div>
-        <button className="mclose" onClick={onClose}>✕</button>
-      </div>
-
-      {step==="upload"&&(<>
-        <div style={{background:"rgba(99,102,241,.08)",border:"1px solid rgba(99,102,241,.25)",borderRadius:12,padding:"12px 14px",marginBottom:14,fontSize:12,lineHeight:1.7}}>
-          Aceita <strong>múltiplos arquivos</strong>: selecione vários de uma vez. CSV e PDF lidos localmente — fotos requerem conexão com IA.
-        </div>
-        {importType==="credit"&&(
-          <div className="fg">
-            <label className="fl">Cartão / banco</label>
-            <select className="fi" value={selBank} onChange={e=>setSelBank(e.target.value)}>
-              {banks.map(b=><option key={b.id} value={b.name}>{b.name}</option>)}
-            </select>
-          </div>
-        )}
+      <MHdr title={`📂 Importar — ${{gastos:"Gastos",credito:"Fatura de cartão",entradas:"Entradas"}[destino]||destino}`} onClose={onClose}/>
+      {step==="upload"&&<>
+        {ehCredito&&<div className="fg"><label className="fl">Cartão</label>
+          <select className="fi" value={selCard} onChange={e=>setSelCard(e.target.value)}>
+            {cards.map(c=><option key={c.id} value={c.id}>{c.nome}</option>)}
+          </select></div>}
+        {!ehCredito&&<div className="fg"><label className="fl">Conta</label>
+          <select className="fi" value={selConta} onChange={e=>setSelConta(e.target.value)}>
+            {data.accounts.map(a=><option key={a.id} value={a.id}>{a.nome}</option>)}
+          </select></div>}
         <div onClick={()=>inputRef.current?.click()}
           onDragOver={e=>{e.preventDefault();e.currentTarget.style.borderColor="var(--accent)";}}
-          onDragLeave={e=>{e.currentTarget.style.borderColor="var(--border2)";}}
-          onDrop={e=>{e.preventDefault();e.currentTarget.style.borderColor="var(--border2)";handleFiles(e.dataTransfer.files);}}
-          style={{border:"2px dashed var(--border2)",borderRadius:14,padding:"30px 16px",textAlign:"center",cursor:"pointer",marginBottom:14,transition:"border-color .2s"}}>
+          onDragLeave={e=>{e.currentTarget.style.borderColor="var(--border)";}}
+          onDrop={e=>{e.preventDefault();e.currentTarget.style.borderColor="var(--border)";handleFiles(e.dataTransfer.files);}}
+          style={{border:"2px dashed var(--border)",borderRadius:14,padding:"30px 16px",textAlign:"center",cursor:"pointer",marginBottom:12}}>
           <div style={{fontSize:30,marginBottom:8}}>📂</div>
-          <div style={{fontSize:13,fontWeight:700,color:"var(--text)",marginBottom:4}}>Clique ou arraste aqui</div>
-          <div style={{fontSize:11,color:"var(--muted)",marginBottom:10}}>CSV ou PDF — pode selecionar vários de uma vez</div>
-          <div style={{display:"flex",justifyContent:"center",gap:6,flexWrap:"wrap"}}>
-            {["CSV ✅","PDF ✅","📷 Foto (requer IA)"].map(f=>(
-              <span key={f} style={{fontSize:10,fontWeight:700,background:"var(--card2)",border:"1px solid var(--border2)",borderRadius:6,padding:"2px 8px"}}>{f}</span>
-            ))}
-          </div>
-          <input ref={inputRef} type="file" multiple accept=".csv,.txt,.ofx,.pdf,.jpg,.jpeg,.png,.gif,.webp,.heic,image/*" style={{display:"none"}} onChange={e=>handleFiles(e.target.files)}/>
+          <div style={{fontSize:13,fontWeight:700,marginBottom:4}}>Clique ou arraste aqui</div>
+          <div style={{fontSize:11,color:"var(--muted)"}}>CSV, PDF ou foto — pode selecionar vários. Tudo importado para {labelKey(mes)}.</div>
+          <input ref={inputRef} type="file" multiple accept=".csv,.txt,.ofx,.pdf,.jpg,.jpeg,.png,.webp,.heic,image/*" style={{display:"none"}} onChange={e=>handleFiles(e.target.files)}/>
         </div>
-        {fileError&&<div style={{background:"var(--red-dim)",border:"1px solid rgba(239,68,68,.3)",borderRadius:10,padding:"10px 12px",fontSize:12,color:"var(--red)",marginBottom:12}}>{fileError}</div>}
-        <div style={{background:"var(--card2)",borderRadius:10,padding:"10px 12px",fontSize:11,color:"var(--muted)",lineHeight:1.7}}>
-          <strong style={{color:"var(--text2)",display:"block",marginBottom:4}}>Como exportar:</strong>
-          <span style={{color:"var(--accent)"}}>Nubank:</span> App → Fatura → Exportar CSV<br/>
-          <span style={{color:"var(--accent)"}}>Santander:</span> App → Extrato → Exportar CSV ou PDF<br/>
-          <span style={{color:"var(--accent)"}}>C6 / Porto:</span> App → Cartão → Exportar fatura CSV
+        {erro&&<div className="alert warn" style={{marginBottom:10}}><span>⚠️</span><div>{erro}</div></div>}
+        <div className="hint">
+          <strong style={{color:"var(--accent)"}}>Como exportar:</strong> Nubank: App → Fatura → Exportar CSV · Santander: App → Extrato → Exportar · C6/Porto: App → Cartão → Exportar fatura
         </div>
-      </>)}
-
-      {step==="loading"&&(
-        <div style={{textAlign:"center",padding:"48px 20px"}}>
-          <div style={{fontSize:32,marginBottom:12}}>⏳</div>
-          <div style={{fontSize:13,fontWeight:700,color:"var(--text)",marginBottom:6}}>{loadingMsg}</div>
-          <div style={{fontSize:11,color:"var(--muted)"}}>{loadingDetail}</div>
-        </div>
-      )}
-
-      {step==="preview"&&(<>
+      </>}
+      {step==="loading"&&<div style={{textAlign:"center",padding:"48px 20px"}}>
+        <div style={{fontSize:32,marginBottom:12}}>⏳</div>
+        <div style={{fontSize:13,fontWeight:700}}>{loadMsg}</div>
+      </div>}
+      {step==="preview"&&<>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-          <span style={{fontSize:12,fontWeight:700,color:"var(--text)"}}>{preview.length} transação(ões) detectada(s)</span>
-          <div style={{textAlign:"right"}}>
-            <div style={{fontSize:14,fontWeight:800,color:"var(--wine)"}}>{fmt(totalValue)}</div>
-            <div style={{fontSize:10,color:"var(--muted)"}}>total importado</div>
-          </div>
+          <span style={{fontSize:12,fontWeight:700}}>{preview.length} transação(ões)</span>
+          <span style={{fontSize:14,fontWeight:800,color:"var(--red)"}}>{fmt(total)}</span>
         </div>
-        {fileError&&<div style={{background:"var(--gold-dim)",border:"1px solid rgba(245,158,11,.3)",borderRadius:8,padding:"8px 10px",fontSize:11,color:"var(--gold)",marginBottom:10}}>{fileError}</div>}
+        {erro&&<div className="alert warn" style={{marginBottom:10}}><span>⚠️</span><div>{erro}</div></div>}
         <div style={{display:"flex",flexDirection:"column",gap:5,marginBottom:12,maxHeight:"46vh",overflowY:"auto"}}>
           {preview.map((p,i)=>{
-            const cat=catMap[editCats[i]||p.category]||{icon:"📌",color:"#888"};
-            const d=(p.date||"").slice(5).split("-").reverse().join("/");
-            return(
+            const cat=catById(data,editCats[i]||p.catId);
+            return (
               <div key={i} style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:10,padding:"8px 10px",display:"flex",alignItems:"center",gap:8}}>
-                <div style={{width:28,height:28,borderRadius:7,background:cat.color+"33",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,flexShrink:0}}>{cat.icon}</div>
+                {!ehEntrada&&<div style={{width:28,height:28,borderRadius:7,background:cat.cor+"30",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,flexShrink:0}}>{cat.icon}</div>}
                 <div style={{flex:1,minWidth:0}}>
-                  <div style={{fontSize:12,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.name||p.description}</div>
-                  <div style={{fontSize:10,color:"var(--muted)",marginTop:1,display:"flex",gap:4,alignItems:"center",flexWrap:"wrap"}}>
-                    <span>{d}</span>
-                    <select value={editCats[i]||p.category} onChange={e=>setEditCats(ec=>({...ec,[i]:e.target.value}))}
-                      style={{fontSize:10,background:"var(--card2)",border:"1px solid var(--border2)",color:"var(--text2)",borderRadius:5,padding:"1px 3px",fontFamily:"'Plus Jakarta Sans',sans-serif",cursor:"pointer"}}>
-                      {expenseCats.map(c=><option key={c.name} value={c.name}>{c.icon} {c.name}</option>)}
-                    </select>
+                  <div style={{fontSize:12,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.fonte||p.descricao}</div>
+                  <div style={{fontSize:10,color:"var(--muted)",display:"flex",gap:4,alignItems:"center",flexWrap:"wrap"}}>
+                    <span>{dmy(p.data)}</span>
+                    {!ehEntrada&&<select value={editCats[i]||p.catId} onChange={e=>setEditCats(ec=>({...ec,[i]:e.target.value}))}
+                      style={{fontSize:10,background:"var(--card2)",border:"1px solid var(--border)",color:"var(--text2)",borderRadius:5,padding:"1px 3px",fontFamily:"inherit",cursor:"pointer"}}>
+                      {data.cats.map(c=><option key={c.id} value={c.id}>{c.icon} {c.nome}</option>)}
+                    </select>}
                   </div>
                 </div>
-                <div style={{display:"flex",alignItems:"center",gap:5}}>
-                  <div style={{fontSize:12,fontWeight:700,color:"var(--wine)"}}>{fmt(p.value||p.monthlyValue||0)}</div>
-                  <button onClick={()=>setPreview(pv=>pv.filter((_,j)=>j!==i))}
-                    style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:11,padding:"2px"}}>✕</button>
-                </div>
+                <div style={{fontSize:12,fontWeight:700,color:ehEntrada?"var(--green)":"var(--red)"}}>{fmt(p.valor)}</div>
+                <button className="tdel" onClick={()=>setPreview(pv=>pv.filter((_,j)=>j!==i))}>✕</button>
               </div>
             );
           })}
         </div>
-        <div style={{background:"var(--card2)",borderRadius:8,padding:"7px 12px",marginBottom:10,display:"flex",justifyContent:"space-between"}}>
-          <span style={{fontSize:11,color:"var(--muted)"}}>Total</span>
-          <span style={{fontSize:13,fontWeight:800,color:"var(--wine)"}}>{fmt(totalValue)}</span>
-        </div>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
-          <button onClick={()=>{setStep("upload");setPreview([]);setEditCats({});}}
-            style={{background:"var(--surface)",border:"1px solid var(--border)",color:"var(--muted)",fontFamily:"'Sora',sans-serif",fontSize:13,fontWeight:600,borderRadius:10,padding:12,cursor:"pointer"}}>← Voltar</button>
-          <button className="savebtn" style={{margin:0}} onClick={confirm} disabled={!preview.length}>Confirmar {preview.length}</button>
+          <button className="btn-ghost" onClick={()=>{setStep("upload");setPreview([]);setEditCats({});}}>← Voltar</button>
+          <button className="savebtn" style={{margin:0}} onClick={confirmar} disabled={!preview.length}>Confirmar {preview.length}</button>
         </div>
-      </>)}
+      </>}
     </>
   );
 }
 
-
-// ─── MAIN ─────────────────────────────────────────────────────────────────────
-export default function FinTrack(){
-  const [session,setSession]=useState(null);
-  const [authLoading,setAuthLoading]=useState(true);
-  useEffect(()=>{
-    supabase.auth.getSession().then(({data:{session}})=>{setSession(session);setAuthLoading(false);});
-    const {data:{subscription}}=supabase.auth.onAuthStateChange((_,session)=>setSession(session));
-    return ()=>subscription.unsubscribe();
-  },[]);
-  if(authLoading) return <div style={{minHeight:"100vh",background:"var(--bg)",display:"flex",alignItems:"center",justifyContent:"center",color:"var(--muted)",fontFamily:"'Sora',sans-serif"}}><style>{`@import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;700&display=swap');:root{--bg:#07070f;--muted:#6060a0;}`}</style>Carregando...</div>;
-  if(!session) return <><style>{`@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap');*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}html,body{background:#09090f;color:#f0f0ff;font-family:'Plus Jakarta Sans',sans-serif;}.dark{--bg:#09090f;--surface:#111118;--card:#16161f;--card2:#1c1c28;--border:rgba(255,255,255,.07);--border2:rgba(255,255,255,.18);--text:#f0f0ff;--text2:#b0b0cc;--muted:#505070;--green:#22c55e;--green-dim:rgba(34,197,94,.12);--red:#ef4444;--red-dim:rgba(239,68,68,.12);--gold:#f59e0b;--gold-dim:rgba(245,158,11,.12);--accent:#6366f1;--accent2:#8b5cf6;--accent-dim:rgba(99,102,241,.15);--blue:#3b82f6;--blue-dim:rgba(59,130,246,.12);--wine:#ef4444;}`}</style><div className="dark"><AuthScreen/></div></>;
-  return <AppInner session={session}/>;
-}
-
-// ─── SMART ALERTS ────────────────────────────────────────────────────────────
-function generateAlerts(yearCache,vm,vy,settings,debts,expenseCats,bankCredit){
-  const alerts=[];
-  const currentData=yearCache[vm]||EMPTY_MONTH();
-
-  // Média dos últimos 3 meses (excluindo o atual)
-  const past={};
-  let monthsCount=0;
-  for(let i=1;i<=3;i++){
-    const m=vm-i;
-    if(m<0) break;
-    const d=yearCache[m];
-    if(!d) continue;
-    monthsCount++;
-    (d.expenses||[]).forEach(e=>{
-      past[e.category]=(past[e.category]||0)+e.value;
+/* ════════════════════════════ Fixas recorrentes ════════════════════════════ */
+/* Ao abrir um mês novo, copia as fixas recorrentes do mês anterior mais próximo */
+function criarMesComFixas(d, mk){
+  if(d.months[mk]) return;
+  const m=ensureMonth(d,mk);
+  for(let i=1;i<=12;i++){
+    const prev=d.months[shiftKey(mk,-i)];
+    if(!prev) continue;
+    if(shiftKey(mk,-i)>mk) break;
+    (prev.fixas||[]).filter(f=>f.recorrente!==false).forEach(f=>{
+      m.fixas.push({id:uid(),nome:f.nome,valor:f.valor,dia:f.dia||null,catId:f.catId,recorrente:true,pago:false,gastoId:null});
     });
+    break;
   }
-  if(monthsCount===0) return alerts;
-
-  const avgByCategory={};
-  Object.entries(past).forEach(([cat,total])=>{avgByCategory[cat]=total/monthsCount;});
-
-  // Gastos atuais por categoria
-  const currentByCategory={};
-  (currentData.expenses||[]).forEach(e=>{
-    currentByCategory[e.category]=(currentByCategory[e.category]||0)+e.value;
-  });
-
-  // Alert 1: Categoria com gasto destoante (3x acima da média)
-  Object.entries(currentByCategory).forEach(([cat,val])=>{
-    const avg=avgByCategory[cat]||0;
-    if(avg>0&&val>=avg*2.5&&val>=100){
-      const mult=(val/avg).toFixed(1);
-      alerts.push({type:"warn",icon:"⚠️",msg:`${cat}: você gastou ${fmt(val)} este mês (${mult}x sua média de ${fmt(avg)})`});
-    }
-  });
-
-  // Alert 2: Fatura de cartão muito maior que média
-  bankCredit.forEach(b=>{
-    if(b.spent<=0) return;
-    // Calcular média de fatura do banco
-    let totalSpent=0,monthsB=0;
-    for(let m=0;m<vm;m++){
-      const cd=yearCache[`credit_${m}`];
-      if(!cd?.purchases) continue;
-      const s=cd.purchases.filter(p=>p.bank===b.name).reduce((sum,p)=>sum+p.monthlyValue,0);
-      if(s>0){totalSpent+=s;monthsB++;}
-    }
-    if(monthsB>=2){
-      const avg=totalSpent/monthsB;
-      if(b.spent>=avg*1.5){
-        const pct=(((b.spent-avg)/avg)*100).toFixed(0);
-        alerts.push({type:"warn",icon:"💳",msg:`Fatura ${b.name} está ${pct}% acima da sua média (${fmt(b.spent)} vs ${fmt(avg)})`});
-      }
-    }
-  });
-
-  // Alert 3: Renda do mês muito menor que esperado
-  const currentIncome=(currentData.incomes||[]).reduce((s,t)=>s+t.value,0);
-  let totalInc=0,incMonths=0;
-  for(let m=0;m<vm;m++){
-    const d=yearCache[m];
-    if(!d?.incomes) continue;
-    const s=d.incomes.reduce((sum,t)=>sum+t.value,0);
-    if(s>0){totalInc+=s;incMonths++;}
-  }
-  if(incMonths>=2&&currentIncome>0){
-    const avgInc=totalInc/incMonths;
-    if(currentIncome<avgInc*0.7){
-      const pct=(((avgInc-currentIncome)/avgInc)*100).toFixed(0);
-      alerts.push({type:"info",icon:"📥",msg:`Suas entradas estão ${pct}% abaixo da média este mês`});
-    }
-  }
-
-  // Alert 4: Reserva baixa
-  const emergencyTotal=(settings.emergencyBase||0)+(settings.emergencyDelta||0);
-  if(settings.emergencyGoal>0&&emergencyTotal<settings.emergencyGoal*0.2){
-    const pct=((emergencyTotal/settings.emergencyGoal)*100).toFixed(0);
-    alerts.push({type:"warn",icon:"🛡️",msg:`Reserva está em ${pct}% da meta. Priorize aportes antes de novos gastos parceláveis.`});
-  }
-
-  // Alert 5: Parcelas comprometem muito da renda
-  const monthKey2=`${vy}-${vm}`;
-  const activeInst=debts.filter(d=>!d.closed).reduce((s,d)=>{
-    const idx=vy*12+vm-(d.startYear*12+d.startMonth);
-    return (idx>=0&&idx<d.installments)?s+d.monthlyValue:s;
-  },0);
-  if(incMonths>=1){
-    const avgInc=incMonths>0?totalInc/incMonths:currentIncome;
-    if(activeInst>0&&avgInc>0&&activeInst>avgInc*0.3){
-      const pct=((activeInst/avgInc)*100).toFixed(0);
-      alerts.push({type:"warn",icon:"🔗",msg:`Suas parcelas comprometem ${pct}% da sua renda média. Evite assumir novas dívidas.`});
-    }
-  }
-
-  return alerts.slice(0,4); // máx 4 alertas
 }
 
-
-// ─── SALDO POR BANCO (FUNDAÇÃO ENTREGA 1) ──────────────────────────────────
-// Calcula o saldo atual de um banco a partir do "currentBalance" definido pelo usuário
-// + todos os lançamentos desde a adjustDate (ou desde o início se não houver)
-function calcBankBalance(bankName, yearCache, settings){
-  const banks = settings.banks || DEFAULT_BANKS;
-  const bank = banks.find(b => b.name === bankName);
-  if (!bank) return 0;
-  
-  const base = bank.currentBalance || 0;
-  const adjustDate = bank.adjustDate; // formato YYYY-MM-DD
-  
-  let delta = 0;
-  
-  // Faturas de cartão pagas POR este banco
-  const bills = settings.billsToPay || [];
-  bills.forEach(b => {
-    if (!b.paid || b.paidBank !== bankName) return;
-    // Só ignora se paidDate for ESTRITAMENTE anterior ao ajuste (não ignora se for igual)
-    if (adjustDate && b.paidDate && b.paidDate < adjustDate) return;
-    delta -= b.value || 0;
-  });
-  
-  // Itera por todos os meses do cache
-  for (let m = 0; m < 12; m++) {
-    const data = yearCache[m];
-    if (!data) continue;
-    
-    // Entradas deste banco
-    (data.incomes || []).forEach(e => {
-      if (e.bank !== bankName) return;
-      if (adjustDate && e.date && e.date < adjustDate) return;
-      delta += e.value || 0;
-    });
-    
-    // Gastos deste banco (débito/PIX — NÃO inclui crédito)
-    (data.expenses || []).forEach(e => {
-      if (adjustDate && e.date && e.date < adjustDate) return;
-      // Transferências: subtrai do banco origem, soma no banco destino
-      if (e.isTransfer && e.transferTo) {
-        if (e.bank === bankName) delta -= e.value || 0;
-        if (e.transferTo === bankName) delta += e.value || 0;
-        return;
-      }
-      // Gasto normal: subtrai do banco
-      if (e.bank !== bankName) return;
-      delta -= e.value || 0;
-    });
-    
-    // Fixas pagas deste banco
-    (data.fixed || []).forEach(f => {
-      if (!f.paid || f.bank !== bankName) return;
-      // Usa paidDate real, fallback para meio do mês
-      const fDate = f.paidDate || `${settings._currentYear||new Date().getFullYear()}-${String(m+1).padStart(2,"0")}-15`;
-      if (adjustDate && fDate < adjustDate) return;
-      delta -= f.value || 0;
-    });
-    
-    // Investimentos / retiradas deste banco
-    (data.investments || []).forEach(i => {
-      if (i.bank !== bankName) return;
-      if (adjustDate && i.date && i.date < adjustDate) return;
-      const isWithdraw = (i.type || "").toLowerCase().includes("retirada");
-      delta += isWithdraw ? (i.value || 0) : -(i.value || 0);
-    });
-  }
-  
-  return base + delta;
+/* ════════════════════════════ Estilos ════════════════════════════ */
+function Styles(){
+  return <style>{`
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+.dark{--bg:#09090f;--surface:#111118;--card:#16161f;--card2:#1c1c28;--border:rgba(255,255,255,.08);--text:#f0f0ff;--text2:#b8b8d4;--muted:#5c5c82;--green:#22c55e;--red:#ef4444;--gold:#f59e0b;--accent:#6366f1;--accent2:#8b5cf6;--blue:#3b82f6;}
+.light{--bg:#f1f1f7;--surface:#fff;--card:#ffffff;--card2:#ededf5;--border:rgba(0,0,0,.09);--text:#0f0f1a;--text2:#3c3c5c;--muted:#8c8cac;--green:#16a34a;--red:#dc2626;--gold:#d97706;--accent:#4f46e5;--accent2:#7c3aed;--blue:#2563eb;}
+.dark,.light{background:var(--bg);color:var(--text);font-family:'Plus Jakarta Sans',sans-serif;-webkit-font-smoothing:antialiased;min-height:100vh;}
+.main{max-width:520px;margin:0 auto;padding-bottom:90px;}
+.topbar{display:flex;align-items:center;justify-content:space-between;padding:12px 16px 10px;position:sticky;top:0;z-index:90;background:var(--bg);border-bottom:1px solid var(--border);}
+.logo{font-size:18px;font-weight:800;letter-spacing:-.5px;}
+.logo em{color:var(--accent);font-style:normal;}
+.hamburger{background:var(--card);border:1px solid var(--border);color:var(--text2);cursor:pointer;width:36px;height:36px;border-radius:10px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;}
+.hamburger span{display:block;width:16px;height:2px;background:currentColor;border-radius:2px;}
+.avatar{width:38px;height:38px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;font-size:13px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+.avatar.sm{width:34px;height:34px;font-size:12px;}
+.sidebar-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;backdrop-filter:blur(4px);}
+.sidebar{position:fixed;top:0;left:-290px;bottom:0;width:275px;background:var(--card);z-index:201;display:flex;flex-direction:column;transition:left .2s;box-shadow:4px 0 40px rgba(0,0,0,.25);}
+.sidebar.open{left:0;}
+.sidebar-header{padding:20px 20px 16px;border-bottom:1px solid var(--border);}
+.sidebar-user{margin-top:12px;display:flex;align-items:center;gap:10px;}
+.sidebar-nav{flex:1;overflow-y:auto;padding:10px;}
+.snav{display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:12px;cursor:pointer;margin-bottom:2px;color:var(--text2);font-size:14px;font-weight:500;border:none;background:none;width:100%;text-align:left;font-family:inherit;}
+.snav.active{background:rgba(99,102,241,.14);color:var(--accent);font-weight:700;}
+.snav-ic{font-size:16px;width:20px;text-align:center;}
+.sidebar-footer{padding:14px 16px 20px;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:8px;}
+.theme-toggle{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:var(--card2);border-radius:12px;border:1px solid var(--border);cursor:pointer;}
+.pill{width:40px;height:22px;background:var(--border);border-radius:11px;position:relative;transition:background .2s;}
+.pill.on{background:var(--accent);}
+.pill::after{content:'';position:absolute;top:3px;left:3px;width:16px;height:16px;background:#fff;border-radius:50%;transition:transform .2s;}
+.pill.on::after{transform:translateX(18px);}
+.signout{display:flex;align-items:center;gap:8px;padding:10px 12px;border-radius:12px;cursor:pointer;color:var(--red);font-size:13px;font-weight:600;border:none;background:none;width:100%;font-family:inherit;}
+.month-nav{display:flex;align-items:center;gap:10px;padding:10px 16px 4px;}
+.month-nav button{background:var(--card);border:1px solid var(--border);color:var(--text2);cursor:pointer;width:32px;height:32px;border-radius:9px;font-size:15px;font-family:inherit;}
+.month-label{flex:1;text-align:center;font-size:14px;font-weight:700;}
+.pg{padding:10px 16px 6px;display:flex;flex-direction:column;gap:12px;}
+.hero-greet{font-size:21px;font-weight:800;letter-spacing:-.3px;}
+.hero-sub{font-size:12px;color:var(--text2);margin:2px 0 12px;}
+.hero-actions{display:flex;gap:8px;}
+.hbtn{flex:1;padding:10px 0;border-radius:11px;font-family:inherit;font-size:12px;font-weight:700;cursor:pointer;}
+.hbtn.g{background:rgba(34,197,94,.1);color:var(--green);border:1px solid rgba(34,197,94,.25);}
+.hbtn.r{background:rgba(239,68,68,.1);color:var(--red);border:1px solid rgba(239,68,68,.25);}
+.hbtn.b{background:rgba(99,102,241,.1);color:var(--accent);border:1px solid rgba(99,102,241,.25);}
+.card{background:var(--card);border:1px solid var(--border);border-radius:15px;padding:14px;}
+.st{font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);}
+.sep{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:var(--muted);padding:6px 0 0;}
+.metrics4{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+.mc4{background:var(--card);border:1px solid var(--border);border-radius:15px;padding:13px;}
+.mc4-l{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);margin-bottom:5px;}
+.mc4-v{font-size:16px;font-weight:800;letter-spacing:-.4px;}
+.mc4-s{font-size:10px;color:var(--muted);margin-top:2px;}
+.alert{display:flex;align-items:flex-start;gap:9px;padding:10px 13px;border-radius:11px;font-size:11px;font-weight:500;line-height:1.5;}
+.alert.warn{background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.28);color:var(--gold);}
+.chart{display:flex;align-items:flex-end;gap:4px;}
+.cgrp{display:flex;align-items:flex-end;gap:2px;flex:1;width:100%;}
+.cbar{flex:1;border-radius:3px 3px 0 0;min-height:2px;transition:height .4s;}
+.clbl{font-size:7px;text-align:center;margin-top:3px;color:var(--muted);}
+.txlist{display:flex;flex-direction:column;gap:7px;}
+.txi{display:flex;align-items:center;gap:10px;padding:11px;background:var(--surface);border:1px solid var(--border);border-radius:13px;cursor:pointer;}
+.txicon{width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;}
+.txinfo{flex:1;min-width:0;}
+.txd{font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.txm{font-size:10px;color:var(--muted);margin-top:2px;display:flex;gap:5px;align-items:center;flex-wrap:wrap;}
+.txa{font-size:13px;font-weight:700;flex-shrink:0;}
+.tdel{background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;padding:5px 4px;flex-shrink:0;}
+.chip{display:inline-flex;font-size:9px;font-weight:700;padding:2px 6px;border-radius:20px;}
+.empty{text-align:center;color:var(--muted);font-size:13px;padding:36px 0;line-height:1.8;}
+.fab{position:fixed;bottom:20px;right:16px;width:52px;height:52px;border-radius:16px;background:linear-gradient(135deg,var(--accent),var(--accent2));border:none;color:#fff;font-size:24px;cursor:pointer;box-shadow:0 8px 24px rgba(99,102,241,.4);z-index:80;}
+.fab:active{transform:scale(.92);}
+.toast{position:fixed;bottom:84px;left:50%;transform:translateX(-50%);background:var(--green);color:#04140a;font-size:12px;font-weight:700;padding:10px 20px;border-radius:20px;z-index:2000;white-space:nowrap;font-family:'Plus Jakarta Sans',sans-serif;}
+.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.72);backdrop-filter:blur(8px);z-index:1000;display:flex;align-items:flex-end;justify-content:center;}
+.modal-surface{background:var(--card);border-top:1.5px solid var(--border);border-radius:20px 20px 0 0;width:100%;max-width:520px;padding:22px 20px 40px;overflow-y:auto;color:var(--text);}
+.mhdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;}
+.mtitle{font-size:15px;font-weight:800;}
+.mclose{background:none;border:none;color:var(--text);font-size:22px;cursor:pointer;padding:2px 6px;opacity:.6;}
+.fl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text2);margin-bottom:6px;display:block;}
+.fi{width:100%;background:var(--card2);border:1.5px solid var(--border);color:var(--text);font-family:inherit;font-size:13px;border-radius:10px;padding:11px 13px;outline:none;font-weight:500;}
+.fi:focus{border-color:var(--accent);}
+.fi::placeholder{color:var(--muted);opacity:1;}
+select.fi{appearance:none;-webkit-appearance:none;}
+.fg{margin-bottom:12px;}
+.frow{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+.catgrid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;}
+.catopt{border:1.5px solid var(--border);background:var(--card2);color:var(--text2);font-family:inherit;font-size:11px;font-weight:700;border-radius:9px;padding:9px 6px;cursor:pointer;text-align:center;line-height:1.5;word-break:break-word;}
+.catopt.selected{background:rgba(99,102,241,.2);border-color:var(--accent);color:var(--accent);font-weight:800;}
+.savebtn{width:100%;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;border:none;font-family:inherit;font-size:14px;font-weight:700;border-radius:13px;padding:14px;cursor:pointer;margin-top:6px;}
+.savebtn:disabled{opacity:.4;cursor:not-allowed;}
+.notesarea{width:100%;background:var(--card2);border:1.5px solid var(--border);color:var(--text);font-family:inherit;font-size:13px;border-radius:12px;padding:12px;resize:vertical;min-height:80px;outline:none;}
+.notesarea:focus{border-color:var(--accent);}
+.bulkbtn{background:var(--surface);border:1.5px solid var(--border);color:var(--text2);font-family:inherit;font-size:12px;font-weight:600;border-radius:11px;padding:9px 14px;cursor:pointer;}
+.btn-green{background:var(--green);border:none;color:#fff;font-family:inherit;font-size:11px;font-weight:700;border-radius:9px;padding:10px 14px;cursor:pointer;}
+.btn-green:disabled{opacity:.5;}
+.btn-ghost{background:transparent;border:1px solid var(--border);color:var(--muted);font-family:inherit;font-size:11px;font-weight:600;border-radius:9px;padding:9px 12px;cursor:pointer;}
+.btn-accent{background:var(--accent);border:none;color:#fff;font-family:inherit;font-size:12px;font-weight:700;border-radius:11px;padding:12px 8px;cursor:pointer;}
+.btn-mini{background:var(--accent);border:none;color:#fff;font-family:inherit;font-size:11px;font-weight:700;border-radius:8px;padding:5px 10px;cursor:pointer;}
+.tab{flex:1;padding:9px 4px;border-radius:11px;border:1.5px solid var(--border);background:var(--surface);color:var(--muted);font-family:inherit;font-size:11px;font-weight:700;cursor:pointer;}
+.tab.on{border-color:var(--accent);background:rgba(99,102,241,.12);color:var(--accent);}
+.atable{width:100%;border-collapse:collapse;font-size:12px;}
+.atable th{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);padding:7px 6px;text-align:right;}
+.atable th:first-child{text-align:left;}
+.atable td{padding:7px 6px;text-align:right;border-top:1px solid var(--border);}
+.atable td:first-child{text-align:left;font-weight:600;font-size:11px;}
+.atable tr.cur td{background:rgba(99,102,241,.1);}
+.atable tfoot td{border-top:2px solid var(--border);font-weight:700;}
+.hint{background:rgba(99,102,241,.05);border:1px solid rgba(99,102,241,.15);border-radius:10px;padding:10px 12px;font-size:11px;color:var(--text2);line-height:1.6;}
+@media(min-width:900px){
+  .main{max-width:640px;margin-left:300px;}
+  .sidebar{left:0;box-shadow:none;border-right:1px solid var(--border);}
+  .sidebar-overlay{display:none;}
+  .hamburger{display:none;}
+  .topbar{display:none;}
+  .month-nav{padding-top:18px;}
 }
-
-
-function AppInner({session}){
-  const [sortIncomes,setSortIncomes]=useState("date_desc");
-  const [filterIncomesText,setFilterIncomesText]=useState("");
-  const [filterIncomesBank,setFilterIncomesBank]=useState("");
-  const [sortExpenses,setSortExpenses]=useState("date_desc");
-  const [filterExpensesText,setFilterExpensesText]=useState("");
-  const [filterExpensesCat,setFilterExpensesCat]=useState("");
-  const [filterExpensesBank,setFilterExpensesBank]=useState("");
-  const [page,setPage]=useState("dashboard");
-  const [vm,setVm]=useState(today.getMonth());
-  const [vy,setVy]=useState(today.getFullYear());
-  const [theme,setTheme]=useState(()=>localStorage.getItem("ft_theme")||"dark");
-  const [menuOpen,setMenuOpen]=useState(false);
-  useEffect(()=>{localStorage.setItem("ft_theme",theme);},[theme]);
-  const toggleTheme=()=>setTheme(t=>t==="dark"?"light":"dark");
-  const [data,setData]=useState(EMPTY_MONTH());
-  const [creditData,setCreditData]=useState(EMPTY_CREDIT());
-  const [settings,setSettings]=useState(DEFAULT_SETTINGS);
-  const [debts,setDebts]=useState([]);
-  const [loaded,setLoaded]=useState(false);
-  const [modal,setModal]=useState(null);
-  const [yearCache,setYearCache]=useState({});
-  const [toast,setToast]=useState(null);
-  const [prevBalance,setPrevBalance]=useState(0);
-  const [syncing,setSyncing]=useState(false);
-  const [loading,setLoading]=useState(false);
-  const saveTimer=useRef(null);
-  const creditSaveTimer=useRef(null);
-
-  useEffect(()=>{
-    (async()=>{
-      const s=await dbGet(SETTINGS_KEY);
-      if(s) setSettings(p=>({...DEFAULT_SETTINGS,...s,banks:s.banks||DEFAULT_BANKS,catBudgets:s.catBudgets||{},expenseCats:s.expenseCats||DEFAULT_EXPENSE_CATS}));
-      const d=await dbGet(DEBTS_KEY);
-      if(d) setDebts(d);
-      setLoaded(true);
-    })();
-  },[]);
-
-  useEffect(()=>{
-    if(!loaded) return;
-    setData(EMPTY_MONTH());
-    setCreditData(EMPTY_CREDIT());
-    setLoading(true);
-    setPrevBalance(0);
-    (async()=>{
-      const r=await dbGet(monthKey(vy,vm));
-      let loadedData=r||EMPTY_MONTH();
-
-      // ── LIMPEZA AUTOMÁTICA: remover markers legados de faturas ──
-      // Fatura de cartão NUNCA vive em "fixed". Só em settings.billsToPay.
-      // Se ainda existir algum marker antigo (isAutoInvoice, isCardInvoice,
-      // isLegacyMarker, ou nome começando com "Fatura "), removemos aqui.
-      if(loadedData.fixed&&loadedData.fixed.length>0){
-        const originalLen=loadedData.fixed.length;
-        loadedData.fixed=loadedData.fixed.filter(f=>{
-          if(f.isAutoInvoice) return false;
-          if(f.isCardInvoice) return false;
-          if(f.isLegacyMarker) return false;
-          if(typeof f.name==="string"&&f.name.startsWith("Fatura ")) return false;
-          return true;
-        });
-        if(loadedData.fixed.length!==originalLen){
-          // Salva a versão limpa no DB para não repetir a limpeza depois
-          dbSet(monthKey(vy,vm),loadedData);
-        }
-      }
-
-      // ── Auto-copiar fixas recorrentes APENAS se este mês estiver VAZIO ──
-      // (evita duplicar quando você já lançou as fixas manualmente)
-      const isMonthEmpty=!loadedData.fixed||loadedData.fixed.length===0;
-      const wasNeverOpened=!loadedData._autoCopyDone;
-      if(isMonthEmpty&&wasNeverOpened){
-        const pmAuto=vm===0?11:vm-1, pyAuto=vm===0?vy-1:vy;
-        const prev=await dbGet(monthKey(pyAuto,pmAuto));
-        if(prev&&prev.fixed&&prev.fixed.length>0){
-          const recurringFixed=prev.fixed.filter(f=>{
-            // Fatura de cartão NUNCA é recorrente
-            if(f.isAutoInvoice) return false;
-            if(f.isCardInvoice) return false;
-            if(f.isLegacyMarker) return false;
-            if(f.closedInMonth) return false;
-            if(typeof f.name==="string"&&f.name.startsWith("Fatura ")) return false;
-            // Só copia fixas explicitamente marcadas como recorrentes
-            return f.recurring!==false;
-          });
-          const toAdd=recurringFixed.map(f=>({...f,id:uid(),paid:false,bank:"",paidDate:null,recurring:f.recurring!==false}));
-          if(toAdd.length>0){
-            loadedData={...loadedData,fixed:toAdd,_autoCopyDone:true};
-            await dbSet(monthKey(vy,vm),loadedData);
-          } else {
-            loadedData={...loadedData,_autoCopyDone:true};
-            await dbSet(monthKey(vy,vm),loadedData);
-          }
-        } else {
-          loadedData={...loadedData,_autoCopyDone:true};
-        }
-      }
-      setData(loadedData);
-
-      const cr=await dbGet(creditKey(vy,vm));
-      if(cr) setCreditData(cr);
-      else setCreditData(EMPTY_CREDIT());
-
-      const pm2=vm===0?11:vm-1, py2=vm===0?vy-1:vy;
-      const pr=await dbGet(monthKey(py2,pm2));
-      if(pr){
-        if(typeof pr._balance === 'number'){
-          setPrevBalance(pr._balance);
-        } else {
-          const inc=(pr.incomes||[]).reduce((s,t)=>s+t.value,0);
-          const exp=(pr.expenses||[]).filter(t=>!t.isTransfer).reduce((s,t)=>s+t.value,0);
-          const fix=(pr.fixed||[]).reduce((s,t)=>t.paid?(s+(t.value||0)):s,0);
-          const inv=(pr.investments||[]).filter(e=>!isWithdrawal(e)).reduce((s,t)=>s+t.value,0);
-          setPrevBalance(inc-exp-fix-inv); // permite negativo
-        }
-      }
-      setLoading(false);
-    })();
-  },[vm,vy,loaded]);
-
-  const loadYearCache=useCallback(async()=>{
-    const cache={};
-    for(let m=0;m<12;m++){const r=await dbGet(monthKey(vy,m));cache[m]=r||EMPTY_MONTH();}
-    setYearCache(cache);
-  },[vy]);
-
-  // Atualização otimista do yearCache quando data muda (sem esperar DB)
-  useEffect(()=>{
-    if(!loaded||loading)return;
-    setYearCache(yc=>({...yc,[vm]:data}));
-  },[data,vm,loaded,loading]);
-
-  useEffect(()=>{
-    if(!loaded||loading) return;
-    clearTimeout(saveTimer.current);
-    setSyncing(true);
-    saveTimer.current=setTimeout(()=>{
-      const inc=(data.incomes||[]).reduce((s,t)=>s+t.value,0);
-      const exp=(data.expenses||[]).filter(t=>!t.isTransfer).reduce((s,t)=>s+t.value,0);
-      const fix=(data.fixed||[]).reduce((s,t)=>t.paid?(s+(t.value||0)):s,0);
-      const inv=(data.investments||[]).filter(e=>!isWithdrawal(e)).reduce((s,t)=>s+t.value,0);
-      // Parcelas de dívidas pagas SEM expense entry (backward compat)
-      const mk2=`${vy}-${vm}`;
-      const paidDebt2=debts.filter(d=>!d.closed).reduce((s2,d)=>{
-        const di=vy*12+vm-(d.startYear*12+d.startMonth);
-        if(di<0||di>=d.installments) return s2;
-        if(!(d.paidMonths||[]).includes(mk2)) return s2;
-        const hasExp=(data.expenses||[]).some(e=>e.isDebtPayment&&e.debtId===d.id&&e.debtMonthKey===mk2);
-        return hasExp?s2:s2+d.monthlyValue;
-      },0);
-      const computedBalance=inc+prevBalance-exp-fix-paidDebt2-inv;
-      dbSet(monthKey(vy,vm),{...data,_balance:computedBalance}).then(()=>loadYearCache()).finally(()=>setSyncing(false));
-    },800);
-    return ()=>clearTimeout(saveTimer.current);
-  },[data,vm,vy,loaded,loading,loadYearCache,prevBalance,debts,settings.billsToPay]);
-
-  useEffect(()=>{
-    if(!loaded||loading) return;
-    clearTimeout(creditSaveTimer.current);
-    creditSaveTimer.current=setTimeout(()=>{
-      dbSet(creditKey(vy,vm),creditData);
-    },800);
-    return ()=>clearTimeout(creditSaveTimer.current);
-  },[creditData,vm,vy,loaded,loading]);
-
-  useEffect(()=>{ if(loaded) dbSet(SETTINGS_KEY,settings); },[settings,loaded]);
-  useEffect(()=>{ if(loaded) dbSet(DEBTS_KEY,debts); },[debts,loaded]);
-
-  const expenseCats=settings.expenseCats||DEFAULT_EXPENSE_CATS;
-  const catMap=Object.fromEntries(expenseCats.map(c=>[c.name,c]));
-  const banks=settings.banks||DEFAULT_BANKS;
-
-  const rawIncome=data.incomes.reduce((s,t)=>s+t.value,0);
-  const totalIncome=rawIncome+prevBalance;
-  const totalExpense=data.expenses.filter(t=>!t.isTransfer).reduce((s,t)=>s+t.value,0);
-  const totalFixedPaid=data.fixed.filter(f=>f.paid).reduce((s,t)=>s+(t.value||0),0);
-  const totalFixedAll=data.fixed.reduce((s,t)=>s+(t.value||0),0);
-  const totalInvest=data.investments.filter(e=>!isWithdrawal(e)).reduce((s,t)=>s+t.value,0);
-  // Parcelas de dívidas pagas SEM expense entry (backward compat — dívidas pagas antes da atualização)
-  const monthKey2=`${vy}-${vm}`;
-  const paidDebtValue=debts.filter(d=>!d.closed).reduce((s,d)=>{
-    const idx2=vy*12+vm-(d.startYear*12+d.startMonth);
-    if(idx2<0||idx2>=d.installments) return s;
-    if(!(d.paidMonths||[]).includes(monthKey2)) return s;
-    // Se já tem expense entry, não contar aqui (evita dupla contagem)
-    const hasExpense=(data.expenses||[]).some(e=>e.isDebtPayment&&e.debtId===d.id&&e.debtMonthKey===monthKey2);
-    return hasExpense?s:s+d.monthlyValue;
-  },0);
-  const totalOut=totalExpense+totalFixedPaid+paidDebtValue+totalInvest;
-  const balance=totalIncome-totalOut;
-  const totalContasReais=(banks||[]).reduce((s,b)=>s+calcBankBalance(b.name,yearCache,settings),0);
-  const totalCartoesComprometido=(settings.billsToPay||[]).filter(b=>!b.paid).reduce((s,b)=>s+(b.value||0),0);
-  
-
-  const emergencyTotal=(settings.emergencyBase||0)+(settings.emergencyDelta||0);
-  const personalTotal=(settings.personalBase||0)+(settings.personalDelta||0);
-
-  function getNextInvoiceMonth(bankName){
-    try{
-      const invoiceId=`invoice_${bankName}_${vy}_${vm}`;
-      const isClosed=(data.fixed||[]).some(f=>f.id===invoiceId);
-      if(isClosed){
-        const nm=vm===11?0:vm+1, ny=vm===11?vy+1:vy;
-        return {m:nm,y:ny,label:`Fatura em aberto — ${MONTHS_FULL[nm]}`,closed:true};
-      }
-      return {m:vm,y:vy,label:`Fatura em aberto — ${MONTHS_FULL[vm]}`,closed:false};
-    }catch(_){
-      return {m:vm,y:vy,label:`Fatura em aberto — ${MONTHS_FULL[vm]}`,closed:false};
-    }
-  }
-
-  // nextMonthCredit: carregado do próximo mês para bancos com fatura fechada
-  const [nextMonthCredit,setNextMonthCredit]=useState({});
-  useEffect(()=>{
-    const nm=vm===11?0:vm+1, ny=vm===11?vy+1:vy;
-    const closedBanks=banks.filter(b=>{
-      const invoiceId=`invoice_${b.name}_${vy}_${vm}`;
-      return (data.fixed||[]).some(f=>f.id===invoiceId);
-    });
-    if(!closedBanks.length){setNextMonthCredit({});return;}
-    dbGet(creditKey(ny,nm)).then(d=>{
-      const purchases=(d?.purchases||[]);
-      const byBank={};
-      closedBanks.forEach(b=>{
-        byBank[b.name]=purchases.filter(p=>p.bank===b.name).reduce((s,p)=>s+p.monthlyValue,0);
-      });
-      setNextMonthCredit(byBank);
-    });
-  },[data.fixed,vm,vy,banks]);
-
-  const bankCredit=banks.map(b=>{
-    const invoiceId=`invoice_${b.name}_${vy}_${vm}`;
-    const isClosed=(data.fixed||[]).some(f=>f.id===invoiceId);
-    const ni=getNextInvoiceMonth(b.name);
-    // Se fatura fechada, mostrar gasto do próximo ciclo (próximo mês)
-    const spent=isClosed
-      ?(nextMonthCredit[b.name]||0)
-      :(creditData.purchases||[]).filter(p=>p.bank===b.name).reduce((s,p)=>s+p.monthlyValue,0);
-    return{...b,spent,nextInvoice:ni,isClosed};
-  });
-
-  const categoryMemory=React.useMemo(()=>buildCategoryMemory(yearCache),[yearCache]);
-  const smartAlerts=React.useMemo(()=>generateAlerts(yearCache,vm,vy,settings,debts,expenseCats,bankCredit),[yearCache,vm,vy,settings,debts,expenseCats,bankCredit]);
-
-  const catData=expenseCats.map(c=>({
-    ...c,
-    value:data.expenses.filter(e=>e.category===c.name).reduce((s,e)=>s+e.value,0),
-    budget:settings.catBudgets?.[c.name]||0
-  })).filter(c=>c.value>0||c.budget>0).sort((a,b)=>b.value-a.value);
-  const maxCat=Math.max(...catData.map(c=>Math.max(c.value,c.budget)),1);
-
-  const debtInst=debts.filter(d=>!d.closed).flatMap(d=>{
-    const idx=vy*12+vm-(d.startYear*12+d.startMonth);
-    if(idx<0||idx>=d.installments) return [];
-    const key=`${vy}-${vm}`;
-    return [{id:`debt_${d.id}_${idx}`,name:`${d.name} (${idx+1}/${d.installments})`,value:d.monthlyValue,paid:d.paidMonths?.includes(key)||false,isDebt:true,debtId:d.id,debtMonthKey:key}];
-  });
-  const allFixed=[...data.fixed,...debtInst];
-  const pendingFixed=allFixed.filter(f=>!f.paid);
-  const paidFixed=allFixed.filter(f=>f.paid);
-  const unpaidFixed=pendingFixed.length;
-
-  const annualRows=MONTHS.map((_,i)=>{
-    const d=yearCache[i]||EMPTY_MONTH();
-    const inc=(d.incomes||[]).reduce((s,t)=>s+t.value,0);
-    // Gastos: exclui transferências (não são gastos reais)
-    const exp=(d.expenses||[]).filter(t=>!t.isTransfer).reduce((s,t)=>s+t.value,0);
-    const fix=(d.fixed||[]).filter(f=>f.paid).reduce((s,t)=>s+(t.value||0),0);
-    const inv=(d.investments||[]).filter(e=>!isWithdrawal(e)).reduce((s,t)=>s+t.value,0);
-    const mkey=`${vy}-${i}`;
-    // Dívidas: só conta parcelas que NÃO viraram expense entry (evita dupla contagem)
-    const dbt=debts.filter(dd=>!dd.closed).reduce((s,dd)=>{
-      const di2=vy*12+i-(dd.startYear*12+dd.startMonth);
-      if(di2<0||di2>=dd.installments) return s;
-      if(!(dd.paidMonths||[]).includes(mkey)) return s;
-      // Se já existe uma expense com isDebtPayment para essa parcela, não conta aqui
-      const hasExpense=(d.expenses||[]).some(e=>e.isDebtPayment&&e.debtId===dd.id&&e.debtMonthKey===mkey);
-      return hasExpense?s:s+dd.monthlyValue;
-    },0);
-    return {i,inc,exp,fix,inv,dbt,out:exp+fix+dbt+inv,bal:inc-exp-fix-dbt-inv};
-  });
-  const annualInc=annualRows.reduce((s,r)=>s+r.inc,0);
-  const annualOut=annualRows.reduce((s,r)=>s+r.out,0);
-  const chartMax=Math.max(...annualRows.flatMap(r=>[r.inc,r.out]),1);
-
-  const healthScore=()=>{
-    if(!totalIncome) return 50;
-    let score=50;
-    const savingRate=balance/totalIncome;
-    if(savingRate>=0.3) score+=30;
-    else if(savingRate>=0.2) score+=20;
-    else if(savingRate>=0.1) score+=10;
-    else if(savingRate<0) score-=20;
-    if(unpaidFixed===0) score+=10;
-    else if(unpaidFixed<=2) score+=5;
-    const emergPct=emergencyTotal/(settings.emergencyGoal||10000);
-    if(emergPct>=1) score+=10;
-    else if(emergPct>=0.5) score+=5;
-    return Math.max(0,Math.min(100,score));
-  };
-  const score=healthScore();
-  const scoreLabel=score>=85?"Excelente":score>=70?"Ótimo":score>=50?"Bom":score>=30?"Regular":"Atenção";
-  const scoreColor=score>=85?"#00d68f":score>=70?"#74b9ff":score>=50?"#ffd166":score>=30?"#f78c00":"#c0392b";
-
-  const alerts=[];
-  if(!loading&&rawIncome===0) alerts.push({type:"warn",msg:`Sem entradas em ${MONTHS_FULL[vm]}`});
-  if(!loading&&balance<0&&rawIncome>0) alerts.push({type:"danger",msg:`Saldo negativo: ${fmt(Math.abs(balance))}`});
-  if(!loading&&balance>0&&rawIncome>0) alerts.push({type:"ok",msg:`Você guardou ${rawIncome>0?((balance/rawIncome)*100).toFixed(0):0}% da renda 👏`});
-  if(!loading&&unpaidFixed>0) alerts.push({type:"warn",msg:`${unpaidFixed} fixa(s)/fatura(s) pendente(s)`});
-  bankCredit.forEach(b=>{if(b.limit>0&&b.spent>0){const p=(b.spent/b.limit)*100;if(p>=80)alerts.push({type:p>=100?"danger":"warn",msg:`${b.name}: ${p.toFixed(0)}% do limite`});}});
-
-  function prevMonth(){if(vm===0){setVm(11);setVy(y=>y-1);}else setVm(m=>m-1);}
-  function nextMonth(){if(vm===11){setVm(0);setVy(y=>y+1);}else setVm(m=>m+1);}
-
-  function saveEntry(st,entry,oldEntry=null){
-    if(st==="investments"){
-      const od=oldEntry?reserveDelta(oldEntry,-1):{ed:0,pd:0};
-      const nd=reserveDelta(entry,1);
-      const ed=od.ed+nd.ed,pd=od.pd+nd.pd;
-      if(ed!==0||pd!==0) setSettings(s=>({...s,emergencyDelta:(s.emergencyDelta||0)+ed,personalDelta:(s.personalDelta||0)+pd}));
-    }
-    setData(d=>{
-      const key=st;
-      if(!d[key]) return d;
-      const list=[...(d[key]||[])];
-      const idx=list.findIndex(i=>i.id===entry.id);
-      if(idx>=0) list[idx]=entry; else list.unshift(entry);
-      let newData={...d,[key]:list};
-      if(st==="investments"&&isWithdrawal(entry)&&!oldEntry){
-        const autoIncome={id:uid(),name:`Retirada — ${entry.type.includes("Reserva")?"Reserva de Emergência":"Meta pessoal"}`,value:entry.value,date:entry.date,autoFromWithdrawal:true,linkedInvestmentId:entry.id};
-        newData={...newData,incomes:[autoIncome,...newData.incomes]};
-      }
-      if(st==="investments"&&isWithdrawal(entry)&&oldEntry){
-        newData={...newData,incomes:newData.incomes.map(inc=>inc.linkedInvestmentId===entry.id?{...inc,value:entry.value,date:entry.date}:inc)};
-      }
-      return newData;
-    });
-    setModal(null);
-  }
-
-  function saveBulk(st,entries){
-    if(!entries.length) return;
-    if(st==="investments"){
-      let ed=0,pd=0;entries.forEach(e=>{const d=reserveDelta(e,1);ed+=d.ed;pd+=d.pd;});
-      if(ed!==0||pd!==0) setSettings(s=>({...s,emergencyDelta:(s.emergencyDelta||0)+ed,personalDelta:(s.personalDelta||0)+pd}));
-    }
-    setData(d=>{
-      if(!d[st]) return d;
-      let newData={...d,[st]:[...entries,...(d[st]||[])]};
-      if(st==="investments"){
-        const autoIncomes=entries.filter(e=>isWithdrawal(e)).map(e=>({id:uid(),name:`Retirada — ${e.type.includes("Reserva")?"Reserva de Emergência":"Meta pessoal"}`,value:e.value,date:e.date,autoFromWithdrawal:true,linkedInvestmentId:e.id}));
-        if(autoIncomes.length) newData={...newData,incomes:[...autoIncomes,...newData.incomes]};
-      }
-      return newData;
-    });
-    setToast(`✅ ${entries.length} lançamento(s) adicionado(s)`);
-  }
-
-  function deleteEntry(st,id){
-    if(st==="investments"){
-      const e=data.investments.find(i=>i.id===id);
-      if(e){
-        const{ed,pd}=reserveDelta(e,-1);
-        if(ed!==0||pd!==0) setSettings(s=>({...s,emergencyDelta:(s.emergencyDelta||0)+ed,personalDelta:(s.personalDelta||0)+pd}));
-        if(isWithdrawal(e)){setData(d=>({...d,investments:d.investments.filter(i=>i.id!==id),incomes:d.incomes.filter(i=>i.linkedInvestmentId!==id)}));return;}
-      }
-    }
-    if(data[st]) setData(d=>({...d,[st]:(d[st]||[]).filter(i=>i.id!==id)}));
-  }
-
-  function toggleFixed(id){
-    const fx=(data.fixed||[]).find(f=>f.id===id);
-    if(!fx) return;
-    if(fx.paid){
-      // desmarcando: limpa banco e paidDate
-      setData(d=>({...d,fixed:(d.fixed||[]).map(f=>f.id===id?{...f,paid:false,bank:"",paidDate:null}:f)}));
-    } else {
-      // marcando: pede banco
-      const bkName=window.prompt(`Qual banco pagou "${fx.name}"?\nDigite: ${banks.map(b=>b.name).join(", ")}`,fx.bank||banks[0]?.name||"");
-      if(bkName===null) return;
-      const t=new Date();
-      const dateStr=`${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,"0")}-${String(t.getDate()).padStart(2,"0")}`;
-      setData(d=>({...d,fixed:(d.fixed||[]).map(f=>f.id===id?{...f,paid:true,bank:bkName||"",paidDate:dateStr}:f)}));
-    }
-  }
-  function adjustBalanceToReal(diff){
-    // diff positivo = app tem mais que o real → criar gasto de ajuste (reduzir)
-    // diff negativo = app tem menos que o real → criar entrada de ajuste
-    if(Math.abs(diff)<1) return;
-    if(diff>0){
-      // Saldo do app está MAIOR — criar gasto fantasma
-      const adjustment={
-        id:uid(),
-        category:expenseCats[expenseCats.length-1]?.name||"Outros",
-        description:`Ajuste de saldo (-${fmt(diff)})`,
-        value:Math.abs(diff),
-        date:`${vy}-${String(vm+1).padStart(2,"0")}-${String(new Date().getDate()).padStart(2,"0")}`,
-        bank:"",method:"Ajuste",essential:false,isAdjustment:true,
-      };
-      setData(d=>({...d,expenses:[adjustment,...(d.expenses||[])]}));
-    } else {
-      // Saldo do app está MENOR — criar entrada de ajuste
-      const adjustment={
-        id:uid(),
-        name:`Ajuste de saldo (+${fmt(Math.abs(diff))})`,
-        value:Math.abs(diff),
-        date:`${vy}-${String(vm+1).padStart(2,"0")}-${String(new Date().getDate()).padStart(2,"0")}`,
-        isAdjustment:true,
-      };
-      setData(d=>({...d,incomes:[adjustment,...(d.incomes||[])]}));
-    }
-  }
-
-  async function recalculateAllBalances(){
-    let previousBalance=0;
-    for(let m=0;m<12;m++){
-      const d=await dbGet(monthKey(vy,m));
-      if(!d) continue;
-      const inc=(d.incomes||[]).reduce((s,t)=>s+t.value,0);
-      const exp=(d.expenses||[]).filter(t=>!t.isTransfer).reduce((s,t)=>s+t.value,0);
-      const fix=(d.fixed||[]).filter(f=>f.paid).reduce((s,t)=>s+(t.value||0),0);
-      const inv=(d.investments||[]).filter(e=>!isWithdrawal(e)).reduce((s,t)=>s+t.value,0);
-      const mkStr=`${vy}-${m}`;
-      const paidDebtM=debts.filter(dd=>!dd.closed).reduce((s,dd)=>{
-        const di=vy*12+m-(dd.startYear*12+dd.startMonth);
-        if(di<0||di>=dd.installments) return s;
-        if(!(dd.paidMonths||[]).includes(mkStr)) return s;
-        const hasExp=(d.expenses||[]).some(e=>e.isDebtPayment&&e.debtId===dd.id&&e.debtMonthKey===mkStr);
-        return hasExp?s:s+dd.monthlyValue;
-      },0);
-      const newBalance=inc+previousBalance-exp-fix-paidDebtM-inv;
-      await dbSet(monthKey(vy,m),{...d,_balance:newBalance});
-      previousBalance=newBalance;
-    }
-    // Recarregar mês atual
-    const refreshed=await dbGet(monthKey(vy,vm));
-    if(refreshed){
-      setData(refreshed);
-      const pmR=vm===0?11:vm-1, pyR=vm===0?vy-1:vy;
-      const prevR=await dbGet(monthKey(pyR,pmR));
-      setPrevBalance(prevR?._balance||0);
-    }
-    return true;
-  }
-
-  function toggleDebtPaid(debtId,mk,bankPaid=""){
-    setDebts(ds=>ds.map(d=>{
-      if(d.id!==debtId)return d;
-      const paid=d.paidMonths||[];
-      const wasPaid=paid.includes(mk);
-      const [mkY,mkM]=mk.split("-").map(Number);
-      if(wasPaid){
-        // Remover expense entry correspondente desta dívida/mês
-        setData(dd=>({...dd,expenses:(dd.expenses||[]).filter(e=>!(e.isDebtPayment&&e.debtId===debtId&&e.debtMonthKey===mk))}));
-      } else {
-        // Criar expense entry para este pagamento
-        const expEntry={
-          id:uid(),
-          category:d.category||expenseCats[expenseCats.length-1]?.name||"Outros",
-          description:`Parcela: ${d.name} (${((d.paidCount||0)+1)}/${d.installments})`,
-          value:d.monthlyValue,
-          date:`${mkY}-${String(mkM).padStart(2,"0")}-01`,
-          bank:bankPaid||"",
-          method:"PIX",
-          essential:false,
-          isDebtPayment:true,
-          debtId:debtId,
-          debtMonthKey:mk,
-        };
-        // Só adicionar ao state se for o mês atual visualizado
-        if(mkY===vy&&mkM===vm){
-          setData(dd=>({...dd,expenses:[expEntry,...(dd.expenses||[])]}));
-        } else {
-          // Salvar direto no DB do mês correto
-          dbGet(monthKey(mkY,mkM)).then(existing=>{
-            const ex=existing||EMPTY_MONTH();
-            const alreadyHas=(ex.expenses||[]).some(e=>e.isDebtPayment&&e.debtId===debtId&&e.debtMonthKey===mk);
-            if(!alreadyHas) dbSet(monthKey(mkY,mkM),{...ex,expenses:[expEntry,...(ex.expenses||[])]});
-          });
-        }
-      }
-      return{...d,paidMonths:wasPaid?paid.filter(k=>k!==mk):[...paid,mk],paidCount:wasPaid?(d.paidCount||0)-1:(d.paidCount||0)+1};
-    }));
-  }
-
-  const openModal=useCallback((type,entry)=>setModal({type,entry}),[]);
-  const closeModal=useCallback(()=>setModal(null),[]);
-  const fabType={incomes:"income",expenses:"expense",fixed:"fixed",investments:"investment"}[page];
-
-  return (
-    <>
-      <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap');
-        *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
-        .dark{--bg:#09090f;--surface:#111118;--card:#1e1e2e;--card2:#12121e;--border:rgba(255,255,255,.07);--border2:rgba(255,255,255,.22);--text:#f0f0ff;--text2:#c0c0e0;--muted:#505070;--green:#22c55e;--green-dim:rgba(34,197,94,.12);--red:#ef4444;--red-dim:rgba(239,68,68,.12);--gold:#f59e0b;--gold-dim:rgba(245,158,11,.12);--accent:#6366f1;--accent2:#8b5cf6;--accent-dim:rgba(99,102,241,.15);--blue:#3b82f6;--blue-dim:rgba(59,130,246,.12);--wine:#ef4444;}
-        .light{--bg:#f1f1f7;--surface:#fff;--card:#ffffff;--card2:#ededf5;--border:rgba(0,0,0,.08);--border2:rgba(0,0,0,.25);--text:#0f0f1a;--text2:#333355;--muted:#9090b0;--green:#16a34a;--green-dim:rgba(22,163,74,.1);--red:#dc2626;--red-dim:rgba(220,38,38,.1);--gold:#d97706;--gold-dim:rgba(217,119,6,.1);--accent:#4f46e5;--accent2:#7c3aed;--accent-dim:rgba(79,70,229,.1);--blue:#2563eb;--blue-dim:rgba(37,99,235,.1);--wine:#dc2626;}
-        html,body{background:var(--bg);color:var(--text);font-family:'Plus Jakarta Sans',sans-serif;-webkit-font-smoothing:antialiased;transition:background .25s,color .25s;}
-        .app{min-height:100vh;padding-bottom:24px;max-width:480px;margin:0 auto;}
-        .topbar{display:flex;align-items:center;justify-content:space-between;padding:12px 16px 10px;position:sticky;top:0;z-index:90;background:var(--bg);border-bottom:1px solid var(--border);}
-        .topbar-left{display:flex;align-items:center;gap:10px;}
-        .hamburger{background:var(--card);border:1px solid var(--border);color:var(--text2);cursor:pointer;width:36px;height:36px;border-radius:10px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;padding:0;flex-shrink:0;}
-        .hamburger span{display:block;width:16px;height:2px;background:currentColor;border-radius:2px;}
-        .logo-text{font-size:18px;font-weight:800;letter-spacing:-.5px;}
-        .logo-text em{color:var(--accent);font-style:normal;}
-        .topbar-right{display:flex;align-items:center;gap:8px;}
-        .avatar{width:34px;height:34px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;font-size:13px;font-weight:700;display:flex;align-items:center;justify-content:center;cursor:pointer;}
-        .icon-btn{background:var(--card);border:1px solid var(--border);color:var(--text2);cursor:pointer;width:34px;height:34px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:16px;}
-        .sidebar-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;backdrop-filter:blur(4px);}
-        .sidebar{position:fixed;top:0;left:0;bottom:0;width:275px;background:var(--card);z-index:201;display:flex;flex-direction:column;padding:0 0 24px;box-shadow:4px 0 40px rgba(0,0,0,.25);}
-        .sidebar-header{padding:20px 20px 18px;border-bottom:1px solid var(--border);}
-        .sidebar-logo{font-size:20px;font-weight:800;letter-spacing:-.5px;}
-        .sidebar-logo em{color:var(--accent);font-style:normal;}
-        .sidebar-user{margin-top:12px;display:flex;align-items:center;gap:10px;}
-        .sidebar-avatar{width:38px;height:38px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;font-size:14px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
-        .sidebar-user-info{min-width:0;}
-        .sidebar-user-name{font-size:13px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-        .sidebar-user-email{font-size:10px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-        .sidebar-nav{flex:1;overflow-y:auto;padding:10px 10px;}
-        .snav-item{display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:12px;cursor:pointer;margin-bottom:2px;transition:all .15s;color:var(--text2);font-size:14px;font-weight:500;border:none;background:none;width:100%;text-align:left;font-family:'Plus Jakarta Sans',sans-serif;}
-        .snav-item:active,.snav-item.active{background:var(--accent-dim);color:var(--accent);}
-        .snav-icon{font-size:16px;width:20px;text-align:center;flex-shrink:0;}
-        .sidebar-footer{padding:14px 16px 0;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:8px;}
-        .theme-toggle{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:var(--card2);border-radius:12px;border:1px solid var(--border);cursor:pointer;}
-        .theme-label{font-size:13px;font-weight:500;color:var(--text2);display:flex;align-items:center;gap:8px;}
-        .toggle-pill{width:40px;height:22px;background:var(--border2);border-radius:11px;position:relative;transition:background .2s;flex-shrink:0;}
-        .toggle-pill.on{background:var(--accent);}
-        .toggle-pill::after{content:'';position:absolute;top:3px;left:3px;width:16px;height:16px;background:#fff;border-radius:50%;transition:transform .2s;}
-        .toggle-pill.on::after{transform:translateX(18px);}
-        .sidebar-signout{display:flex;align-items:center;gap:8px;padding:10px 12px;border-radius:12px;cursor:pointer;color:var(--red);font-size:13px;font-weight:600;border:none;background:none;width:100%;font-family:'Plus Jakarta Sans',sans-serif;}
-        .month-nav{display:flex;align-items:center;gap:10px;padding:10px 16px 6px;}
-        .month-nav button{background:var(--card);border:1px solid var(--border);color:var(--text2);cursor:pointer;width:32px;height:32px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0;}
-        .month-label{flex:1;text-align:center;font-size:14px;font-weight:700;}
-        .hero{padding:8px 16px 14px;}
-        .hero-greeting{font-size:21px;font-weight:800;letter-spacing:-.3px;margin-bottom:2px;}
-        .hero-sub{font-size:12px;color:var(--text2);margin-bottom:12px;}
-        .hero-actions{display:flex;gap:8px;}
-        .hero-btn{flex:1;padding:9px 0;border-radius:11px;border:none;font-family:'Plus Jakarta Sans',sans-serif;font-size:12px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:5px;}
-        .hero-btn.income{background:var(--green-dim);color:var(--green);border:1px solid rgba(34,197,94,.2);}
-        .hero-btn.expense{background:var(--red-dim);color:var(--red);border:1px solid rgba(239,68,68,.2);}
-        .hero-btn.fixed{background:var(--blue-dim);color:var(--blue);border:1px solid rgba(59,130,246,.2);}
-        .metrics4{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:0 16px;}
-        .mc4{background:var(--card);border:1px solid var(--border);border-radius:15px;padding:14px;}
-        .mc4-icon{width:34px;height:34px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:17px;margin-bottom:10px;}
-        .mc4-label{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--text2);margin-bottom:4px;}
-        .mc4-value{font-size:17px;font-weight:800;letter-spacing:-.4px;}
-        .mc4-sub{font-size:10px;color:var(--muted);margin-top:2px;}
-        .mc4.green .mc4-icon{background:var(--green-dim);}
-        .mc4.red .mc4-icon{background:var(--red-dim);}
-        .mc4.gold .mc4-icon{background:var(--gold-dim);}
-        .mc4.blue .mc4-icon{background:var(--blue-dim);}
-        .mc4.accent .mc4-icon{background:var(--accent-dim);}
-        .health-card{margin:10px 16px 0;background:var(--card);border:1px solid var(--border);border-radius:15px;padding:14px;display:flex;align-items:center;gap:14px;}
-        .health-gauge{position:relative;width:60px;height:60px;flex-shrink:0;}
-        .health-gauge svg{transform:rotate(-90deg);}
-        .health-score-num{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;}
-        .health-num{font-size:16px;font-weight:800;}
-        .health-info{flex:1;}
-        .health-title{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--text2);margin-bottom:2px;}
-        .health-label{font-size:15px;font-weight:800;}
-        .health-desc{font-size:10px;color:var(--muted);margin-top:2px;}
-        .summary-card{margin:10px 16px 0;background:var(--card);border:1px solid var(--border);border-radius:15px;padding:14px;}
-        .summary-row{display:flex;justify-content:space-between;margin-bottom:10px;}
-        .summary-item label{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--text2);display:flex;align-items:center;gap:4px;margin-bottom:4px;}
-        .summary-item .val{font-size:18px;font-weight:800;letter-spacing:-.4px;}
-        .surplus-bar{height:7px;background:var(--border);border-radius:4px;overflow:hidden;margin-top:8px;}
-        .surplus-fill{height:100%;border-radius:4px;transition:width .6s;}
-        .pg{padding:10px 16px 6px;display:flex;flex-direction:column;gap:12px;}
-        .section-title{font-size:11px;font-weight:600;letter-spacing:.04em;color:var(--text);opacity:.65;}
-        .card{background:var(--card);border:1px solid var(--border);border-radius:15px;padding:14px;}
-        .st{font-size:11px;font-weight:600;letter-spacing:.04em;color:var(--text);opacity:.65;}
-        .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
-        .txlist{display:flex;flex-direction:column;gap:7px;}
-        .txi{display:flex;align-items:center;gap:10px;padding:11px;background:var(--surface);border:1px solid var(--border);border-radius:13px;cursor:pointer;user-select:none;}
-        .txi:active{border-color:var(--border2);}
-        .txicon{width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;}
-        .txinfo{flex:1;min-width:0;}
-        .txd{font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-        .txm{font-size:10px;color:var(--muted);margin-top:2px;display:flex;gap:4px;align-items:center;flex-wrap:wrap;}
-        .txa{font-size:13px;font-weight:700;flex-shrink:0;}
-        .tdel{background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;padding:5px 4px;flex-shrink:0;}
-        .badge{display:inline-block;font-size:9px;font-weight:700;padding:2px 6px;border-radius:20px;}
-        .chip{display:inline-flex;align-items:center;font-size:9px;font-weight:700;padding:2px 6px;border-radius:20px;}
-        .checkrow{display:flex;align-items:center;gap:10px;padding:11px;background:var(--surface);border:1px solid var(--border);border-radius:13px;cursor:pointer;user-select:none;}
-        .checkbox{width:20px;height:20px;border-radius:6px;border:2px solid var(--border2);display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:all .15s;}
-        .checkbox.on{background:var(--green);border-color:var(--green);}
-        .fab{position:fixed;bottom:20px;right:16px;width:52px;height:52px;border-radius:16px;background:linear-gradient(135deg,var(--accent),var(--accent2));border:none;color:#fff;font-size:24px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 8px 24px rgba(99,102,241,.4);z-index:80;}
-        .fab:active{transform:scale(.92);}
-        .mhdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;}
-        .mtitle{font-size:15px;font-weight:800;color:var(--text);}
-        .mclose{background:none;border:none;color:var(--text);font-size:22px;cursor:pointer;padding:2px 6px;opacity:.6;}
-        .fl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text2);margin-bottom:6px;display:block;}
-        .fi{width:100%;background:var(--card2);border:1.5px solid var(--border2);color:var(--text);font-family:'Plus Jakarta Sans',sans-serif;font-size:13px;border-radius:10px;padding:11px 13px;outline:none;transition:border-color .2s,-webkit-appearance:none;font-weight:500;}
-        .fi:focus{border-color:var(--accent);}.fi::placeholder{color:var(--muted);opacity:1;}
-        .fg{margin-bottom:12px;}
-        .frow{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
-        .catgrid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;}
-        .catopt{border:1.5px solid var(--border2);background:var(--card2);color:var(--text);font-family:'Plus Jakarta Sans',sans-serif;font-size:11px;font-weight:700;border-radius:9px;padding:9px 6px;cursor:pointer;text-align:center;line-height:1.5;transition:all .12s;word-break:break-word;overflow-wrap:break-word;}
-        .savebtn{width:100%;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;border:none;font-family:'Plus Jakarta Sans',sans-serif;font-size:14px;font-weight:700;border-radius:13px;padding:14px;cursor:pointer;margin-top:6px;}
-        .savebtn:active{opacity:.85;}.savebtn:disabled{opacity:.4;cursor:not-allowed;}
-        select.fi{appearance:none;-webkit-appearance:none;}
-        .divider{height:1px;background:var(--border);margin:14px 0;}
-        .notesarea{width:100%;background:var(--card2);border:1.5px solid var(--border2);color:var(--text);font-family:'Plus Jakarta Sans',sans-serif;font-size:13px;border-radius:12px;padding:12px;resize:vertical;min-height:80px;outline:none;font-weight:500;}
-        .notesarea:focus{border-color:var(--accent);}
-        .empty{text-align:center;color:var(--muted);font-size:13px;padding:36px 0;line-height:1.8;}
-        .alert{display:flex;align-items:center;gap:10px;padding:11px 14px;border-radius:12px;font-size:12px;font-weight:500;}
-        .alert.ok{background:var(--green-dim);border:1px solid rgba(34,197,94,.2);color:var(--green);}
-        .alert.warn{background:var(--gold-dim);border:1px solid rgba(245,158,11,.2);color:var(--gold);}
-        .alert.danger{background:var(--red-dim);border:1px solid rgba(239,68,68,.2);color:var(--red);}
-        .bulkbtn{background:var(--surface);border:1.5px solid var(--border2);color:var(--text);font-family:'Plus Jakarta Sans',sans-serif;font-size:12px;font-weight:600;border-radius:11px;padding:9px 14px;cursor:pointer;}
-        .bulkbtn:active{border-color:var(--accent);color:var(--accent);}
-        .chart{display:flex;align-items:flex-end;gap:4px;}
-        .cgrp{display:flex;align-items:flex-end;gap:2px;flex:1;}
-        .cbar{flex:1;border-radius:4px 4px 0 0;min-height:2px;transition:height .5s ease;}
-        .clbl{font-size:7px;text-align:center;margin-top:3px;color:var(--muted);}
-        .atable{width:100%;border-collapse:collapse;font-size:12px;}
-        .atable th{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);padding:7px 6px;text-align:right;}
-        .atable th:first-child{text-align:left;}
-        .atable td{padding:7px 6px;text-align:right;border-top:1px solid var(--border);}
-        .atable td:first-child{text-align:left;font-weight:600;font-size:11px;}
-        .atable tr.cur td{background:var(--accent-dim);}
-        .atable tfoot td{border-top:2px solid var(--border2);font-weight:700;}
-        .section-sep{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:var(--muted);padding:8px 0 6px;display:flex;align-items:center;gap:8px;}
-        .section-sep::after{content:'';flex:1;height:1px;background:var(--border);}
-        .loading-overlay{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:60px;color:var(--muted);font-size:13px;gap:12px;}
-        .metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;}
-        .mc{background:var(--card);border:1px solid var(--border);border-radius:13px;padding:11px;position:relative;overflow:hidden;}
-        .mc::after{content:'';position:absolute;inset:0;opacity:.04;pointer-events:none;}
-        .mc.g::after{background:var(--green);}.mc.w::after{background:var(--red);}.mc.p::after{background:var(--accent);}.mc.b::after{background:var(--blue);}.mc.gold::after{background:var(--gold);}.mc.gr::after{background:#aaa;}
-        .ml{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--text2);margin-bottom:4px;}
-        .mv{font-size:13px;font-weight:800;letter-spacing:-.3px;}
-        .mv.g{color:var(--green);}.mv.w{color:var(--red);}.mv.p{color:var(--accent);}.mv.b{color:var(--blue);}.mv.gold{color:var(--gold);}.mv.gr{color:var(--muted);}
-
-        /* ── DESKTOP RESPONSIVE ── */
-        @media(min-width:768px){
-          .catgrid{grid-template-columns:repeat(3,1fr);}
-          .desktop-layout{display:flex;min-height:100vh;}
-          .desktop-sidebar{width:240px;flex-shrink:0;background:var(--card);border-right:1px solid var(--border);display:flex;flex-direction:column;padding:0 0 24px;position:sticky;top:0;height:100vh;overflow-y:auto;}
-          .desktop-main{flex:1;min-width:0;max-width:680px;}
-          .desktop-sidebar-header{padding:20px 20px 18px;border-bottom:1px solid var(--border);}
-          .desktop-sidebar-logo{font-size:20px;font-weight:800;letter-spacing:-.5px;}
-          .desktop-sidebar-logo em{color:var(--accent);font-style:normal;}
-          .desktop-sidebar-user{margin-top:12px;display:flex;align-items:center;gap:10px;}
-          .desktop-sidebar-avatar{width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;font-size:13px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
-          .desktop-sidebar-name{font-size:13px;font-weight:700;}
-          .desktop-sidebar-email{font-size:10px;color:var(--muted);}
-          .desktop-sidebar-nav{flex:1;padding:10px;}
-          .desktop-snav-item{display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:12px;cursor:pointer;margin-bottom:2px;color:var(--text2);font-size:13px;font-weight:500;border:none;background:none;width:100%;text-align:left;font-family:'Plus Jakarta Sans',sans-serif;transition:all .15s;}
-          .desktop-snav-item:hover{background:var(--card2);}
-          .desktop-snav-item.active{background:var(--accent-dim);color:var(--accent);font-weight:700;}
-          .desktop-snav-icon{font-size:16px;width:20px;text-align:center;flex-shrink:0;}
-          .desktop-sidebar-footer{padding:14px 16px 0;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:8px;}
-          .desktop-theme-toggle{display:flex;align-items:center;justify-content:space-between;padding:9px 12px;background:var(--card2);border-radius:12px;border:1px solid var(--border);cursor:pointer;}
-          .desktop-signout{display:flex;align-items:center;gap:8px;padding:9px 12px;border-radius:12px;cursor:pointer;color:var(--red);font-size:13px;font-weight:600;border:none;background:none;width:100%;font-family:'Plus Jakarta Sans',sans-serif;}
-          .desktop-signout:hover{background:var(--red-dim);}
-          .app{max-width:100%;padding-bottom:0;}
-          .topbar{display:none;}
-          .hamburger{display:none;}
-          .sidebar-overlay{display:none;}
-          .sidebar{display:none;}
-          .fab{bottom:24px;right:24px;}
-          .metrics4{padding:0 20px;}
-          .health-card{margin:10px 20px 0;}
-          .summary-card{margin:10px 20px 0;}
-          .pg{padding:10px 20px 6px;}
-          .month-nav{padding:12px 20px 6px;}
-          .hero{padding:10px 20px 16px;}
-        }
-        @media(max-width:767px){
-          .desktop-layout{display:block;}
-          .desktop-sidebar{display:none;}
-          .desktop-main{width:100%;}
-        }
-
-        /* ── TEMA FIXO: .dark/.light direto no modal-surface → sem herança de DOM ── */
-        .dark.modal-surface{background:#1e1e2e !important;border-top:1.5px solid rgba(255,255,255,.15);}
-        .light.modal-surface{background:#ffffff !important;border-top:1.5px solid rgba(0,0,0,.1);}
-        .dark.modal-surface .fl{color:#c0c0e0 !important;font-size:11px;font-weight:700;margin-bottom:6px;display:block;}
-        .light.modal-surface .fl{color:#333355 !important;font-size:11px;font-weight:700;margin-bottom:6px;display:block;}
-        .dark.modal-surface .fi{background:#12121e !important;border:1.5px solid rgba(255,255,255,.22) !important;color:#f0f0ff !important;}
-        .light.modal-surface .fi{background:#ededf5 !important;border:1.5px solid rgba(0,0,0,.25) !important;color:#0f0f1a !important;}
-        .dark.modal-surface .fi::placeholder{color:#505070 !important;opacity:1;}
-        .light.modal-surface .fi::placeholder{color:#9090b0 !important;opacity:1;}
-        .dark.modal-surface .catopt{background:#12121e !important;border:1.5px solid rgba(255,255,255,.2) !important;color:#d0d0f0 !important;}
-        .light.modal-surface .catopt{background:#e8e8f2 !important;border:1.5px solid rgba(0,0,0,.2) !important;color:#1a1a44 !important;}
-        .dark.modal-surface .catopt.selected{background:rgba(99,102,241,.25) !important;border-color:#6366f1 !important;color:#fff !important;font-weight:800 !important;}
-        .light.modal-surface .catopt.selected{background:rgba(79,70,229,.12) !important;border-color:#4f46e5 !important;color:#1a1a6a !important;font-weight:800 !important;}
-        .catopt{cursor:pointer;}
-        .dark.modal-surface .mhdr .mtitle,.dark.modal-surface .mtitle{color:#f0f0ff !important;}
-        .light.modal-surface .mhdr .mtitle,.light.modal-surface .mtitle{color:#0f0f1a !important;}
-        .dark.modal-surface .mclose{color:#f0f0ff !important;}
-        .light.modal-surface .mclose{color:#0f0f1a !important;}
-        .dark.modal-surface .savebtn{background:linear-gradient(135deg,#6366f1,#8b5cf6) !important;}
-        .light.modal-surface .savebtn{background:linear-gradient(135deg,#4f46e5,#7c3aed) !important;}
-        .dark.modal-surface .section-sep{color:#c0c0e0;}
-        .light.modal-surface .section-sep{color:#333355;}
-        .dark.modal-surface .checkrow{background:#12121e;border:1px solid rgba(255,255,255,.15);}
-        .light.modal-surface .checkrow{background:#f5f5fc;border:1px solid rgba(0,0,0,.15);}
-        .fab{background:#6366f1 !important;color:#fff !important;}
-      `}</style>
-
-      <div className={`${theme}`} style={{minHeight:"100vh",background:"var(--bg)",color:"var(--text)"}}>
-        {menuOpen&&<div className="sidebar-overlay" onClick={()=>setMenuOpen(false)}/>}
-        {menuOpen&&(
-          <div className="sidebar">
-            <div className="sidebar-header">
-              <div className="sidebar-logo">Fin<em>Track</em></div>
-              <div className="sidebar-user">
-                <div className="sidebar-avatar">{(settings.name||"U").slice(0,2).toUpperCase()}</div>
-                <div className="sidebar-user-info">
-                  <div className="sidebar-user-name">{settings.name||"Usuário"}</div>
-                  <div className="sidebar-user-email">{session?.user?.email}</div>
-                </div>
-              </div>
-            </div>
-            <div className="sidebar-nav">
-              {NAV.map(n=>(
-                <button key={n.id} className={`snav-item${page===n.id?" active":""}`} onClick={()=>{setPage(n.id);setMenuOpen(false);}}>
-                  <span className="snav-icon">{n.icon}</span>{n.label}
-                </button>
-              ))}
-            </div>
-            <div className="sidebar-footer">
-              <div className="theme-toggle" onClick={toggleTheme}>
-                <span className="theme-label">{theme==="dark"?"🌙 Tema escuro":"☀️ Tema claro"}</span>
-                <div className={`toggle-pill${theme==="light"?" on":""}`}/>
-              </div>
-              <button className="sidebar-signout" onClick={()=>supabase.auth.signOut()}>
-                🚪 Sair da conta
-              </button>
-            </div>
-          </div>
-        )}
-
-        <div className="desktop-layout">
-          <div className="desktop-sidebar">
-            <div className="desktop-sidebar-header">
-              <div className="desktop-sidebar-logo">Fin<em>Track</em></div>
-              <div className="desktop-sidebar-user">
-                <div className="desktop-sidebar-avatar">{(settings.name||"U").slice(0,2).toUpperCase()}</div>
-                <div>
-                  <div className="desktop-sidebar-name">{settings.name||"Usuário"}</div>
-                  <div className="desktop-sidebar-email">{session?.user?.email}</div>
-                </div>
-              </div>
-            </div>
-            <div className="desktop-sidebar-nav">
-              {NAV.map(n=>(
-                <button key={n.id} className={`desktop-snav-item${page===n.id?" active":""}`} onClick={()=>setPage(n.id)}>
-                  <span className="desktop-snav-icon">{n.icon}</span>{n.label}
-                </button>
-              ))}
-            </div>
-            <div className="desktop-sidebar-footer">
-              <div className="desktop-theme-toggle" onClick={toggleTheme}>
-                <span style={{fontSize:13,fontWeight:500,color:"var(--text2)",display:"flex",alignItems:"center",gap:8}}>{theme==="dark"?"🌙 Tema escuro":"☀️ Tema claro"}</span>
-                <div className={`toggle-pill${theme==="light"?" on":""}`}/>
-              </div>
-              <button className="desktop-signout" onClick={()=>supabase.auth.signOut()}>🚪 Sair da conta</button>
-            </div>
-          </div>
-
-          <div className={`app ${theme} desktop-main`}>
-            <div className="topbar">
-              <div className="topbar-left">
-                <button className="hamburger" onClick={()=>setMenuOpen(o=>!o)}>
-                  <span/><span/><span/>
-                </button>
-                <div className="logo-text">Fin<em>Track</em></div>
-              </div>
-              <div className="topbar-right">
-                {syncing&&<span style={{fontSize:14}}>☁️</span>}
-                <div className="avatar">{(settings.name||"U").slice(0,2).toUpperCase()}</div>
-              </div>
-            </div>
-
-            <div className="month-nav">
-              <button onClick={prevMonth}>‹</button>
-              <span className="month-label">{MONTHS_FULL[vm]} {vy}{syncing&&" ☁️"}</span>
-              <button onClick={nextMonth}>›</button>
-            </div>
-
-        {loading&&<div className="loading-overlay"><div className="loading-dot"/><span>Carregando {MONTHS_FULL[vm]}...</span></div>}
-
-        {!loading&&page==="dashboard"&&(
-          <>
-          <div className="hero">
-            <div className="hero-greeting">Olá, {settings.name||"👋"}</div>
-            <div className="hero-sub">{MONTHS_FULL[vm]} {vy} · {alerts.filter(a=>a.type==="warn"||a.type==="danger").length>0?"⚠️ Atenção necessária":"Tudo em ordem"}</div>
-            <div className="hero-actions">
-              <button className="hero-btn income" onClick={()=>setModal({type:"income"})}>+ Receita</button>
-              <button className="hero-btn expense" onClick={()=>setModal({type:"expense"})}>+ Despesa</button>
-              <button className="hero-btn fixed" onClick={()=>setModal({type:"fixed"})}>+ Fixa</button>
-            </div>
-          </div>
-
-          {smartAlerts.length>0&&(
-            <div style={{display:"flex",flexDirection:"column",gap:6}}>
-              {smartAlerts.map((a,i)=>(
-                <div key={i} style={{
-                  background:a.type==="warn"?"rgba(245,158,11,.08)":"rgba(59,130,246,.08)",
-                  border:`1px solid ${a.type==="warn"?"rgba(245,158,11,.3)":"rgba(59,130,246,.3)"}`,
-                  borderRadius:10,padding:"9px 12px",display:"flex",gap:9,alignItems:"flex-start"
-                }}>
-                  <span style={{fontSize:15,flexShrink:0}}>{a.icon}</span>
-                  <div style={{fontSize:11,color:"var(--text)",lineHeight:1.5,fontWeight:500}}>{a.msg}</div>
-                </div>
-              ))}
-            </div>
-          )}
-
-          <div className="metrics4">
-            <div className="mc4 green">
-              <div className="mc4-icon">📈</div>
-              <div className="mc4-label">Receita do mês</div>
-              <div className="mc4-value" style={{color:"var(--green)"}}>{fmt(rawIncome)}</div>
-              <div className="mc4-sub">{(data.incomes||[]).length} lançamento(s)</div>
-            </div>
-            <div className="mc4 red">
-              <div className="mc4-icon">📉</div>
-              <div className="mc4-label">Gasto</div>
-              <div className="mc4-value" style={{color:"var(--red)"}}>{fmt(totalExpense+totalFixedPaid)}</div>
-              <div className="mc4-sub">{fmt(totalInvest)} investido</div>
-            </div>
-            <div className="mc4 blue" onClick={()=>setPage("wallet")} style={{cursor:"pointer"}}>
-              <div className="mc4-icon">💼</div>
-              <div className="mc4-label">Total nas contas</div>
-              <div className="mc4-value" style={{color:totalContasReais>=0?"var(--green)":"var(--red)"}}>{fmt(totalContasReais)}</div>
-              <div className="mc4-sub">Saldo real · toque para ver</div>
-            </div>
-            <div className="mc4" style={{cursor:"pointer",background:totalCartoesComprometido>0?"rgba(239,68,68,.08)":"var(--card)",border:`1px solid ${totalCartoesComprometido>0?"rgba(239,68,68,.25)":"var(--border)"}`}} onClick={()=>setPage("bills")}>
-              <div className="mc4-icon">💳</div>
-              <div className="mc4-label">A pagar (cartões)</div>
-              <div className="mc4-value" style={{color:totalCartoesComprometido>0?"var(--wine)":"var(--muted)"}}>{fmt(totalCartoesComprometido)}</div>
-              <div className="mc4-sub">{(settings.billsToPay||[]).filter(b=>!b.paid).length} fatura(s) em aberto</div>
-            </div>
-            <div className="mc4 accent">
-              <div className="mc4-icon">🛡️</div>
-              <div className="mc4-label">Reserva</div>
-              <div className="mc4-value" style={{color:"var(--accent)"}}>{fmt(emergencyTotal)}</div>
-              <div className="mc4-sub">de {fmt(settings.emergencyGoal)}</div>
-            </div>
-          </div>
-
-          {(()=>{
-            const r=30,circ=2*Math.PI*r,dash=(score/100)*circ;
-            return (
-              <div className="health-card">
-                <div className="health-gauge">
-                  <svg width="60" height="60" viewBox="0 0 60 60">
-                    <circle cx="30" cy="30" r={r} fill="none" stroke="var(--border2)" strokeWidth="6"/>
-                    <circle cx="30" cy="30" r={r} fill="none" stroke={scoreColor} strokeWidth="6" strokeDasharray={`${dash} ${circ-dash}`} strokeLinecap="round"/>
-                  </svg>
-                  <div className="health-score-num">
-                    <span className="health-num" style={{color:scoreColor}}>{score}</span>
-                  </div>
-                </div>
-                <div className="health-info">
-                  <div className="health-title">Saúde Financeira</div>
-                  <div className="health-label" style={{color:scoreColor}}>{scoreLabel}</div>
-                  <div className="health-desc">{score>=85?"Finanças sob controle 🎯":score>=70?"No caminho certo 📊":score>=50?"Pode melhorar 💡":"Requer atenção ⚠️"}</div>
-                </div>
-              </div>
-            );
-          })()}
-
-          <div className="summary-card">
-            <div className="summary-row">
-              <div className="summary-item">
-                <label><span style={{color:"var(--green)"}}>▲</span> Receita</label>
-                <div className="val" style={{color:"var(--green)"}}>{fmt(rawIncome)}</div>
-              </div>
-              <div className="summary-item" style={{textAlign:"right"}}>
-                <label><span style={{color:"var(--red)"}}>▼</span> Gasto</label>
-                <div className="val" style={{color:"var(--red)"}}>{fmt(totalExpense+totalFixedPaid)}</div>
-              </div>
-            </div>
-            <div style={{background:balance>=0?"var(--green-dim)":"var(--red-dim)",borderRadius:10,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              <span style={{fontSize:12,fontWeight:600,color:balance>=0?"var(--green)":"var(--red)"}}>Sobrou: {fmt(Math.max(balance,0))}</span>
-              <span style={{fontSize:11,color:"var(--muted)"}}>{unpaidFixed>0?`${unpaidFixed} fixa(s) pendente(s)`:"✓ Tudo pago"}</span>
-            </div>
-          </div>
-
-          {alerts.length>0&&(
-          <div className="pg" style={{paddingTop:0}}>
-            <div style={{display:"flex",flexDirection:"column",gap:6}}>{alerts.map((a,i)=><div key={i} className={`alert ${a.type}`}><span>{a.type==="ok"?"✅":a.type==="warn"?"⚠️":"🚨"}</span>{a.msg}</div>)}</div>
-          </div>
-          )}
-
-          <div className="pg">
-            <div className="card">
-              <div className="st" style={{marginBottom:8}}>Evolução — {vy}</div>
-              <div style={{display:"flex",gap:10,marginBottom:6}}>
-                {[["var(--green)","Entradas"],["var(--wine)","Saídas"]].map(([c,l])=>(
-                  <span key={l} style={{display:"flex",alignItems:"center",gap:4,fontSize:10,color:"var(--muted)"}}><span style={{width:10,height:10,borderRadius:2,background:c,display:"inline-block"}}/>{l}</span>
-                ))}
-              </div>
-              <div className="chart" style={{height:70}}>
-                {annualRows.map((r,i)=>(
-                  <div key={i} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center"}}>
-                    <div className="cgrp">
-                      <div className="cbar" style={{background:r.i===vm?"var(--green)":"rgba(0,214,143,.28)",height:`${Math.max((r.inc/chartMax)*70,r.inc>0?2:0)}px`}}/>
-                      <div className="cbar" style={{background:r.i===vm?"var(--wine)":"rgba(192,57,43,.35)",height:`${Math.max((r.out/chartMax)*70,r.out>0?2:0)}px`}}/>
-                    </div>
-                    <div className="clbl" style={{color:r.i===vm?"var(--accent)":"var(--muted)",fontWeight:r.i===vm?700:400}}>{MONTHS[i]}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-            <div className="row2">
-              <div className="card" style={{textAlign:"center"}}>
-                <div className="st" style={{marginBottom:8}}>Saldo</div>
-                <Donut size={130} thick={23} data={[{color:"var(--green)",value:totalIncome},{color:"var(--wine)",value:totalOut}]} label={fmt(balance)} sublabel={balance>=0?"positivo":"negativo"}/>
-                <div style={{fontSize:9,color:"var(--muted)",marginTop:6}}>{totalIncome>0?((balance/totalIncome)*100).toFixed(1):0}% da renda</div>
-              </div>
-              <div className="card">
-                <div className="st" style={{marginBottom:8}}>Crédito em aberto</div>
-                <Donut size={120} thick={21}
-                  data={bankCredit.filter(b=>b.spent>0).map(b=>({color:b.color,value:b.spent}))}
-                  label={fmt(bankCredit.reduce((s,b)=>s+b.spent,0))}
-                  sublabel="ciclo atual"/>
-                <div style={{marginTop:8,display:"flex",flexDirection:"column",gap:5}}>
-                  {bankCredit.filter(b=>b.spent>0).map(b=>{
-                    const pct=b.limit>0?Math.min((b.spent/b.limit)*100,100):0;
-                    return (
-                      <div key={b.id}>
-                        <div style={{display:"flex",justifyContent:"space-between",fontSize:10,marginBottom:2}}>
-                          <span style={{display:"flex",alignItems:"center",gap:4}}>
-                            <span style={{width:7,height:7,borderRadius:"50%",background:b.color,display:"inline-block"}}/>
-                            {b.name}
-                            {b.isClosed&&<span style={{fontSize:8,color:"var(--accent)"}}>novo ciclo</span>}
-                          </span>
-                          <span style={{color:pct>90?"var(--wine)":pct>70?"var(--gold)":"var(--muted)"}}>{fmt(b.spent)}{b.limit?` / ${fmt(b.limit)}`:""}</span>
-                        </div>
-                        {b.limit>0&&<div style={{height:3,background:"var(--border)",borderRadius:2,overflow:"hidden"}}>
-                          <div style={{height:"100%",width:`${pct}%`,borderRadius:2,background:pct>90?"var(--wine)":pct>70?"var(--gold)":b.color}}/>
-                        </div>}
-                      </div>
-                    );
-                  })}
-                  {bankCredit.every(b=>b.spent===0)&&<div style={{fontSize:10,color:"var(--green)",textAlign:"center",fontWeight:600}}>✅ Sem gastos no ciclo atual</div>}
-                </div>
-              </div>
-            </div>
-            <div className="card">
-              <div className="st" style={{marginBottom:10}}>Metas & Reservas</div>
-              <GoalBar label="Reserva de Emergência" icon="🛡️" current={emergencyTotal} goal={settings.emergencyGoal} color="var(--green)"/>
-              <GoalBar label={settings.personalGoalName} icon="🎯" current={personalTotal} goal={settings.personalGoalValue} color="var(--accent)"/>
-            </div>
-            {bankCredit.length>0&&(
-              <div className="card">
-                <div className="st" style={{marginBottom:10}}>Crédito em aberto 💳</div>
-                {bankCredit.every(b=>b.isClosed&&b.spent===0)&&(
-                  <div style={{textAlign:"center",padding:"12px 0",fontSize:12,color:"var(--green)",fontWeight:600}}>✅ Todas as faturas fechadas — nenhum gasto no novo ciclo ainda</div>
-                )}
-                {bankCredit.map(b=>{
-                  const pct=b.limit>0?Math.min((b.spent/b.limit)*100,100):0;
-                  const avail=b.limit>0?Math.max(b.limit-b.spent,0):null;
-                  if(b.isClosed&&b.spent===0) return null; // ocultar bancos fechados com R$0
-                  return (
-                    <div key={b.id} style={{marginBottom:12,paddingBottom:12,borderBottom:"1px solid var(--border)"}}>
-                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
-                        <span style={{display:"flex",alignItems:"center",gap:6,fontSize:12,fontWeight:700}}>
-                          <span style={{width:9,height:9,borderRadius:"50%",background:b.color,display:"inline-block"}}/>
-                          {b.name}
-                          <span style={{fontSize:9,padding:"1px 6px",borderRadius:8,fontWeight:700,
-                            background:b.isClosed?"rgba(0,214,143,.12)":"rgba(99,102,241,.12)",
-                            color:b.isClosed?"var(--green)":"var(--accent)"}}>
-                            {b.isClosed?`novo ciclo — ${MONTHS_FULL[b.nextInvoice?.m??0]}`:`em aberto — ${MONTHS_FULL[b.nextInvoice?.m??0]}`}
-                          </span>
-                        </span>
-                        <span style={{fontSize:13,fontWeight:800,color:pct>90?"var(--wine)":pct>70?"var(--gold)":"var(--text)"}}>{fmt(b.spent)}</span>
-                      </div>
-                      {b.limit>0&&<>
-                        <div style={{height:5,background:"var(--border)",borderRadius:3,overflow:"hidden",marginBottom:3}}>
-                          <div style={{height:"100%",width:`${pct}%`,borderRadius:3,transition:"width .5s",background:pct>90?"var(--wine)":pct>70?"var(--gold)":b.color}}/>
-                        </div>
-                        <div style={{display:"flex",justifyContent:"space-between",fontSize:10}}>
-                          <span style={{color:pct>90?"var(--wine)":pct>70?"var(--gold)":"var(--muted)"}}>{pct.toFixed(0)}% do limite</span>
-                          <span style={{color:"var(--green)",fontWeight:600}}>{fmt(avail)} disponível</span>
-                        </div>
-                      </>}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-            {catData.length>0&&(
-              <div className="card">
-                <div className="st" style={{marginBottom:10}}>Gastos por categoria (débito/pix)</div>
-                {catData.map(c=>{
-                  const hasBudget=c.budget>0,pct=hasBudget?Math.min((c.value/c.budget)*100,100):0;
-                  const over=hasBudget&&c.value>c.budget,warn=hasBudget&&pct>=80&&!over;
-                  return (<div key={c.name} style={{marginBottom:9}}>
-                    <div style={{display:"flex",justifyContent:"space-between",marginBottom:3,alignItems:"center"}}>
-                      <span style={{fontSize:11,fontWeight:500}}>{c.icon} {c.name}</span>
-                      <span style={{fontSize:10,display:"flex",gap:5,alignItems:"center"}}>
-                        {over&&<span style={{color:"var(--wine)",fontSize:9,fontWeight:700}}>⚠ estourou</span>}
-                        {warn&&<span style={{color:"var(--gold)",fontSize:9,fontWeight:700}}>⚡ quase</span>}
-                        <span style={{color:"var(--muted)"}}>{fmt(c.value)}{hasBudget?` / ${fmt(c.budget)}`:""}</span>
-                      </span>
-                    </div>
-                    <div style={{height:5,background:"var(--border)",borderRadius:3,overflow:"hidden"}}>
-                      <div style={{height:"100%",borderRadius:3,transition:"width .6s",width:`${hasBudget?pct:(c.value/maxCat)*100}%`,background:over?"var(--wine)":warn?"var(--gold)":c.color}}/>
-                    </div>
-                  </div>);
-                })}
-              </div>
-            )}
-            <div className="card">
-              <div className="st" style={{marginBottom:8}}>Observações</div>
-              <textarea className="notesarea" placeholder="Ajustes, onde passou do esperado, decisões pro próximo mês…" value={data.notes||""} onChange={e=>setData(d=>({...d,notes:e.target.value}))}/>
-            </div>
-          </div>
-          </>
-        )}
-
-        {!loading&&page==="bills"&&<BillsPage banks={banks} setSettings={setSettings} settings={settings} setData={setData} vm={vm} vy={vy}/>}
-        {!loading&&page==="wallet"&&<WalletPage banks={banks} setSettings={setSettings} yearCache={yearCache} settings={settings} vm={vm} vy={vy}/>}
-        {!loading&&page==="incomes"&&(
-          <div className="pg">
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              <div className="st">Entradas — {MONTHS_FULL[vm]}</div>
-              <div style={{fontSize:13,fontWeight:700,color:"var(--green)"}}>{fmt(rawIncome)}</div>
-            </div>
-            {prevBalance>0&&<div style={{background:"rgba(0,214,143,.08)",border:"1px solid rgba(0,214,143,.2)",borderRadius:10,padding:"9px 12px",fontSize:11,color:"var(--green)",fontWeight:500}}>✅ Saldo anterior: +{fmt(prevBalance)}</div>}
-            <div style={{display:"flex",gap:8}}>
-              <button className="bulkbtn" onClick={()=>openModal("bulk_income")}>📋 Colar em lote</button>
-              <button className="bulkbtn" onClick={()=>openModal("import_income")} style={{color:"var(--accent)",borderColor:"rgba(99,102,241,.3)"}}>📂 Importar CSV</button>
-            </div>
-            {(data.incomes||[]).length>0&&<ListControls sortBy={sortIncomes} setSortBy={setSortIncomes} filterText={filterIncomesText} setFilterText={setFilterIncomesText} filterBank={filterIncomesBank} setFilterBank={setFilterIncomesBank} expenseCats={expenseCats} banks={banks} showCategory={false}/>}
-            {(()=>{
-              const filteredIncomes=applyFilters(data.incomes||[],{sortBy:sortIncomes,filterText:filterIncomesText,filterBank:filterIncomesBank,nameField:"name"});
-              return filteredIncomes.length===0&&(data.incomes||[]).length===0?<div className="empty">Nenhuma entrada ainda.<br/>Toque no <strong style={{color:"var(--accent)"}}>+</strong> ou cole em lote.</div>
-                :filteredIncomes.length===0?<div className="empty">Nenhum resultado para o filtro atual.</div>
-                :<div className="txlist">{filteredIncomes.map(e=>(
-                <div key={e.id} className="txi" onClick={()=>!e.autoFromWithdrawal&&openModal("income",e)}>
-                  <div className="txicon" style={{background:e.autoFromWithdrawal?"rgba(155,140,255,.15)":"#00d68f22"}}>{e.autoFromWithdrawal?"🔄":"💰"}</div>
-                  <div className="txinfo">
-                    <div className="txd">{e.name}</div>
-                    <div className="txm">{e.date?.slice(5).split("-").reverse().join("/")} {e.autoFromWithdrawal&&<span style={{color:"var(--accent)",fontSize:8,fontWeight:700}}>auto</span>}</div>
-                  </div>
-                  <div className="txa" style={{color:"var(--green)"}}>+{fmt(e.value)}</div>
-                  {!e.autoFromWithdrawal&&<button className="tdel" onClick={ev=>{ev.stopPropagation();deleteEntry("incomes",e.id);}}>✕</button>}
-                </div>
-              ))}</div>;})()}
-          </div>
-        )}
-
-        {!loading&&page==="expenses"&&(
-          <div className="pg">
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              <div className="st">Gastos — Débito/PIX — {MONTHS_FULL[vm]}</div>
-              <div style={{fontSize:13,fontWeight:700,color:"var(--wine)"}}>{fmt(totalExpense)}</div>
-            </div>
-            <div style={{background:"rgba(155,140,255,.08)",border:"1px solid rgba(155,140,255,.2)",borderRadius:10,padding:"9px 12px",fontSize:11,color:"var(--accent)"}}>
-              💳 Gastos no crédito → registre em <strong>Cartões</strong>
-            </div>
-            <div style={{display:"flex",gap:8}}>
-              <button className="bulkbtn" onClick={()=>openModal("bulk_expense")}>📋 Colar em lote</button>
-              <button className="bulkbtn" onClick={()=>openModal("import_expense")} style={{color:"var(--accent)",borderColor:"rgba(99,102,241,.3)"}}>📂 Importar CSV</button>
-            </div>
-            {(data.expenses||[]).length>0&&<ListControls sortBy={sortExpenses} setSortBy={setSortExpenses} filterText={filterExpensesText} setFilterText={setFilterExpensesText} filterCategory={filterExpensesCat} setFilterCategory={setFilterExpensesCat} filterBank={filterExpensesBank} setFilterBank={setFilterExpensesBank} expenseCats={expenseCats} banks={banks}/>}
-            {(()=>{
-              const filteredExpenses=applyFilters(data.expenses||[],{sortBy:sortExpenses,filterText:filterExpensesText,filterCategory:filterExpensesCat,filterBank:filterExpensesBank,nameField:"description"});
-              return filteredExpenses.length===0&&(data.expenses||[]).length===0?<div className="empty">Nenhum gasto ainda.<br/>Toque no <strong style={{color:"var(--accent)"}}>+</strong> ou cole em lote.</div>
-                :filteredExpenses.length===0?<div className="empty">Nenhum resultado para o filtro atual.</div>
-                :<div className="txlist">{filteredExpenses.map(e=>{
-                const cat=catMap[e.category]||{icon:"📌",color:"#888"};
-                const bk=banks.find(b=>b.name===e.bank);
-                const d=e.date?e.date.slice(5).split("-").reverse().join("/"):"";
-                return (
-                  <div key={e.id} className="txi" onClick={()=>openModal("expense",e)}>
-                    <div className="txicon" style={{background:e.isTransfer?"rgba(99,102,241,.2)":cat.color+"33"}}>{e.isTransfer?"🔄":cat.icon}</div>
-                    <div className="txinfo">
-                      <div className="txd">{e.isTransfer?`${e.bank} → ${e.transferTo}`:(e.description||e.category)}</div>
-                      <div className="txm"><span>{d}</span>{!e.isTransfer&&bk&&<span className="chip" style={{background:bk.color+"33",color:bk.color}}>{bk.name}</span>}<span>{e.isTransfer?"Transferência interna":e.method}</span></div>
-                    </div>
-                    <div className="txa" style={{color:e.isTransfer?"var(--muted)":"var(--wine)"}}>{e.isTransfer?fmt(e.value):"-"+fmt(e.value)}</div>
-                    {e.isDebtPayment&&<span style={{fontSize:9,background:"rgba(99,102,241,.15)",color:"var(--accent)",padding:"2px 6px",borderRadius:6,fontWeight:700,flexShrink:0}}>parcela</span>}
-                    {e.isTransfer&&<span style={{fontSize:9,background:"rgba(99,102,241,.15)",color:"var(--accent)",padding:"2px 6px",borderRadius:6,fontWeight:700,flexShrink:0}}>transfer</span>}
-                    {!e.isDebtPayment&&<button className="tdel" onClick={ev=>{ev.stopPropagation();deleteEntry("expenses",e.id);}}>✕</button>}
-                  </div>
-                );
-              })}</div>;})()}
-          </div>
-        )}
-
-        {!loading&&page==="fixed"&&(
-          <div className="pg">
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              <div className="st">Despesas Fixas & Faturas</div>
-              <div style={{fontSize:13,fontWeight:700,color:"var(--wine)"}}>{fmt(totalFixedAll)}</div>
-            </div>
-            <button className="bulkbtn" onClick={()=>openModal("bulk_fixed")}>📋 Colar em lote</button>
-            {allFixed.length===0?<div className="empty">Nenhuma despesa fixa.<br/>Toque no <strong style={{color:"var(--accent)"}}>+</strong> ou cole em lote.</div>:<>
-              {pendingFixed.length>0&&<>
-                <div className="section-sep">A pagar ({pendingFixed.length})</div>
-                <div style={{display:"flex",flexDirection:"column",gap:6}}>
-                  {pendingFixed.map(e=>(
-                    <div key={e.id} className="checkrow" onClick={()=>e.isDebt?toggleDebtPaid(e.debtId,e.debtMonthKey):toggleFixed(e.id)}>
-                      <div className="checkbox"/>
-                      <div style={{flex:1,minWidth:0}}>
-                        <div style={{fontSize:12,fontWeight:500}}>{e.name}
-                          {e.isDebt&&<span style={{marginLeft:6,fontSize:9,color:"var(--accent)",fontWeight:700}}>parcela</span>}
-                          {e.isAutoInvoice&&<span style={{marginLeft:6,fontSize:9,color:"var(--gold)",fontWeight:700}}>fatura auto</span>}
-                        </div>
-                      </div>
-                      <div style={{fontSize:13,fontWeight:700,color:"var(--wine)"}}>{fmt(e.value)}</div>
-                      {!e.isDebt&&!e.isAutoInvoice&&<><button className="tdel" onClick={ev=>{ev.stopPropagation();openModal("fixed",e);}}>✏️</button><button className="tdel" onClick={ev=>{ev.stopPropagation();deleteEntry("fixed",e.id);}}>✕</button></>}
-                      {e.isAutoInvoice&&<button className="tdel" onClick={ev=>{ev.stopPropagation();deleteEntry("fixed",e.id);}}>✕</button>}
-                    </div>
-                  ))}
-                </div>
-              </>}
-              {paidFixed.length>0&&<>
-                <div className="section-sep">Pagas ({paidFixed.length})</div>
-                <div style={{display:"flex",flexDirection:"column",gap:6}}>
-                  {paidFixed.map(e=>(
-                    <div key={e.id} className="checkrow" onClick={()=>e.isDebt?toggleDebtPaid(e.debtId,e.debtMonthKey):toggleFixed(e.id)}>
-                      <div className="checkbox on"><span style={{color:"#fff",fontSize:11,fontWeight:700}}>✓</span></div>
-                      <div style={{flex:1,minWidth:0}}>
-                        <div style={{fontSize:12,fontWeight:500,textDecoration:"line-through",color:"var(--muted)"}}>{e.name}</div>
-                        {e.bank&&<div style={{fontSize:9,color:"var(--green)",marginTop:2,fontWeight:600}}>✓ Pago via {e.bank}</div>}
-                      </div>
-                      <div style={{fontSize:13,fontWeight:700,color:"var(--green)"}}>{fmt(e.value)}</div>
-                      {!e.isDebt&&!e.isAutoInvoice&&<><button className="tdel" onClick={ev=>{ev.stopPropagation();openModal("fixed",e);}}>✏️</button><button className="tdel" onClick={ev=>{ev.stopPropagation();deleteEntry("fixed",e.id);}}>✕</button></>}
-                    </div>
-                  ))}
-                </div>
-              </>}
-            </>}
-          </div>
-        )}
-
-        {!loading&&page==="cards"&&(
-          <ErrorBoundary key={`cards-${vm}-${vy}`}>
-          <CartoesPage banks={banks} expenseCats={expenseCats} vm={vm} vy={vy} creditData={creditData} setCreditData={setCreditData} monthData={data} setMonthData={setData} bankCredit={bankCredit} setSettings={setSettings} settings={settings}/>
-        </ErrorBoundary>
-        )}
-
-        {!loading&&page==="investments"&&(
-          <div className="pg">
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              <div className="st">Reservas & Investimentos</div>
-              <div style={{fontSize:13,fontWeight:700,color:"var(--gold)"}}>{fmt(totalInvest)}</div>
-            </div>
-            <button className="bulkbtn" onClick={()=>openModal("bulk_investment")}>📋 Colar em lote</button>
-            <div className="card">
-              <GoalBar label="Reserva de Emergência" icon="🛡️" current={emergencyTotal} goal={settings.emergencyGoal} color="var(--green)"/>
-              <GoalBar label={settings.personalGoalName} icon="🎯" current={personalTotal} goal={settings.personalGoalValue} color="var(--accent)"/>
-            </div>
-            {(data.investments||[]).length===0?<div className="empty">Nenhum lançamento.<br/>Toque no <strong style={{color:"var(--accent)"}}>+</strong> ou cole em lote.</div>
-              :<div className="txlist">{(data.investments||[]).map(e=>{
-                const isW=isWithdrawal(e);
-                return (
-                  <div key={e.id} className="txi" onClick={()=>openModal("investment",e)}>
-                    <div className="txicon" style={{background:isW?"var(--wine)22":"var(--gold)22"}}>{isW?"📤":"💰"}</div>
-                    <div className="txinfo">
-                      <div className="txd">{e.name||e.type}</div>
-                      <div className="txm">{e.date?.slice(5).split("-").reverse().join("/")} · {e.type}{isW&&<span style={{color:"var(--green)",fontSize:8,fontWeight:700}}>→ entrada auto</span>}</div>
-                    </div>
-                    <div className="txa" style={{color:isW?"var(--wine)":"var(--gold)"}}>{isW?"-":"+"}{fmt(e.value)}</div>
-                    <button className="tdel" onClick={ev=>{ev.stopPropagation();deleteEntry("investments",e.id);}}>✕</button>
-                  </div>
-                );
-              })}</div>}
-          </div>
-        )}
-
-        {!loading&&page==="debts"&&<DebtsPage debts={debts} setDebts={setDebts} vm={vm} vy={vy} onTogglePaid={toggleDebtPaid} banks={banks}/>}
-        {!loading&&page==="planning"&&<PlanningPage yearCache={yearCache} vm={vm} vy={vy} settings={settings} debts={debts} expenseCats={expenseCats}/>}
-
-        {!loading&&page==="annual"&&(
-          <div className="pg">
-            <div className="st">Visão Anual — {vy}</div>
-            <div style={{fontSize:10,color:"var(--muted)",marginBottom:8,marginTop:-4}}>💡 "Sobrou" = fluxo do mês (entradas − saídas). Para o saldo real de cada banco, use a aba 💼 Carteira.</div>
-            <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:7}}>
-              {[{l:"Entradas",v:fmt(annualInc),c:"g"},{l:"Saídas",v:fmt(annualOut),c:"w"},{l:"Sobrou",v:fmt(annualInc-annualOut),c:"p"}].map(m=>(
-                <div key={m.l} className={`mc ${m.c}`}><div className="ml">{m.l}</div><div className={`mv ${m.c}`}>{m.v}</div></div>
-              ))}
-            </div>
-            <div className="card">
-              <div className="st" style={{marginBottom:8}}>Entradas vs Saídas</div>
-              <div className="chart" style={{height:90}}>
-                {annualRows.map((r,i)=>(
-                  <div key={i} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center"}}>
-                    <div className="cgrp">
-                      <div className="cbar" style={{background:r.i===vm?"var(--green)":"rgba(0,214,143,.3)",height:`${Math.max((r.inc/chartMax)*90,r.inc>0?2:0)}px`}}/>
-                      <div className="cbar" style={{background:r.i===vm?"var(--wine)":"rgba(192,57,43,.35)",height:`${Math.max((r.out/chartMax)*90,r.out>0?2:0)}px`}}/>
-                    </div>
-                    <div className="clbl" style={{color:r.i===vm?"var(--accent)":"var(--muted)",fontWeight:r.i===vm?700:400}}>{MONTHS[i]}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-            <div className="card" style={{overflowX:"auto"}}>
-              <table className="atable">
-                <thead><tr><th>Mês</th><th>Entrada</th><th>Gastos</th><th>Fixas</th><th>Invest.</th><th>Sobrou</th></tr></thead>
-                <tbody>{annualRows.map(r=>(
-                  <tr key={r.i} className={r.i===vm?"cur":""}>
-                    <td>{MONTHS[r.i]}</td>
-                    <td style={{color:"var(--green)"}}>{r.inc>0?fmt(r.inc):"—"}</td>
-                    <td style={{color:"var(--wine)"}}>{r.exp>0?fmt(r.exp):"—"}</td>
-                    <td style={{color:"var(--blue)"}}>{r.fix>0?fmt(r.fix):"—"}</td>
-                    <td style={{color:"var(--gold)"}}>{r.inv>0?fmt(r.inv):"—"}</td>
-                    <td style={{color:r.bal>=0?(r.inc>0?"var(--green)":"var(--muted)"):"var(--wine)"}}>{r.inc>0||r.out>0?fmt(r.bal):"—"}</td>
-                  </tr>
-                ))}</tbody>
-                <tfoot><tr>
-                  <td>Total</td><td style={{color:"var(--green)"}}>{fmt(annualInc)}</td>
-                  <td style={{color:"var(--wine)"}}>{fmt(annualRows.reduce((s,r)=>s+r.exp,0))}</td>
-                  <td style={{color:"var(--blue)"}}>{fmt(annualRows.reduce((s,r)=>s+r.fix,0))}</td>
-                  <td style={{color:"var(--gold)"}}>{fmt(annualRows.reduce((s,r)=>s+r.inv,0))}</td>
-                  <td style={{color:annualInc>=annualOut?"var(--green)":"var(--wine)"}}>{fmt(annualInc-annualOut)}</td>
-                </tr></tfoot>
-              </table>
-            </div>
-          </div>
-        )}
-
-        {!loading&&page==="settings"&&<SettingsPage settings={settings} setSettings={setSettings} data={data} setData={setData} userEmail={session?.user?.email} expenseCats={expenseCats} onRecalculate={recalculateAllBalances} banks={banks} balance={balance} onAdjustBalance={adjustBalanceToReal}/>}
-
-
-          </div>
-        </div>
-      </div>
-
-      {fabType&&<button className="fab" onClick={()=>openModal(fabType)}>+</button>}
-      {toast&&<Toast msg={toast} onDone={()=>setToast(null)}/>}
-
-      {modal&&(
-        <Modal onClose={closeModal} tall={modal.type?.startsWith("bulk")||modal.type==="expense"}>
-          {(modal.type==="import_expense"||modal.type==="import_income"||modal.type==="import_credit")&&<ImportModal banks={banks} expenseCats={expenseCats} importType={modal.type.replace("import_","")} defaultBank={banks[0]?.name||""} vm={vm} vy={vy} onClose={closeModal} onImport={(type,entries)=>{if(type==="expense")saveBulk("expenses",entries);else if(type==="income")saveBulk("incomes",entries);else if(type==="credit"){setCreditData(d=>{const updated={purchases:[...entries,...(d.purchases||[])]};dbSet(creditKey(vy,vm),updated);return updated;});setToast(`✅ ${entries.length} lançamento(s) importado(s)`);}closeModal();}}/>}
-          {modal.type==="bulk_income"&&<BulkPanel type="income" banks={banks} expenseCats={expenseCats} vy={vy} vm={vm} onClose={closeModal} onConfirm={i=>{saveBulk("incomes",i);closeModal();}}/>}
-          {modal.type==="bulk_expense"&&<BulkPanel type="expense" banks={banks} expenseCats={expenseCats} vy={vy} vm={vm} onClose={closeModal} onConfirm={i=>{saveBulk("expenses",i);closeModal();}}/>}
-          {modal.type==="bulk_fixed"&&<BulkPanel type="fixed" banks={banks} expenseCats={expenseCats} vy={vy} vm={vm} onClose={closeModal} onConfirm={i=>{saveBulk("fixed",i);closeModal();}}/>}
-          {modal.type==="bulk_investment"&&<BulkPanel type="investment" banks={banks} expenseCats={expenseCats} vy={vy} vm={vm} onClose={closeModal} onConfirm={i=>{saveBulk("investments",i);closeModal();}}/>}
-          {["income","expense","fixed","investment"].includes(modal.type)&&(
-            <EntryModal type={modal.type} entry={modal.entry} banks={banks} expenseCats={expenseCats} onClose={closeModal} onSave={saveEntry} vm={vm} vy={vy} categoryMemory={categoryMemory}/>
-          )}
-        </Modal>
-      )}
-    </>
-  );
-}
-
-// ─── DEBTS ────────────────────────────────────────────────────────────────────
-function DebtsPage({debts,setDebts,vm,vy,onTogglePaid,banks}){
-  const [showForm,setShowForm]=useState(false);
-  const active=debts.filter(d=>!d.closed),closed=debts.filter(d=>d.closed);
-  return (
-    <div className="pg">
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-        <div className="st">Dívidas & Parcelamentos</div>
-        <button onClick={()=>setShowForm(s=>!s)} style={{background:"var(--accent)",border:"none",color:"#fff",fontFamily:"'Sora',sans-serif",fontSize:11,fontWeight:700,borderRadius:8,padding:"5px 10px",cursor:"pointer"}}>{showForm?"Cancelar":"+ Nova"}</button>
-      </div>
-      {showForm&&<DebtForm onSave={d=>{setDebts(ds=>[...ds,d]);setShowForm(false);}} vm={vm} vy={vy}/>}
-      {active.length===0&&!showForm&&<div className="empty">Nenhuma dívida ativa.<br/>Toque em <strong style={{color:"var(--accent)"}}>+ Nova</strong> para adicionar.</div>}
-      {active.map(d=>{
-        const pct=Math.min(((d.paidCount||0)/d.installments)*100,100);
-        const remaining=d.totalValue-(d.paidCount||0)*d.monthlyValue;
-        const curAbs=vy*12+vm,startAbs=d.startYear*12+d.startMonth;
-        const dueThisMonth=curAbs>=startAbs&&curAbs<startAbs+d.installments;
-        const key=`${vy}-${vm}`;
-        const paidThisMonth=d.paidMonths?.includes(key)||false;
-        return (
-          <div key={d.id} className="card">
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
-              <div><div style={{fontSize:13,fontWeight:700}}>{d.name}</div><div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>{d.installments}x de {fmt(d.monthlyValue)} · Total: {fmt(d.totalValue)}</div></div>
-              <div style={{textAlign:"right"}}><div style={{fontSize:12,fontWeight:700,color:"var(--wine)"}}>{fmt(Math.max(remaining,0))}</div><div style={{fontSize:9,color:"var(--muted)"}}>restando</div></div>
-            </div>
-            <div style={{height:6,background:"var(--border)",borderRadius:3,overflow:"hidden",marginBottom:4}}><div style={{height:"100%",width:`${pct}%`,background:"var(--green)",borderRadius:3}}/></div>
-            <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:"var(--muted)",marginBottom:10}}>
-              <span>{d.paidCount||0}/{d.installments} pagas ({pct.toFixed(0)}%)</span>
-              {dueThisMonth&&<span style={{color:paidThisMonth?"var(--green)":"var(--gold)",fontWeight:600}}>{paidThisMonth?"✓ Paga este mês":"⚡ Vence este mês"}</span>}
-            </div>
-            {dueThisMonth&&(
-              <button onClick={()=>{
-                  if(paidThisMonth){
-                    onTogglePaid(d.id,key);
-                  } else {
-                    const bankName=window.prompt(`Qual banco pagou a parcela de ${MONTHS_FULL[vm]}?\nDigite: ${banks.map(b=>b.name).join(", ")}`,banks[0]?.name||"");
-                    if(bankName!==null) onTogglePaid(d.id,key,bankName||"");
-                  }
-                }}
-                style={{width:"100%",background:paidThisMonth?"rgba(0,214,143,.1)":"var(--surface)",border:`1px solid ${paidThisMonth?"var(--green)":"var(--border)"}`,color:paidThisMonth?"var(--green)":"var(--muted)",fontFamily:"'Sora',sans-serif",fontSize:12,fontWeight:600,borderRadius:9,padding:"8px 0",cursor:"pointer",marginBottom:8}}>
-                {paidThisMonth?`✓ Parcela de ${MONTHS_FULL[vm]} paga`:`Marcar parcela de ${MONTHS_FULL[vm]} como paga`}
-              </button>
-            )}
-            <div style={{display:"flex",gap:7}}>
-              <button onClick={()=>setDebts(ds=>ds.map(x=>x.id===d.id?{...x,closed:true}:x))} style={{flex:1,background:"var(--surface)",border:"1px solid var(--border)",color:"var(--green)",fontFamily:"'Sora',sans-serif",fontSize:11,fontWeight:600,borderRadius:8,padding:"6px 0",cursor:"pointer"}}>✓ Quitar tudo</button>
-              <button onClick={()=>setDebts(ds=>ds.filter(x=>x.id!==d.id))} style={{background:"var(--surface)",border:"1px solid var(--wine)",color:"var(--wine)",fontFamily:"'Sora',sans-serif",fontSize:11,fontWeight:600,borderRadius:8,padding:"6px 12px",cursor:"pointer"}}>Apagar</button>
-            </div>
-          </div>
-        );
-      })}
-      {closed.length>0&&<>{closed.map(d=>(
-        <div key={d.id} style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:11,padding:"10px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-          <div><div style={{fontSize:12,fontWeight:600,color:"var(--muted)",textDecoration:"line-through"}}>{d.name}</div><div style={{fontSize:10,color:"var(--muted)"}}>{d.installments}x de {fmt(d.monthlyValue)}</div></div>
-          <button onClick={()=>setDebts(ds=>ds.filter(x=>x.id!==d.id))} style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:14}}>✕</button>
-        </div>
-      ))}</>}
-    </div>
-  );
-}
-
-function DebtForm({onSave,vm,vy}){
-  const [f,setF]=useState({name:"",totalValue:"",installments:"",startMonth:String(vm),startYear:String(vy),category:"Outros"});
-  const upd=(k,v)=>setF(p=>({...p,[k]:v}));
-  const tv=parseFloat(String(f.totalValue).replace(",","."))||0;
-  const inst=parseInt(f.installments)||0;
-  const monthly=inst>0?tv/inst:0;
-  return (
-    <div className="card">
-      <div className="fg"><label className="fl">Nome da dívida</label><input className="fi" placeholder="Ex: Carro, Funileiro…" value={f.name} onChange={e=>upd("name",e.target.value)}/></div>
-      <div className="fg"><label className="fl">Categoria do gasto</label>
-        <select className="fi" value={f.category} onChange={e=>upd("category",e.target.value)}>
-          {DEFAULT_EXPENSE_CATS.map(c=><option key={c.id} value={c.name}>{c.icon} {c.name}</option>)}
-        </select>
-      </div>
-      <div className="frow">
-        <div className="fg"><label className="fl">Valor total (R$)</label><input className="fi" type="text" inputMode="decimal" pattern="[0-9.,]*" value={f.totalValue} onChange={e=>upd("totalValue",e.target.value)}/></div>
-        <div className="fg"><label className="fl">Nº de parcelas</label><input className="fi" type="number" inputMode="numeric" value={f.installments} onChange={e=>upd("installments",e.target.value)}/></div>
-      </div>
-      {monthly>0&&<div style={{background:"rgba(155,140,255,.1)",border:"1px solid rgba(155,140,255,.25)",borderRadius:9,padding:"8px 11px",marginBottom:10,fontSize:12,color:"var(--accent)",fontWeight:600}}>Parcela mensal: {fmt(monthly)}</div>}
-      <div className="frow">
-        <div className="fg"><label className="fl">Mês início</label><select className="fi" value={f.startMonth} onChange={e=>upd("startMonth",e.target.value)}>{MONTHS_FULL.map((m,i)=><option key={i} value={i}>{m}</option>)}</select></div>
-        <div className="fg"><label className="fl">Ano</label><input className="fi" type="number" value={f.startYear} onChange={e=>upd("startYear",e.target.value)}/></div>
-      </div>
-      <button className="savebtn" onClick={()=>{if(!f.name||!tv||!inst)return;onSave({id:uid(),name:f.name,category:f.category||"Outros",totalValue:tv,installments:inst,monthlyValue:parseFloat(monthly.toFixed(2)),startMonth:parseInt(f.startMonth),startYear:parseInt(f.startYear),paidMonths:[],paidCount:0,closed:false});}} disabled={!f.name||!tv||!inst}>Adicionar dívida</button>
-    </div>
-  );
-}
-
-// ─── SETTINGS ─────────────────────────────────────────────────────────────────
-// ─── RESERVE SETTINGS COMPONENT ──────────────────────────────────────────────
-function ReserveSettings({settings,setSettings,label,baseKey,deltaKey,goalKey,defaultGoal,showName}){
-  const currentBase=settings[baseKey]||0;
-  const currentDelta=settings[deltaKey]||0;
-  const currentTotal=currentBase+currentDelta;
-  const [newBalance,setNewBalance]=React.useState("");
-  const [saved,setSaved]=React.useState(false);
-
-  function applyNewBalance(){
-    const val=parseFloat(String(newBalance).replace(",","."))||0;
-    if(val<=0) return;
-    // Nova base = valor informado, delta zerado
-    setSettings(s=>({...s,[baseKey]:val,[deltaKey]:0}));
-    setNewBalance("");
-    setSaved(true);
-    setTimeout(()=>setSaved(false),2500);
-  }
-
-  return(
-    <div className="card" style={{marginBottom:12}}>
-      {showName&&(
-        <div className="fg">
-          <label className="fl">Nome da meta</label>
-          <input className="fi" value={settings.personalGoalName||""} onChange={e=>setSettings(s=>({...s,personalGoalName:e.target.value}))}/>
-        </div>
-      )}
-      <div className="frow">
-        <div className="fg">
-          <label className="fl">Meta (R$)</label>
-          <input className="fi" type="text" inputMode="decimal" pattern="[0-9.,]*"
-            value={settings[goalKey]||defaultGoal}
-            onChange={e=>setSettings(s=>({...s,[goalKey]:parseFloat(String(e.target.value).replace(",","."))||0}))}/>
-        </div>
-        <div className="fg">
-          <label className="fl">Saldo atual</label>
-          <div style={{background:"var(--card2)",border:"1.5px solid var(--border2)",borderRadius:10,padding:"11px 13px",fontSize:13,fontWeight:700,color:"var(--green)"}}>
-            {new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL"}).format(currentTotal)}
-          </div>
-        </div>
-      </div>
-
-      <div style={{background:"rgba(99,102,241,.07)",border:"1px solid rgba(99,102,241,.2)",borderRadius:10,padding:"12px 13px",marginTop:4}}>
-        <div style={{fontSize:11,fontWeight:700,color:"var(--accent)",marginBottom:8}}>
-          🔧 Corrigir saldo atual
-        </div>
-        <div style={{fontSize:11,color:"var(--muted)",marginBottom:10,lineHeight:1.6}}>
-          Informe o saldo real que você tem hoje. O app usa esse valor como base e soma os próximos aportes em cima.
-        </div>
-        <div style={{display:"flex",gap:8,alignItems:"flex-end"}}>
-          <div style={{flex:1}}>
-            <label className="fl">Saldo real hoje (R$)</label>
-            <input className="fi" type="text" inputMode="decimal" pattern="[0-9.,]*"
-              placeholder="Ex: 2.500,00"
-              value={newBalance}
-              onChange={e=>setNewBalance(e.target.value)}/>
-          </div>
-          <button onClick={applyNewBalance} disabled={!newBalance}
-            style={{background:"var(--accent)",border:"none",color:"#fff",fontFamily:"'Plus Jakarta Sans',sans-serif",fontSize:12,fontWeight:700,borderRadius:10,padding:"11px 16px",cursor:"pointer",whiteSpace:"nowrap",opacity:newBalance?1:0.4,flexShrink:0}}>
-            {saved?"✅ Salvo!":"Definir base"}
-          </button>
-        </div>
-        {(currentBase>0||currentDelta!==0)&&(
-          <div style={{marginTop:8,fontSize:10,color:"var(--muted)",display:"flex",gap:12}}>
-            <span>Base atual: <strong style={{color:"var(--text2)"}}>{new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL"}).format(currentBase)}</strong></span>
-            <span>Aportes registrados: <strong style={{color:currentDelta>=0?"var(--green)":"var(--wine)"}}>{currentDelta>=0?"+":""}{new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL"}).format(currentDelta)}</strong></span>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-
-// ─── PLANNING PAGE (simulador + análise) ─────────────────────────────────────
-function PlanningPage({yearCache,vm,vy,settings,debts,expenseCats}){
-  const [tab,setTab]=useState("simulator");
-  const catMap=Object.fromEntries(expenseCats.map(c=>[c.name,c]));
-
-  // ── Calcular últimos 3 meses para análise ──
-  const last3=[];
-  for(let i=2;i>=0;i--){
-    const mm=vm-i;
-    const m=((mm%12)+12)%12;
-    const y=vy+Math.floor(mm/12);
-    const d=yearCache[m]||EMPTY_MONTH();
-    last3.push({m,y,data:d});
-  }
-
-  // Gastos por categoria nos últimos 3 meses
-  const catTotals={};
-  last3.forEach(({data})=>{
-    (data.expenses||[]).forEach(e=>{
-      catTotals[e.category]=(catTotals[e.category]||0)+e.value;
-    });
-  });
-  const catAvg=Object.entries(catTotals).map(([cat,total])=>({
-    cat,total,avg:total/3,info:catMap[cat]||{icon:"📌",color:"#888"}
-  })).sort((a,b)=>b.total-a.total);
-
-  // Mês atual vs média
-  const currentMonth=yearCache[vm]||EMPTY_MONTH();
-  const currentByCat={};
-  (currentMonth.expenses||[]).forEach(e=>{
-    currentByCat[e.category]=(currentByCat[e.category]||0)+e.value;
-  });
-
-  // Saldo médio mensal (entrada - gastos - fixas - dívidas)
-  let avgIncome=0,avgOut=0,countMonths=0;
-  for(let m=0;m<12;m++){
-    const d=yearCache[m]||EMPTY_MONTH();
-    const inc=(d.incomes||[]).reduce((s,t)=>s+t.value,0);
-    const exp=(d.expenses||[]).reduce((s,t)=>s+t.value,0);
-    const fix=(d.fixed||[]).filter(f=>f.paid).reduce((s,t)=>s+(t.value||0),0);
-    const inv=(d.investments||[]).filter(e=>!isWithdrawal(e)).reduce((s,t)=>s+t.value,0);
-    if(inc>0||exp>0){
-      avgIncome+=inc;
-      avgOut+=exp+fix+inv;
-      countMonths++;
-    }
-  }
-  const avgMonthly=countMonths>0?(avgIncome-avgOut)/countMonths:0;
-  const avgIncomeMonthly=countMonths>0?avgIncome/countMonths:0;
-  const avgOutMonthly=countMonths>0?avgOut/countMonths:0;
-
-  // Compromissos fixos atuais (parcelas + fixas recorrentes)
-  const activeInst=debts.filter(d=>!d.closed).reduce((s,d)=>{
-    const idx=vy*12+vm-(d.startYear*12+d.startMonth);
-    return (idx>=0&&idx<d.installments)?s+d.monthlyValue:s;
-  },0);
-  const monthlyFixed=(currentMonth.fixed||[]).reduce((s,f)=>s+(f.value||0),0);
-  const totalCompromised=activeInst+monthlyFixed;
-  const emergencyTotal=(settings.emergencyBase||0)+(settings.emergencyDelta||0);
-
-  // ── SIMULADOR DE PARCELAMENTO ──
-  const [simValue,setSimValue]=useState("");
-  const [simInstallments,setSimInstallments]=useState("10");
-  const totalAmount=parseFloat(String(simValue).replace(",","."))||0;
-  const instCount=parseInt(simInstallments)||1;
-  const monthlyAmount=instCount>0?totalAmount/instCount:0;
-
-  // Análise: pode parcelar?
-  let verdict="neutral",vmsg="",vsub="";
-  if(totalAmount>0&&monthlyAmount>0){
-    const newMonthlySpace=avgMonthly-monthlyAmount;
-    const cashPaymentImpact=totalAmount/emergencyTotal;
-    if(newMonthlySpace>=monthlyAmount*0.5){
-      verdict="green";
-      vmsg="💚 Pode parcelar tranquilo";
-      vsub=`Sobra mensal estimada: ${fmt(newMonthlySpace)}`;
-    } else if(newMonthlySpace>=0){
-      verdict="amber";
-      vmsg="⚠️ Vai apertar";
-      vsub=`Sobra mensal cairá para ${fmt(newMonthlySpace)} — pouca folga`;
-    } else {
-      verdict="red";
-      vmsg="🔴 Não recomendado";
-      vsub=`Você ficaria ${fmt(Math.abs(newMonthlySpace))} no negativo todo mês`;
-    }
-  }
-
-  // Comparativo à vista
-  const cashAfter=emergencyTotal-totalAmount;
-  const cashOk=cashAfter>=(settings.emergencyGoal||0)*0.3;
-
-  return(
-    <div className="pg">
-      <div className="st">🎯 Planejar — Análise & Simulador</div>
-
-      <div style={{display:"flex",gap:6,marginBottom:4}}>
-        <button onClick={()=>setTab("simulator")}
-          style={{flex:1,padding:"10px",borderRadius:11,border:`1.5px solid ${tab==="simulator"?"var(--accent)":"var(--border)"}`,background:tab==="simulator"?"rgba(99,102,241,.15)":"var(--surface)",color:tab==="simulator"?"var(--accent)":"var(--muted)",fontFamily:"'Plus Jakarta Sans',sans-serif",fontSize:12,fontWeight:700,cursor:"pointer"}}>
-          💳 Simulador
-        </button>
-        <button onClick={()=>setTab("analysis")}
-          style={{flex:1,padding:"10px",borderRadius:11,border:`1.5px solid ${tab==="analysis"?"var(--accent)":"var(--border)"}`,background:tab==="analysis"?"rgba(99,102,241,.15)":"var(--surface)",color:tab==="analysis"?"var(--accent)":"var(--muted)",fontFamily:"'Plus Jakarta Sans',sans-serif",fontSize:12,fontWeight:700,cursor:"pointer"}}>
-          📊 Análise
-        </button>
-      </div>
-
-      {tab==="simulator"&&(<>
-        <div className="card">
-          <div style={{fontSize:13,fontWeight:700,marginBottom:10}}>Simular compra parcelada</div>
-          <div className="frow">
-            <div className="fg">
-              <label className="fl">Valor total (R$)</label>
-              <input className="fi" type="text" inputMode="decimal" pattern="[0-9.,]*"
-                placeholder="Ex: 3.000,00"
-                value={simValue} onChange={e=>setSimValue(e.target.value)}/>
-            </div>
-            <div className="fg">
-              <label className="fl">Parcelas</label>
-              <input className="fi" type="text" inputMode="numeric" pattern="[0-9]*"
-                placeholder="Ex: 10"
-                value={simInstallments} onChange={e=>setSimInstallments(e.target.value)}/>
-            </div>
-          </div>
-          {totalAmount>0&&(
-            <div style={{background:"var(--card2)",border:"1.5px solid var(--border2)",borderRadius:10,padding:"10px 12px",marginTop:4}}>
-              <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:"var(--muted)",marginBottom:4}}>
-                <span>Parcela mensal</span>
-                <span style={{color:"var(--accent)",fontWeight:800,fontSize:14}}>{fmt(monthlyAmount)}</span>
-              </div>
-              <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:"var(--muted)"}}>
-                <span>Duração</span>
-                <span>{instCount}x = até {(()=>{const m=(vm+instCount-1)%12,y=vy+Math.floor((vm+instCount-1)/12);return `${MONTHS_FULL[m]}/${y}`;})()}</span>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {totalAmount>0&&(
-          <div className="card" style={{
-            background:verdict==="green"?"rgba(34,197,94,.08)":verdict==="amber"?"rgba(245,158,11,.08)":"rgba(239,68,68,.08)",
-            border:`1.5px solid ${verdict==="green"?"rgba(34,197,94,.3)":verdict==="amber"?"rgba(245,158,11,.3)":"rgba(239,68,68,.3)"}`
-          }}>
-            <div style={{fontSize:14,fontWeight:800,color:verdict==="green"?"var(--green)":verdict==="amber"?"var(--gold)":"var(--red)",marginBottom:6}}>
-              {vmsg}
-            </div>
-            <div style={{fontSize:12,color:"var(--text)",lineHeight:1.6}}>{vsub}</div>
-          </div>
-        )}
-
-        {totalAmount>0&&(
-          <div className="card">
-            <div style={{fontSize:13,fontWeight:700,marginBottom:10}}>📊 Comparativo: parcelar × à vista</div>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
-              <div style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:9,padding:"10px"}}>
-                <div style={{fontSize:10,color:"var(--muted)",marginBottom:4,fontWeight:700}}>💳 PARCELAR</div>
-                <div style={{fontSize:11,marginBottom:3}}>Saída/mês: <strong style={{color:"var(--wine)"}}>{fmt(monthlyAmount)}</strong></div>
-                <div style={{fontSize:11,marginBottom:3}}>Por {instCount} meses</div>
-                <div style={{fontSize:11}}>Reserva mantida: <strong style={{color:"var(--green)"}}>{fmt(emergencyTotal)}</strong></div>
-              </div>
-              <div style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:9,padding:"10px"}}>
-                <div style={{fontSize:10,color:"var(--muted)",marginBottom:4,fontWeight:700}}>💰 À VISTA</div>
-                <div style={{fontSize:11,marginBottom:3}}>Saída única: <strong style={{color:"var(--wine)"}}>{fmt(totalAmount)}</strong></div>
-                <div style={{fontSize:11,marginBottom:3}}>Reserva após: <strong style={{color:cashAfter<0?"var(--red)":cashOk?"var(--green)":"var(--gold)"}}>{fmt(cashAfter)}</strong></div>
-                <div style={{fontSize:10,color:cashOk?"var(--green)":"var(--gold)"}}>{cashOk?"✓ Mantém saúde da reserva":"⚠ Impacta reserva"}</div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        <div className="card">
-          <div style={{fontSize:11,fontWeight:700,color:"var(--text2)",marginBottom:10}}>📈 Seu panorama atual</div>
-          <div style={{display:"flex",justifyContent:"space-between",fontSize:11,marginBottom:6}}>
-            <span style={{color:"var(--muted)"}}>Renda média mensal</span>
-            <span style={{fontWeight:700,color:"var(--green)"}}>{fmt(avgIncomeMonthly)}</span>
-          </div>
-          <div style={{display:"flex",justifyContent:"space-between",fontSize:11,marginBottom:6}}>
-            <span style={{color:"var(--muted)"}}>Gastos médios mensais</span>
-            <span style={{fontWeight:700,color:"var(--wine)"}}>{fmt(avgOutMonthly)}</span>
-          </div>
-          <div style={{display:"flex",justifyContent:"space-between",fontSize:11,marginBottom:6}}>
-            <span style={{color:"var(--muted)"}}>Compromissos fixos do mês</span>
-            <span style={{fontWeight:700,color:"var(--blue)"}}>{fmt(totalCompromised)}</span>
-          </div>
-          <div style={{height:1,background:"var(--border)",margin:"8px 0"}}/>
-          <div style={{display:"flex",justifyContent:"space-between",fontSize:12,fontWeight:800}}>
-            <span style={{color:"var(--text)"}}>Folga mensal média</span>
-            <span style={{color:avgMonthly>=0?"var(--green)":"var(--red)"}}>{fmt(avgMonthly)}</span>
-          </div>
-          <div style={{display:"flex",justifyContent:"space-between",fontSize:11,marginTop:8}}>
-            <span style={{color:"var(--muted)"}}>🛡️ Reserva atual</span>
-            <span style={{fontWeight:700,color:"var(--accent)"}}>{fmt(emergencyTotal)}</span>
-          </div>
-        </div>
-      </>)}
-
-      {tab==="analysis"&&(<>
-        {countMonths<2?(
-          <div className="card" style={{textAlign:"center",padding:"30px 20px"}}>
-            <div style={{fontSize:32,marginBottom:10}}>📊</div>
-            <div style={{fontSize:13,fontWeight:700,marginBottom:6}}>Análise estará disponível em breve</div>
-            <div style={{fontSize:11,color:"var(--muted)"}}>Precisa de pelo menos 2 meses de dados para análise comparativa</div>
-          </div>
-        ):(<>
-          <div className="card">
-            <div style={{fontSize:13,fontWeight:700,marginBottom:10}}>📊 Resumo dos últimos 3 meses</div>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6}}>
-              {last3.map(({m,y,data})=>{
-                const inc=(data.incomes||[]).reduce((s,t)=>s+t.value,0);
-                const exp=(data.expenses||[]).reduce((s,t)=>s+t.value,0);
-                const fix=(data.fixed||[]).filter(f=>f.paid).reduce((s,t)=>s+(t.value||0),0);
-                const totalOut=exp+fix;
-                return(
-                  <div key={`${y}-${m}`} style={{background:m===vm?"rgba(99,102,241,.1)":"var(--surface)",border:`1px solid ${m===vm?"var(--accent)":"var(--border)"}`,borderRadius:9,padding:"8px"}}>
-                    <div style={{fontSize:10,fontWeight:700,color:m===vm?"var(--accent)":"var(--muted)",marginBottom:4}}>{MONTHS[m]}{m===vm&&" •"}</div>
-                    <div style={{fontSize:10,color:"var(--green)"}}>+{fmt(inc)}</div>
-                    <div style={{fontSize:10,color:"var(--wine)"}}>-{fmt(totalOut)}</div>
-                    <div style={{height:1,background:"var(--border)",margin:"4px 0"}}/>
-                    <div style={{fontSize:11,fontWeight:800,color:inc-totalOut>=0?"var(--green)":"var(--red)"}}>{fmt(inc-totalOut)}</div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-
-          {catAvg.length>0&&(
-            <div className="card">
-              <div style={{fontSize:13,fontWeight:700,marginBottom:10}}>💸 Gastos por categoria (média mensal)</div>
-              {catAvg.slice(0,8).map(c=>{
-                const cur=currentByCat[c.cat]||0;
-                const diff=cur-c.avg;
-                const diffPct=c.avg>0?(diff/c.avg)*100:0;
-                const isOver=cur>c.avg*1.15;
-                const isUnder=cur<c.avg*0.85&&cur>0;
-                return(
-                  <div key={c.cat} style={{marginBottom:10,paddingBottom:10,borderBottom:"1px solid var(--border)"}}>
-                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
-                      <span style={{fontSize:12,fontWeight:600}}>{c.info.icon} {c.cat}</span>
-                      <span style={{fontSize:11,fontWeight:700,color:"var(--wine)"}}>{fmt(c.avg)}/mês</span>
-                    </div>
-                    <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:"var(--muted)"}}>
-                      <span>Este mês: <strong style={{color:isOver?"var(--red)":isUnder?"var(--green)":"var(--text2)"}}>{fmt(cur)}</strong></span>
-                      <span style={{color:isOver?"var(--red)":isUnder?"var(--green)":"var(--muted)"}}>
-                        {cur>0?(diff>=0?"+":"")+diffPct.toFixed(0)+"% vs média":"—"}
-                      </span>
-                    </div>
-                    {isOver&&<div style={{fontSize:10,color:"var(--red)",marginTop:3}}>⚠️ Gastando mais que o normal nesta categoria</div>}
-                    {isUnder&&<div style={{fontSize:10,color:"var(--green)",marginTop:3}}>✓ Abaixo da média — bom controle</div>}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-
-          <div className="card">
-            <div style={{fontSize:13,fontWeight:700,marginBottom:10}}>💡 Insights</div>
-            {(()=>{
-              const insights=[];
-              if(avgMonthly<0) insights.push({t:"⚠️",c:"var(--red)",m:`Você está fechando o mês ${fmt(Math.abs(avgMonthly))} no negativo em média. Precisa cortar gastos ou aumentar entradas.`});
-              else if(avgMonthly<avgIncomeMonthly*0.1) insights.push({t:"⚡",c:"var(--gold)",m:`Sua folga é apenas ${((avgMonthly/avgIncomeMonthly)*100).toFixed(0)}% da renda. O ideal é guardar pelo menos 20%.`});
-              else if(avgMonthly>=avgIncomeMonthly*0.3) insights.push({t:"💚",c:"var(--green)",m:`Excelente! Você está guardando ${((avgMonthly/avgIncomeMonthly)*100).toFixed(0)}% da renda mensal.`});
-
-              if(emergencyTotal<(settings.emergencyGoal||0)*0.3) insights.push({t:"🛡️",c:"var(--gold)",m:`Sua reserva está em ${fmt(emergencyTotal)} (${((emergencyTotal/(settings.emergencyGoal||1))*100).toFixed(0)}% da meta). Priorize chegar a 30% da meta antes de novas compras parceladas.`});
-              else if(emergencyTotal>=(settings.emergencyGoal||0)) insights.push({t:"🏆",c:"var(--green)",m:"Reserva de emergência completa! Pode considerar investir o excedente em opções com mais rendimento."});
-
-              const topCat=catAvg[0];
-              if(topCat&&topCat.avg>avgIncomeMonthly*0.2) insights.push({t:topCat.info.icon,c:"var(--blue)",m:`${topCat.cat} é sua maior categoria (${((topCat.avg/avgIncomeMonthly)*100).toFixed(0)}% da renda). Vale revisar se há cortes possíveis aqui.`});
-
-              if(activeInst>avgIncomeMonthly*0.3) insights.push({t:"🔗",c:"var(--red)",m:`Suas parcelas comprometem ${((activeInst/avgIncomeMonthly)*100).toFixed(0)}% da renda. Acima de 30% é arriscado — evite novas dívidas.`});
-
-              if(insights.length===0) insights.push({t:"📊",c:"var(--muted)",m:"Continue lançando seus gastos para gerarmos análises mais precisas."});
-
-              return insights.map((i,idx)=>(
-                <div key={idx} style={{display:"flex",gap:9,padding:"9px 11px",background:"var(--surface)",border:"1px solid var(--border)",borderRadius:9,marginBottom:6}}>
-                  <span style={{fontSize:16,flexShrink:0}}>{i.t}</span>
-                  <div style={{fontSize:11,color:"var(--text)",lineHeight:1.6}}>{i.m}</div>
-                </div>
-              ));
-            })()}
-          </div>
-        </>)}
-      </>)}
-    </div>
-  );
-}
-
-
-// ─── BALANCE RECONCILIATION ──────────────────────────────────────────────────
-function BalanceReconciliation({banks,balance,settings,setSettings,onAdjust}){
-  const [realBalances,setRealBalances]=useState(()=>{
-    const stored=settings.bankRealBalances||{};
-    const obj={};
-    banks.forEach(b=>{obj[b.name]=stored[b.name]||"";});
-    return obj;
-  });
-  const [showResult,setShowResult]=useState(false);
-
-  const realTotal=banks.reduce((s,b)=>{
-    const v=parseFloat(String(realBalances[b.name]||"0").replace(",","."))||0;
-    return s+v;
-  },0);
-  const diff=balance-realTotal;
-
-  function check(){
-    setSettings(s=>({...s,bankRealBalances:realBalances}));
-    setShowResult(true);
-  }
-
-  function adjustToReal(){
-    onAdjust(diff);
-    setShowResult(false);
-  }
-
-  return(
-    <div className="card" style={{background:"rgba(34,197,94,.05)",border:"1.5px solid rgba(34,197,94,.2)",marginBottom:12}}>
-      <div style={{fontSize:13,fontWeight:700,color:"var(--green)",marginBottom:6}}>🔍 Conferência de saldos</div>
-      <div style={{fontSize:11,color:"var(--text2)",lineHeight:1.6,marginBottom:12}}>
-        Informe o saldo REAL de cada banco hoje. O app compara com o saldo calculado e mostra a diferença.
-      </div>
-      {banks.map(b=>(
-        <div key={b.id} className="fg" style={{display:"grid",gridTemplateColumns:"1fr 1.5fr",gap:8,alignItems:"center"}}>
-          <label style={{fontSize:12,fontWeight:700,color:"var(--text)",display:"flex",alignItems:"center",gap:6}}>
-            <span style={{width:9,height:9,borderRadius:"50%",background:b.color,display:"inline-block"}}/>
-            {b.name}
-          </label>
-          <input className="fi" type="text" inputMode="decimal" pattern="[0-9.,]*"
-            placeholder="Ex: 1.234,56"
-            value={realBalances[b.name]||""}
-            onChange={e=>setRealBalances(rb=>({...rb,[b.name]:e.target.value}))}/>
-        </div>
-      ))}
-      <button onClick={check}
-        style={{width:"100%",background:"var(--green)",border:"none",color:"#fff",fontFamily:"'Plus Jakarta Sans',sans-serif",fontSize:12,fontWeight:700,borderRadius:10,padding:"10px",cursor:"pointer",marginTop:4}}>
-        Conferir saldos
-      </button>
-
-      {showResult&&(
-        <div style={{marginTop:12,padding:"12px 14px",borderRadius:10,background:"var(--card2)",border:"1.5px solid var(--border2)"}}>
-          <div style={{display:"flex",justifyContent:"space-between",fontSize:11,marginBottom:4}}>
-            <span style={{color:"var(--muted)"}}>Saldo calculado pelo app</span>
-            <span style={{fontWeight:700,color:"var(--accent)"}}>{fmt(balance)}</span>
-          </div>
-          <div style={{display:"flex",justifyContent:"space-between",fontSize:11,marginBottom:8}}>
-            <span style={{color:"var(--muted)"}}>Saldo real (soma dos bancos)</span>
-            <span style={{fontWeight:700,color:"var(--green)"}}>{fmt(realTotal)}</span>
-          </div>
-          <div style={{height:1,background:"var(--border)",margin:"6px 0"}}/>
-          <div style={{display:"flex",justifyContent:"space-between",fontSize:13,fontWeight:800,marginBottom:8}}>
-            <span style={{color:"var(--text)"}}>Diferença</span>
-            <span style={{color:Math.abs(diff)<1?"var(--green)":Math.abs(diff)<50?"var(--gold)":"var(--red)"}}>
-              {diff>=0?"+":""}{fmt(diff)}
-            </span>
-          </div>
-          {Math.abs(diff)<1&&<div style={{fontSize:11,color:"var(--green)",fontWeight:600,marginTop:6}}>✅ Os saldos batem!</div>}
-          {Math.abs(diff)>=1&&Math.abs(diff)<50&&<div style={{fontSize:11,color:"var(--gold)",marginTop:6,lineHeight:1.5}}>⚠️ Diferença pequena — pode ser arredondamento de centavos ou um lançamento esquecido.</div>}
-          {Math.abs(diff)>=50&&(<>
-            <div style={{fontSize:11,color:"var(--text2)",marginTop:6,marginBottom:10,lineHeight:1.5}}>
-              Diferença significativa. Pode ser uma transferência entre contas, um aporte ou um gasto não lançado.
-            </div>
-            <button onClick={adjustToReal}
-              style={{width:"100%",background:"var(--accent)",border:"none",color:"#fff",fontFamily:"'Plus Jakarta Sans',sans-serif",fontSize:11,fontWeight:700,borderRadius:9,padding:"9px",cursor:"pointer"}}>
-              🔧 Criar lançamento de ajuste ({fmt(Math.abs(diff))})
-            </button>
-          </>)}
-        </div>
-      )}
-    </div>
-  );
-}
-
-
-// ─── WALLET PAGE (saldo por banco — ENTREGA 1) ──────────────────────────────
-// ─── BILLS PAGE — Faturas a pagar (ENTREGA 2) ──────────────────────────────
-function BillsPage({banks,setSettings,settings,setData,vm,vy}){
-  const bills = (settings.billsToPay||[]).slice().sort((a,b)=>{
-    if(a.paid!==b.paid) return a.paid?1:-1;
-    return new Date(a.createdAt||0)-new Date(b.createdAt||0);
-  });
-  const [paying,setPaying]=useState(null); // billId aguardando seleção de banco
-  const [selBank,setSelBank]=useState("");
-  
-  function markPaid(bill){
-    if(!selBank){alert("Selecione o banco que pagou.");return;}
-    const today=new Date();
-    const dateStr=`${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,"0")}-${String(today.getDate()).padStart(2,"0")}`;
-    setSettings(s=>({
-      ...s,
-      billsToPay:(s.billsToPay||[]).map(b=>
-        b.id===bill.id ? {...b,paid:true,paidBank:selBank,paidDate:dateStr} : b
-      )
-    }));
-    setPaying(null);
-    setSelBank("");
-  }
-  
-  function unmarkPaid(bill){
-    if(!confirm("Desmarcar essa fatura como paga?"))return;
-    setSettings(s=>({
-      ...s,
-      billsToPay:(s.billsToPay||[]).map(b=>
-        b.id===bill.id ? {...b,paid:false,paidBank:null,paidDate:null} : b
-      )
-    }));
-  }
-  
-  function reopenInvoice(bill){
-    if(!confirm("Reabrir essa fatura? Ela volta para a aba Cartões e você poderá adicionar/editar lançamentos."))return;
-    // Remove o billToPay e remove o marker do fixed
-    setSettings(s=>({
-      ...s,
-      billsToPay:(s.billsToPay||[]).filter(b=>b.id!==bill.id)
-    }));
-    // Remove o marker do month do mês de destino
-    const targetKey=monthKey(bill.dueYear,bill.dueMonth);
-    dbGet(targetKey).then(d=>{
-      if(!d)return;
-      const newFixed=(d.fixed||[]).filter(f=>f.id!==bill.id);
-      dbSet(targetKey,{...d,fixed:newFixed});
-      // Se for o mês atual, atualizar setData
-      if(bill.dueYear===vy && bill.dueMonth===vm){
-        setData(dd=>({...dd,fixed:newFixed}));
-      }
-    });
-  }
-  
-  const openBills = bills.filter(b=>!b.paid);
-  const paidBills = bills.filter(b=>b.paid);
-  const totalOpen = openBills.reduce((s,b)=>s+(b.value||0),0);
-  
-  return (
-    <div className="pg">
-      <div className="st">📅 Contas a pagar</div>
-      
-      {totalOpen>0&&(
-        <div style={{padding:"12px 14px",background:"rgba(239,68,68,.06)",borderRadius:12,border:"1px solid rgba(239,68,68,.2)"}}>
-          <div style={{fontSize:11,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".06em",fontWeight:700,marginBottom:4}}>💳 Total comprometido em cartões</div>
-          <div style={{fontSize:24,fontWeight:800,color:"var(--wine)"}}>{fmt(totalOpen)}</div>
-          <div style={{fontSize:10,color:"var(--muted)",marginTop:3}}>{openBills.length} fatura(s) em aberto</div>
-        </div>
-      )}
-      
-      <div className="st" style={{marginTop:8}}>Em aberto</div>
-      {openBills.length===0?(
-        <div className="empty">Nenhuma fatura em aberto 🎉</div>
-      ):openBills.map(bill=>{
-        const bank=banks.find(b=>b.name===bill.bankCard);
-        const isThisPaying=paying===bill.id;
-        return (
-          <div key={bill.id} style={{background:"var(--card)",border:"1.5px solid var(--border)",borderRadius:12,padding:"12px 13px",marginBottom:8}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
-              <div style={{flex:1}}>
-                <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:3}}>
-                  <span style={{width:9,height:9,borderRadius:"50%",background:bank?.color||"#888",display:"inline-block"}}/>
-                  <div style={{fontSize:13,fontWeight:700,color:"var(--text)"}}>{bill.name}</div>
-                </div>
-                <div style={{fontSize:10,color:"var(--muted)"}}>Vence em {MONTHS_FULL[bill.dueMonth]}/{bill.dueYear}</div>
-              </div>
-              <div style={{fontSize:16,fontWeight:800,color:"var(--wine)"}}>{fmt(bill.value)}</div>
-            </div>
-            
-            {isThisPaying?(
-              <div style={{display:"flex",gap:6,alignItems:"center"}}>
-                <select className="fi" value={selBank} onChange={e=>setSelBank(e.target.value)} style={{flex:1}}>
-                  <option value="">— Banco que pagou —</option>
-                  {banks.map(b=><option key={b.id} value={b.name}>{b.name}</option>)}
-                </select>
-                <button onClick={()=>markPaid(bill)} style={{background:"var(--green)",border:"none",color:"#fff",fontFamily:"'Plus Jakarta Sans',sans-serif",fontSize:11,fontWeight:700,borderRadius:8,padding:"10px 14px",cursor:"pointer",whiteSpace:"nowrap"}}>Confirmar</button>
-                <button onClick={()=>{setPaying(null);setSelBank("");}} style={{background:"transparent",border:"1px solid var(--border)",color:"var(--muted)",fontFamily:"'Plus Jakarta Sans',sans-serif",fontSize:11,fontWeight:600,borderRadius:8,padding:"10px 12px",cursor:"pointer"}}>✕</button>
-              </div>
-            ):(
-              <div style={{display:"flex",gap:6}}>
-                <button onClick={()=>{setPaying(bill.id);setSelBank("");}} style={{flex:1,background:"var(--green)",border:"none",color:"#fff",fontFamily:"'Plus Jakarta Sans',sans-serif",fontSize:11,fontWeight:700,borderRadius:9,padding:"9px",cursor:"pointer"}}>✓ Marcar paga</button>
-                <button onClick={()=>reopenInvoice(bill)} style={{background:"transparent",border:"1px solid var(--border)",color:"var(--muted)",fontFamily:"'Plus Jakarta Sans',sans-serif",fontSize:10,fontWeight:600,borderRadius:9,padding:"9px 12px",cursor:"pointer"}}>↺ Reabrir fatura</button>
-              </div>
-            )}
-          </div>
-        );
-      })}
-      
-      {paidBills.length>0&&(<>
-        <div className="st" style={{marginTop:14}}>Pagas ({paidBills.length})</div>
-        {paidBills.slice(-5).reverse().map(bill=>{
-          const bank=banks.find(b=>b.name===bill.bankCard);
-          const paidDate=bill.paidDate?new Date(bill.paidDate+"T12:00").toLocaleDateString("pt-BR"):"—";
-          return (
-            <div key={bill.id} style={{background:"rgba(34,197,94,.05)",border:"1px solid rgba(34,197,94,.15)",borderRadius:10,padding:"10px 12px",marginBottom:6}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                <div style={{flex:1}}>
-                  <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:2}}>
-                    <span style={{width:7,height:7,borderRadius:"50%",background:bank?.color||"#888",display:"inline-block"}}/>
-                    <div style={{fontSize:12,fontWeight:700,color:"var(--text)"}}>{bill.name}</div>
-                  </div>
-                  <div style={{fontSize:9,color:"var(--green)"}}>✓ Pago em {paidDate} via {bill.paidBank}</div>
-                </div>
-                <div style={{textAlign:"right"}}>
-                  <div style={{fontSize:13,fontWeight:700,color:"var(--green)"}}>{fmt(bill.value)}</div>
-                  <button onClick={()=>unmarkPaid(bill)} style={{background:"transparent",border:"none",color:"var(--muted)",fontFamily:"'Plus Jakarta Sans',sans-serif",fontSize:9,cursor:"pointer",textDecoration:"underline"}}>desmarcar</button>
-                </div>
-              </div>
-            </div>
-          );
-        })}
-      </>)}
-      
-      <div style={{background:"rgba(99,102,241,.05)",border:"1px solid rgba(99,102,241,.15)",borderRadius:10,padding:"10px 12px",marginTop:12,fontSize:11,color:"var(--text2)",lineHeight:1.6}}>
-        <strong style={{color:"var(--accent)"}}>Como funciona:</strong> ao fechar a fatura de um cartão na aba <strong>Cartões</strong>, ela aparece aqui como "a pagar". Quando você marca como paga, o app reduz o saldo do banco que você selecionar (não interfere antes disso).
-      </div>
-    </div>
-  );
-}
-
-
-function WalletPage({banks,setSettings,yearCache,settings,vm,vy}){
-  const [editingBank,setEditingBank]=useState(null);
-  const [newBalance,setNewBalance]=useState("");
-  
-  function saveBalance(){
-    const val=parseFloat(String(newBalance).replace(",","."))||0;
-    const today=new Date();
-    const dateStr=`${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,"0")}-${String(today.getDate()).padStart(2,"0")}`;
-    setSettings(s=>({
-      ...s,
-      banks:(s.banks||DEFAULT_BANKS).map(b=>
-        b.name===editingBank
-          ?{...b,currentBalance:val,adjustDate:dateStr}
-          :b
-      )
-    }));
-    setEditingBank(null);
-    setNewBalance("");
-  }
-  
-  const bankBalances=banks.map(b=>({
-    ...b,
-    realBalance:calcBankBalance(b.name,yearCache,settings),
-    hasBaseline:b.currentBalance!==undefined&&b.adjustDate
-  }));
-  
-  const totalContas=bankBalances.reduce((s,b)=>s+b.realBalance,0);
-  
-  return (
-    <div className="pg">
-      <div style={{padding:"14px 16px",background:"linear-gradient(135deg,rgba(99,102,241,.15),rgba(139,92,246,.08))",borderRadius:14,marginBottom:12,border:"1px solid rgba(99,102,241,.2)"}}>
-        <div style={{fontSize:11,color:"var(--text2)",textTransform:"uppercase",letterSpacing:".06em",fontWeight:700,marginBottom:6}}>💼 Total nas contas</div>
-        <div style={{fontSize:26,fontWeight:800,color:"var(--green)"}}>{fmt(totalContas)}</div>
-        <div style={{fontSize:10,color:"var(--muted)",marginTop:4}}>Soma do saldo real de cada banco</div>
-      </div>
-      
-      <div className="st">Saldo por banco</div>
-      
-      {bankBalances.map(b=>{
-        const isEditing=editingBank===b.name;
-        const dateLabel=b.adjustDate?new Date(b.adjustDate+"T12:00").toLocaleDateString("pt-BR"):"nunca definido";
-        return (
-          <div key={b.id} style={{background:"var(--card)",border:"1.5px solid var(--border)",borderRadius:12,padding:"13px 14px",marginBottom:8}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-              <div style={{display:"flex",alignItems:"center",gap:8,fontSize:14,fontWeight:700,color:"var(--text)"}}>
-                <span style={{width:10,height:10,borderRadius:"50%",background:b.color,display:"inline-block"}}/>
-                {b.name}
-              </div>
-              <div style={{fontSize:17,fontWeight:800,color:b.realBalance>=0?"var(--green)":"var(--wine)"}}>
-                {fmt(b.realBalance)}
-              </div>
-            </div>
-            
-            <div style={{fontSize:10,color:"var(--muted)",marginBottom:6,lineHeight:1.5}}>
-              {b.hasBaseline
-                ?<>Saldo definido em {dateLabel}: {fmt(b.currentBalance||0)}<br/>+ movimentações desde então</>
-                :<>⚠ Saldo ainda não foi definido. Defina seu saldo atual para começar.</>}
-            </div>
-            
-            {isEditing
-              ?<div style={{display:"flex",gap:6,alignItems:"center"}}>
-                <input className="fi" type="text" inputMode="decimal" pattern="[0-9.,]*"
-                  placeholder="Ex: 1.234,56"
-                  value={newBalance}
-                  onChange={e=>setNewBalance(e.target.value)}
-                  autoFocus
-                  style={{flex:1}}/>
-                <button onClick={saveBalance} style={{background:"var(--green)",border:"none",color:"#fff",fontFamily:"'Plus Jakarta Sans',sans-serif",fontSize:11,fontWeight:700,borderRadius:8,padding:"10px 14px",cursor:"pointer",whiteSpace:"nowrap"}}>Salvar</button>
-                <button onClick={()=>{setEditingBank(null);setNewBalance("");}} style={{background:"transparent",border:"1px solid var(--border)",color:"var(--muted)",fontFamily:"'Plus Jakarta Sans',sans-serif",fontSize:11,fontWeight:600,borderRadius:8,padding:"10px 12px",cursor:"pointer"}}>✕</button>
-              </div>
-              :<button onClick={()=>{setEditingBank(b.name);setNewBalance(String(b.currentBalance||""));}}
-                style={{width:"100%",background:b.hasBaseline?"rgba(99,102,241,.1)":"rgba(34,197,94,.15)",border:`1px solid ${b.hasBaseline?"rgba(99,102,241,.3)":"rgba(34,197,94,.3)"}`,color:b.hasBaseline?"var(--accent)":"var(--green)",fontFamily:"'Plus Jakarta Sans',sans-serif",fontSize:11,fontWeight:700,borderRadius:9,padding:"8px",cursor:"pointer"}}>
-                {b.hasBaseline?"🔧 Ajustar saldo (digitar o real de hoje)":"➕ Definir saldo atual"}
-              </button>}
-          </div>
-        );
-      })}
-      
-      <div style={{background:"rgba(99,102,241,.05)",border:"1px solid rgba(99,102,241,.15)",borderRadius:10,padding:"10px 12px",marginTop:8,fontSize:11,color:"var(--text2)",lineHeight:1.6}}>
-        <strong style={{color:"var(--accent)"}}>Como funciona:</strong> ao definir o saldo atual, o app fixa esse valor como ponto zero. A partir daí, cada entrada/gasto/fixa que você lançar com banco vai atualizar o saldo automaticamente. Se notar diferença com o banco real, é só clicar em "Ajustar saldo" e digitar o valor novamente.
-      </div>
-    </div>
-  );
-}
-
-
-function SettingsPage({settings,setSettings,data,setData,userEmail,expenseCats,onRecalculate,banks,balance,onAdjustBalance}){
-  const [recalcMsg,setRecalcMsg]=useState("");
-  const [recalcing,setRecalcing]=useState(false);
-  const [newCat,setNewCat]=useState({name:"",icon:"📌",color:"#7b241c"});
-  const [showNewCat,setShowNewCat]=useState(false);
-  function addCat(){if(!newCat.name.trim())return;setSettings(s=>({...s,expenseCats:[...(s.expenseCats||DEFAULT_EXPENSE_CATS),{id:uid(),...newCat}]}));setNewCat({name:"",icon:"📌",color:"#7b241c"});setShowNewCat(false);}
-  function deleteCat(id){setSettings(s=>({...s,expenseCats:(s.expenseCats||DEFAULT_EXPENSE_CATS).filter(c=>c.id!==id)}));}
-  return (
-    <div className="pg">
-      <div className="st">Conta</div>
-      <div className="card">
-        <div style={{fontSize:12,color:"var(--muted)"}}>Logado como</div>
-        <div style={{fontSize:13,fontWeight:600,marginTop:4}}>{userEmail}</div>
-        <button onClick={()=>supabase.auth.signOut()} style={{marginTop:12,background:"var(--surface)",border:"1px solid var(--wine)",color:"var(--wine)",fontFamily:"'Sora',sans-serif",fontSize:12,fontWeight:600,borderRadius:9,padding:"8px 16px",cursor:"pointer"}}>Sair da conta</button>
-      </div>
-      <div className="divider"/>
-      <div className="st">Personalização</div>
-      <div className="card"><div className="fg"><label className="fl">Como quer ser chamado</label><input className="fi" value={settings.name} onChange={e=>setSettings(s=>({...s,name:e.target.value}))}/></div></div>
-      <div className="divider"/>
-      <BalanceReconciliation banks={banks} balance={balance} settings={settings} setSettings={setSettings} onAdjust={onAdjustBalance}/>
-
-      <div className="card" style={{background:"rgba(99,102,241,.06)",border:"1.5px solid rgba(99,102,241,.25)"}}>
-        <div style={{fontSize:13,fontWeight:700,color:"var(--accent)",marginBottom:6}}>🔄 Recalcular saldos</div>
-        <div style={{fontSize:11,color:"var(--text2)",lineHeight:1.6,marginBottom:10}}>
-          Se o saldo em contas estiver com discrepância (por mudanças antigas no app), clique aqui para refazer todos os cálculos do ano com a fórmula correta.
-        </div>
-        <button onClick={async()=>{setRecalcing(true);setRecalcMsg("");try{await onRecalculate();setRecalcMsg("✅ Saldos recalculados!");}catch(e){setRecalcMsg("❌ Erro: "+e.message);}finally{setRecalcing(false);setTimeout(()=>setRecalcMsg(""),3500);}}} disabled={recalcing}
-          style={{background:"var(--accent)",border:"none",color:"#fff",fontFamily:"'Plus Jakarta Sans',sans-serif",fontSize:12,fontWeight:700,borderRadius:10,padding:"10px 18px",cursor:recalcing?"wait":"pointer",opacity:recalcing?0.6:1}}>
-          {recalcing?"⏳ Recalculando…":"🔄 Recalcular tudo"}
-        </button>
-        {recalcMsg&&<div style={{marginTop:8,fontSize:11,fontWeight:600,color:recalcMsg.startsWith("✅")?"var(--green)":"var(--red)"}}>{recalcMsg}</div>}
-      </div>
-      <div className="st">Reserva de Emergência 🛡️</div>
-      <ReserveSettings settings={settings} setSettings={setSettings} label="Reserva de Emergência" baseKey="emergencyBase" deltaKey="emergencyDelta" goalKey="emergencyGoal" defaultGoal={10000}/>
-      <div className="st">Meta Pessoal 🎯</div>
-      <ReserveSettings settings={settings} setSettings={setSettings} label={settings.personalGoalName||"Meta Pessoal"} baseKey="personalBase" deltaKey="personalDelta" goalKey="personalGoalValue" defaultGoal={100000} showName/>
-      <div className="divider"/>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-        <div className="st">Cartões & Bancos 💳</div>
-        <button onClick={()=>setSettings(s=>({...s,banks:[...s.banks,{id:uid(),name:"Novo banco",color:"#555577",limit:0}]}))} style={{background:"var(--accent)",border:"none",color:"#fff",fontFamily:"'Sora',sans-serif",fontSize:11,fontWeight:700,borderRadius:8,padding:"5px 10px",cursor:"pointer"}}>+ Adicionar</button>
-      </div>
-      <div className="card">
-        {banks.map(b=>(
-          <div key={b.id} style={{marginBottom:16,paddingBottom:16,borderBottom:"1px solid var(--border)"}}>
-            <div style={{display:"flex",gap:6,alignItems:"center",marginBottom:8,flexWrap:"wrap"}}>
-              {BANK_COLORS.map(c=>(
-                <button key={c} onClick={()=>setSettings(s=>({...s,banks:s.banks.map(x=>x.id===b.id?{...x,color:c}:x)}))} style={{width:17,height:17,borderRadius:"50%",background:c,border:"none",cursor:"pointer",outline:b.color===c?"2px solid #fff":"none",outlineOffset:1}}/>
-              ))}
-              <button onClick={()=>setSettings(s=>({...s,banks:s.banks.filter(x=>x.id!==b.id)}))} style={{background:"none",border:"1px solid var(--wine)",color:"var(--wine)",fontFamily:"'Sora',sans-serif",fontSize:10,borderRadius:6,padding:"3px 8px",cursor:"pointer",marginLeft:"auto"}}>Apagar</button>
-            </div>
-            <div className="frow">
-              <div className="fg" style={{margin:0}}><label className="fl">Nome</label><input className="fi" value={b.name} onChange={e=>setSettings(s=>({...s,banks:s.banks.map(x=>x.id===b.id?{...x,name:e.target.value}:x)}))}/></div>
-              <div className="fg" style={{margin:0}}><label className="fl">Limite (R$)</label><input className="fi" type="number" placeholder="0 = sem limite" value={b.limit||""} onChange={e=>setSettings(s=>({...s,banks:s.banks.map(x=>x.id===b.id?{...x,limit:parseFloat(e.target.value)||0}:x)}))}/></div>
-            </div>
-          </div>
-        ))}
-      </div>
-      <div className="divider"/>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-        <div className="st">Categorias de Gasto</div>
-        <button onClick={()=>setShowNewCat(s=>!s)} style={{background:"var(--accent)",border:"none",color:"#fff",fontFamily:"'Sora',sans-serif",fontSize:11,fontWeight:700,borderRadius:8,padding:"5px 10px",cursor:"pointer"}}>{showNewCat?"Cancelar":"+ Nova"}</button>
-      </div>
-      {showNewCat&&(
-        <div className="card">
-          <div className="frow">
-            <div className="fg"><label className="fl">Nome</label><input className="fi" placeholder="Ex: Pet, Academia…" value={newCat.name} onChange={e=>setNewCat(c=>({...c,name:e.target.value}))}/></div>
-            <div className="fg"><label className="fl">Ícone</label><select className="fi" value={newCat.icon} onChange={e=>setNewCat(c=>({...c,icon:e.target.value}))}>{CAT_ICONS.map(i=><option key={i} value={i}>{i}</option>)}</select></div>
-          </div>
-          <div className="fg"><label className="fl">Cor</label>
-            <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-              {CAT_COLORS.map(c=><button key={c} onClick={()=>setNewCat(nc=>({...nc,color:c}))} style={{width:20,height:20,borderRadius:"50%",background:c,border:"none",cursor:"pointer",outline:newCat.color===c?"2px solid #fff":"none",outlineOffset:1}}/>)}
-            </div>
-          </div>
-          <button className="savebtn" onClick={addCat} disabled={!newCat.name.trim()}>Adicionar categoria</button>
-        </div>
-      )}
-      <div className="card">
-        {expenseCats.map(c=>(
-          <div key={c.id} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 0",borderBottom:"1px solid var(--border)"}}>
-            <span style={{fontSize:18}}>{c.icon}</span>
-            <div style={{flex:1,fontSize:12,fontWeight:500}}>{c.name}</div>
-            <span style={{width:12,height:12,borderRadius:"50%",background:c.color,display:"inline-block"}}/>
-            <button onClick={()=>deleteCat(c.id)} style={{background:"none",border:"none",color:"var(--muted)",cursor:"pointer",fontSize:14}}>✕</button>
-          </div>
-        ))}
-      </div>
-      <div className="divider"/>
-      <div className="st">Orçamento por categoria 🎯</div>
-      <div className="card">
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
-          {expenseCats.map(c=>(
-            <div key={c.id} className="fg" style={{margin:0}}><label className="fl">{c.icon} {c.name}</label>
-              <input className="fi" type="number" placeholder="sem limite" value={settings.catBudgets?.[c.name]||""} onChange={e=>setSettings(s=>({...s,catBudgets:{...s.catBudgets,[c.name]:parseFloat(e.target.value)||0}}))}/></div>
-          ))}
-        </div>
-      </div>
-      <div className="divider"/>
-      <div className="st">Observações do mês</div>
-      <div className="card"><textarea className="notesarea" placeholder="Ajustes feitos, decisões pro próximo mês…" value={data.notes||""} onChange={e=>setData(d=>({...d,notes:e.target.value}))}/></div>
-    </div>
-  );
-}
-
-// ─── ENTRY MODAL ──────────────────────────────────────────────────────────────
-
-// ─── SMART CATEGORIZATION ────────────────────────────────────────────────────
-function buildCategoryMemory(yearCache){
-  const memory={};
-  for(let m=0;m<12;m++){
-    const data=yearCache[m];
-    if(!data?.expenses) continue;
-    data.expenses.forEach(e=>{
-      if(!e.description||!e.category) return;
-      const key=e.description.toLowerCase().trim().slice(0,30);
-      if(!memory[key]) memory[key]={};
-      memory[key][e.category]=(memory[key][e.category]||0)+1;
-    });
-  }
-  return memory;
-}
-
-function suggestCategory(description,memory,defaultCat){
-  if(!description) return defaultCat;
-  const key=description.toLowerCase().trim().slice(0,30);
-  // Exact match
-  if(memory[key]){
-    const sorted=Object.entries(memory[key]).sort((a,b)=>b[1]-a[1]);
-    return sorted[0][0];
-  }
-  // Partial match (prefixo)
-  for(const memKey in memory){
-    if(memKey.length<4) continue;
-    if(key.includes(memKey)||memKey.includes(key)){
-      const sorted=Object.entries(memory[memKey]).sort((a,b)=>b[1]-a[1]);
-      return sorted[0][0];
-    }
-  }
-  return defaultCat;
-}
-
-// ─── FILTRO E ORDENAÇÃO REUTILIZÁVEL (ENTREGA 3) ───────────────────────────
-function ListControls({sortBy,setSortBy,filterText,setFilterText,filterCategory,setFilterCategory,filterBank,setFilterBank,expenseCats,banks,showCategory=true,showBank=true,sortOptions}){
-  const [open,setOpen]=useState(false);
-  const defaultSorts=[
-    {id:"date_desc",label:"Mais recente"},
-    {id:"date_asc",label:"Mais antigo"},
-    {id:"value_desc",label:"Maior valor"},
-    {id:"value_asc",label:"Menor valor"},
-    {id:"name_asc",label:"A → Z"},
-  ];
-  const sorts=sortOptions||defaultSorts;
-  const hasFilter=filterText||filterCategory||filterBank;
-  return (
-    <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:8}}>
-      <div style={{display:"flex",gap:6}}>
-        <input className="fi" placeholder="🔍 Buscar..." value={filterText||""} onChange={e=>setFilterText(e.target.value)} style={{flex:1,fontSize:12,padding:"8px 12px"}}/>
-        <select className="fi" value={sortBy} onChange={e=>setSortBy(e.target.value)} style={{flex:"0 0 130px",fontSize:11,padding:"8px"}}>
-          {sorts.map(s=><option key={s.id} value={s.id}>{s.label}</option>)}
-        </select>
-        <button onClick={()=>setOpen(o=>!o)} style={{background:open||hasFilter?"rgba(99,102,241,.15)":"var(--surface)",border:`1px solid ${open||hasFilter?"var(--accent)":"var(--border)"}`,color:open||hasFilter?"var(--accent)":"var(--muted)",fontFamily:"'Plus Jakarta Sans',sans-serif",fontSize:11,fontWeight:700,borderRadius:9,padding:"0 12px",cursor:"pointer",whiteSpace:"nowrap"}}>
-          {hasFilter?`✓ Filtros`:`⚙ Filtros`}
-        </button>
-      </div>
-      {open&&(
-        <div style={{background:"var(--card2)",border:"1px solid var(--border)",borderRadius:10,padding:"10px 12px",display:"flex",flexDirection:"column",gap:8}}>
-          {showCategory&&(
-            <div>
-              <label style={{fontSize:10,fontWeight:700,color:"var(--text2)",textTransform:"uppercase",letterSpacing:".05em",display:"block",marginBottom:4}}>Categoria</label>
-              <select className="fi" value={filterCategory||""} onChange={e=>setFilterCategory(e.target.value)} style={{fontSize:12,padding:"7px 10px"}}>
-                <option value="">Todas</option>
-                {expenseCats.map(c=><option key={c.id||c.name} value={c.name}>{c.icon} {c.name}</option>)}
-              </select>
-            </div>
-          )}
-          {showBank&&(
-            <div>
-              <label style={{fontSize:10,fontWeight:700,color:"var(--text2)",textTransform:"uppercase",letterSpacing:".05em",display:"block",marginBottom:4}}>Banco</label>
-              <select className="fi" value={filterBank||""} onChange={e=>setFilterBank(e.target.value)} style={{fontSize:12,padding:"7px 10px"}}>
-                <option value="">Todos</option>
-                {banks.map(b=><option key={b.id} value={b.name}>{b.name}</option>)}
-              </select>
-            </div>
-          )}
-          {hasFilter&&(
-            <button onClick={()=>{setFilterText("");setFilterCategory("");setFilterBank("");}} style={{background:"transparent",border:"1px solid var(--border)",color:"var(--muted)",fontFamily:"'Plus Jakarta Sans',sans-serif",fontSize:10,fontWeight:600,borderRadius:7,padding:"6px",cursor:"pointer"}}>
-              Limpar filtros
-            </button>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function applyFilters(items,{sortBy,filterText,filterCategory,filterBank,nameField="name",dateField="date",valueField="value"}){
-  let filtered=items.slice();
-  if(filterText){
-    const q=filterText.toLowerCase();
-    filtered=filtered.filter(i=>{
-      const txt=`${i[nameField]||""} ${i.description||""} ${i.category||""} ${i.bank||""}`.toLowerCase();
-      return txt.includes(q);
-    });
-  }
-  if(filterCategory) filtered=filtered.filter(i=>i.category===filterCategory);
-  if(filterBank) filtered=filtered.filter(i=>i.bank===filterBank);
-  switch(sortBy){
-    case "date_desc": filtered.sort((a,b)=>(b[dateField]||"").localeCompare(a[dateField]||""));break;
-    case "date_asc": filtered.sort((a,b)=>(a[dateField]||"").localeCompare(b[dateField]||""));break;
-    case "value_desc": filtered.sort((a,b)=>(b[valueField]||0)-(a[valueField]||0));break;
-    case "value_asc": filtered.sort((a,b)=>(a[valueField]||0)-(b[valueField]||0));break;
-    case "name_asc": filtered.sort((a,b)=>String(a[nameField]||a.description||"").localeCompare(String(b[nameField]||b.description||"")));break;
-    default: break;
-  }
-  return filtered;
-}
-
-
-function EntryModal({type,entry,banks,expenseCats,onClose,onSave,vm,vy,categoryMemory={}}){
-  const isEdit=!!entry;
-  const dd=`${vy}-${String(vm+1).padStart(2,"0")}-${String(today.getDate()).padStart(2,"0")}`;
-  const [form,setForm]=useState(()=>{
-    if(isEdit) return{...entry, value: String(entry.value ?? '')};
-    if(type==="income")     return{id:uid(),name:"",value:"",date:dd,bank:banks[0]?.name||""};
-    if(type==="expense")    return{id:uid(),category:expenseCats[0]?.name||"Outros",date:dd,description:"",value:"",bank:banks[0]?.name||"",isTransfer:false,transferTo:"",method:"PIX",essential:false};
-    if(type==="fixed")      return{id:uid(),name:"",value:"",paid:false,recurring:true};
-    if(type==="investment") return{id:uid(),name:"",type:"Reserva de Emergência",value:"",date:dd,bank:banks[0]?.name||""};
-    return{};
-  });
-  const upd=(k,v)=>setForm(f=>({...f,[k]:v}));
-  function save(){
-    const stMap={income:"incomes",expense:"expenses",fixed:"fixed",investment:"investments"};
-    const st=stMap[type];
-    let p={...form,value:parseFloat(String(form.value||"0").replace(",","."))||0};
-    // Se fixa marcada como paga, adicionar paidDate atual (fix bug 3)
-    if(type==="fixed"&&p.paid&&!p.paidDate){
-      const t=new Date();
-      p.paidDate=`${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,"0")}-${String(t.getDate()).padStart(2,"0")}`;
-    }
-    // Se fixa desmarcada, limpar paidDate
-    if(type==="fixed"&&!p.paid){
-      p.paidDate=null;
-    }
-    onSave(st,p,isEdit?entry:null);
-  }
-  const titles={income:"Entrada",expense:"Gasto (Débito/PIX)",fixed:"Despesa Fixa",investment:"Reserva / Investimento"};
-  return (
-    <>
-      <div className="mhdr"><div className="mtitle">{isEdit?"Editar":"Nova"} — {titles[type]}</div><button className="mclose" onClick={onClose}>✕</button></div>
-      {type==="income"&&<>
-        <div className="fg"><label className="fl">Nome / fonte</label><input className="fi" placeholder="Ex: Salário, Freela…" value={form.name} onChange={e=>upd("name",e.target.value)}/></div>
-        <div className="frow">
-          <div className="fg"><label className="fl">Valor (R$)</label><input className="fi" type="text" inputMode="decimal" pattern="[0-9.,]*" placeholder="0,00" value={form.value} onChange={e=>upd("value",e.target.value)}/></div>
-          <div className="fg"><label className="fl">Data</label><input className="fi" type="date" value={form.date} onChange={e=>upd("date",e.target.value)}/></div>
-        </div>
-        <div className="fg"><label className="fl">Banco onde caiu</label>
-          <select className="fi" value={form.bank||""} onChange={e=>upd("bank",e.target.value)}>
-            <option value="">— Selecione —</option>
-            {banks.map(b=><option key={b.id} value={b.name}>{b.name}</option>)}
-          </select>
-        </div>
-      </>}
-      {type==="expense"&&<>
-        <div style={{background:"rgba(155,140,255,.08)",border:"1px solid rgba(155,140,255,.2)",borderRadius:9,padding:"8px 11px",marginBottom:10,fontSize:11,color:"var(--accent)"}}>
-          💳 Compra no crédito? Registre em Cartões
-        </div>
-        <div className="fg"><label className="fl">Categoria</label>
-          <div className="catgrid">{expenseCats.map(c=>(
-            <button type="button" key={c.id||c.name} className={`catopt${form.category===c.name?" selected":""}`} onClick={()=>upd("category",c.name)}>{c.icon} {c.name}</button>
-          ))}</div>
-        </div>
-        <div className="fg"><label className="fl">Descrição</label><input className="fi" placeholder="Ex: Mercado, Uber, Farmácia…" value={form.description} onChange={e=>{
-          const v=e.target.value;
-          upd("description",v);
-          if(v.length>=3&&categoryMemory&&Object.keys(categoryMemory).length>0){
-            const suggested=suggestCategory(v,categoryMemory,form.category);
-            if(suggested&&suggested!==form.category) upd("category",suggested);
-          }
-        }}/></div>
-        <div className="frow">
-          <div className="fg"><label className="fl">Valor (R$)</label><input className="fi" type="text" inputMode="decimal" pattern="[0-9.,]*" placeholder="0,00" value={form.value} onChange={e=>upd("value",e.target.value)}/></div>
-          <div className="fg"><label className="fl">Data</label><input className="fi" type="date" value={form.date} onChange={e=>upd("date",e.target.value)}/></div>
-        </div>
-        <div className="frow">
-          <div className="fg"><label className="fl">Banco</label><select className="fi" value={form.bank} onChange={e=>upd("bank",e.target.value)}>{banks.map(b=><option key={b.id} value={b.name}>{b.name}</option>)}</select></div>
-          <div className="fg"><label className="fl">Método</label><select className="fi" value={form.method} onChange={e=>upd("method",e.target.value)}>{METHODS.map(m=><option key={m}>{m}</option>)}</select></div>
-        </div>
-        <div className="fg" style={{background:"rgba(99,102,241,.05)",border:"1px solid rgba(99,102,241,.18)",borderRadius:10,padding:"10px 12px"}}>
-          <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:12}}>
-            <input type="checkbox" checked={!!form.isTransfer} onChange={e=>upd("isTransfer",e.target.checked)} style={{width:16,height:16,accentColor:"var(--accent)"}}/>
-            <span><strong>🔄 Transferência entre minhas contas</strong></span>
-          </label>
-          <div style={{fontSize:10,color:"var(--muted)",marginTop:4,paddingLeft:24,lineHeight:1.5}}>Marque se está apenas movendo dinheiro entre seus bancos. Não conta como gasto real.</div>
-          {form.isTransfer&&(
-            <div style={{marginTop:8}}>
-              <label className="fl" style={{display:"block",marginBottom:4}}>Para qual banco?</label>
-              <select className="fi" value={form.transferTo||""} onChange={e=>upd("transferTo",e.target.value)}>
-                <option value="">— Selecione —</option>
-                {banks.filter(b=>b.name!==form.bank).map(b=><option key={b.id} value={b.name}>{b.name}</option>)}
-              </select>
-            </div>
-          )}
-        </div>
-      </>}
-      {type==="fixed"&&<>
-        <div className="fg"><label className="fl">Nome</label><input className="fi" placeholder="Ex: Parcela carro, Seguro…" value={form.name} onChange={e=>upd("name",e.target.value)}/></div>
-        <div className="fg"><label className="fl">Valor (R$)</label><input className="fi" type="text" inputMode="decimal" pattern="[0-9.,]*" placeholder="0,00" value={form.value} onChange={e=>upd("value",e.target.value)}/></div>
-        <div className="fg"><label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:13}}><input type="checkbox" checked={!!form.paid} onChange={e=>upd("paid",e.target.checked)} style={{width:16,height:16,accentColor:"var(--green)"}}/>Já paga</label></div>
-        {form.paid&&<div className="fg"><label className="fl">Pago pelo banco</label>
-          <select className="fi" value={form.bank||""} onChange={e=>upd("bank",e.target.value)}>
-            <option value="">— Selecione —</option>
-            {banks.map(b=><option key={b.id} value={b.name}>{b.name}</option>)}
-          </select>
-        </div>}
-        <div className="fg" style={{background:"rgba(99,102,241,.06)",border:"1px solid rgba(99,102,241,.2)",borderRadius:10,padding:"10px 12px"}}>
-          <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:12}}>
-            <input type="checkbox" checked={form.recurring!==false} onChange={e=>upd("recurring",e.target.checked)} style={{width:16,height:16,accentColor:"var(--accent)"}}/>
-            <span><strong>♻️ Recorrente</strong> — copiar para os próximos meses automaticamente</span>
-          </label>
-          <div style={{fontSize:10,color:"var(--muted)",marginTop:4,paddingLeft:24}}>Marque para fixas que repetem (aluguel, internet, etc.)</div>
-        </div>
-      </>}
-      {type==="investment"&&<>
-        <div className="fg"><label className="fl">Tipo</label><select className="fi" value={form.type} onChange={e=>upd("type",e.target.value)}>{INVEST_TYPES.map(t=><option key={t}>{t}</option>)}</select></div>
-        <div className="fg"><label className="fl">Nome / descrição</label><input className="fi" placeholder="Ex: CDB Nubank, Aporte reserva…" value={form.name} onChange={e=>upd("name",e.target.value)}/></div>
-        <div className="frow">
-          <div className="fg"><label className="fl">Valor (R$)</label><input className="fi" type="text" inputMode="decimal" pattern="[0-9.,]*" placeholder="0,00" value={form.value} onChange={e=>upd("value",e.target.value)}/></div>
-          <div className="fg"><label className="fl">Data</label><input className="fi" type="date" value={form.date} onChange={e=>upd("date",e.target.value)}/></div>
-        </div>
-        <div className="fg"><label className="fl">Banco de origem / destino</label>
-          <select className="fi" value={form.bank||""} onChange={e=>upd("bank",e.target.value)}>
-            <option value="">— Selecione —</option>
-            {banks.map(b=><option key={b.id} value={b.name}>{b.name}</option>)}
-          </select>
-        </div>
-      </>}
-      <button className="savebtn" onClick={save}>{isEdit?"Salvar alterações":"Adicionar"}</button>
-    </>
-  );
+`}</style>;
 }
