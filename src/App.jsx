@@ -590,6 +590,8 @@ function AppInner({session}){
 
   useEffect(()=>{ if(data&&!data.months[mes]) mutate(d=>{criarMesComFixas(d,mes);return d;}); },[mes,data]);
 
+  const mem=useMemo(()=>data?memoriaCategorias(data):{},[data]);
+
   if(loading||!data) return (
     <div style={{minHeight:"100vh",background:"#09090f",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:10,color:"#7070a0",fontFamily:"sans-serif",fontSize:14}}>
       <div style={{fontSize:30}}>{migrando?"📦":"⏳"}</div>
@@ -603,7 +605,6 @@ function AppInner({session}){
   const rt=reservaTotais(data);
   const totalContas=data.accounts.reduce((s,a)=>s+saldoConta(data,a.id),0);
   const alerts=gerarAlertas(data,mes);
-  const mem=useMemo(()=>memoriaCategorias(data),[data]);
 
   const NAV=[
     ["resumo","📊","Início"],["extrato","🧾","Extrato"],["apagar","📅","A pagar"],
