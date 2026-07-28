@@ -976,7 +976,10 @@ function PageAPagar({data,mutate,mes,setModal}){
     if(!selConta) return;
     mutate(d=>{
       const acc2=d.accounts.find(a=>a.id===cardId);
-      const dtPag=`${mes}-${String(Math.min(acc2?.vencimento||15,28)).padStart(2,"0")}`;
+      const venc=acc2?.vencimento||15, fech=acc2?.fechamento||1;
+      let [yy,mm2]=mes.split("-").map(Number);
+      if(venc<fech){ mm2++; if(mm2>12){mm2=1;yy++;} }
+      const dtPag=`${yy}-${String(mm2).padStart(2,"0")}-${String(Math.min(venc,28)).padStart(2,"0")}`;
       ensureMonth(d,mes).faturasPagas[cardId]={contaId:selConta,data:dtPag};return d;});
     setPagando(null);setSelConta("");
   }
