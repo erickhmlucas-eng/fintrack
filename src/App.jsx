@@ -1651,7 +1651,7 @@ function PageConfig({data,mutate,userEmail,setToast}){
                 <div className="fg" style={{margin:0}}><label className="fl">Limite (R$)</label>
                   <input className="fi" inputMode="decimal" placeholder="0 = sem" value={a.limite||""} onChange={e=>{const v=parseVal(e.target.value);mutate(d=>{const x=d.accounts.find(y=>y.id===a.id);if(x)x.limite=v;return d;});}}/></div>
                 <div className="fg" style={{margin:0}}><label className="fl">Fecha dia</label>
-                  <input className="fi" type="number" min="1" max="28" value={a.fechamento} onChange={e=>{const v=Math.min(28,Math.max(1,parseInt(e.target.value)||1));mutate(d=>{const x=d.accounts.find(y=>y.id===a.id);if(x)x.fechamento=v;return d;});}}/></div>
+                  <input className="fi" type="number" min="1" max="31" value={a.fechamento} onChange={e=>{const v=Math.min(31,Math.max(1,parseInt(e.target.value)||1));mutate(d=>{const x=d.accounts.find(y=>y.id===a.id);if(x)x.fechamento=v;return d;});}}/></div>
                 <div className="fg" style={{margin:0}}><label className="fl">Vence dia</label>
                   <input className="fi" type="number" min="1" max="28" value={a.vencimento} onChange={e=>{const v=Math.min(28,Math.max(1,parseInt(e.target.value)||1));mutate(d=>{const x=d.accounts.find(y=>y.id===a.id);if(x)x.vencimento=v;return d;});}}/></div>
               </div>
