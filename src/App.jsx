@@ -629,7 +629,7 @@ function AppInner({session}){
       {menuOpen&&<div className="sidebar-overlay" onClick={()=>setMenuOpen(false)}/>}
       <div className={`sidebar${menuOpen?" open":""}`}>
         <div className="sidebar-header">
-          <div className="logo">Fin<em>Track</em></div>
+          <div className="logo">Fin<em>Track</em> <span style={{fontSize:9,color:"var(--muted)",fontWeight:400}}>v2.1</span></div>
           <div className="sidebar-user">
             <div className="avatar">{(data.settings.name||"U").slice(0,2).toUpperCase()}</div>
             <div style={{minWidth:0}}>
@@ -658,7 +658,7 @@ function AppInner({session}){
         <div className="topbar">
           <div style={{display:"flex",alignItems:"center",gap:10}}>
             <button className="hamburger" onClick={()=>setMenuOpen(o=>!o)}><span/><span/><span/></button>
-            <div className="logo">Fin<em>Track</em></div>
+            <div className="logo">Fin<em>Track</em> <span style={{fontSize:9,color:"var(--muted)",fontWeight:400}}>v2.1</span></div>
           </div>
           <div style={{display:"flex",alignItems:"center",gap:8}}>
             {saving&&<span title="Salvando…" style={{fontSize:13}}>☁️</span>}
