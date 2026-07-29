@@ -157,19 +157,28 @@ function mesFaturaDe(dataCompra, fechamento){
 function saldoConta(d, accId){
   const acc=contaById(d,accId); if(!acc) return 0;
   const anc=acc.ancoraData||null;
-  const conta=(dt)=>!anc||!dt||dt>=anc;
+  const conta=(dt,ts)=>{
+    if(!anc) return true;
+    if(!dt) return true;
+    if(dt>anc) return true;
+    if(dt<anc) return false;
+    /* lançamento datado no mesmo dia da âncora:
+       o saldo digitado já refletia o que existia antes; só conta o que veio depois */
+    if(!acc.ancoraTs) return true;
+    return (ts||0)>acc.ancoraTs;
+  };
   let s=acc.saldoInicial||0;
   Object.entries(d.months||{}).forEach(([mk,m])=>{
-    (m.entradas||[]).forEach(e=>{ if(e.accId===accId&&conta(e.data)) s+=e.valor; });
+    (m.entradas||[]).forEach(e=>{ if(e.accId===accId&&conta(e.data,e.ts)) s+=e.valor; });
     (m.gastos||[]).forEach(g=>{
       if(g.forma==="credito") return;            /* crédito só sai quando a fatura é paga */
-      if(!conta(g.data)) return;
+      if(!conta(g.data,g.ts)) return;
       if(g.transferParaId){ if(g.accId===accId)s-=g.valor; if(g.transferParaId===accId)s+=g.valor; return; }
       if(g.accId===accId) s-=g.valor;
     });
-    (m.reservas||[]).forEach(r=>{ if(r.accId!==accId||!conta(r.data)) return; s+=r.retirada?r.valor:-r.valor; });
+    (m.reservas||[]).forEach(r=>{ if(r.accId!==accId||!conta(r.data,r.ts)) return; s+=r.retirada?r.valor:-r.valor; });
     Object.entries(m.faturasPagas||{}).forEach(([cardId,fp])=>{
-      if(fp&&fp.contaId===accId&&conta(fp.data)) s-=faturaDe(d,mk,cardId);
+      if(fp&&fp.contaId===accId&&conta(fp.data,fp.ts)) s-=faturaDe(d,mk,cardId);
     });
   });
   return r2(s);
@@ -983,7 +992,7 @@ function PageAPagar({data,mutate,mes,setModal}){
       let [yy,mm2]=mes.split("-").map(Number);
       if(venc<fech){ mm2++; if(mm2>12){mm2=1;yy++;} }
       const dtPag=`${yy}-${String(mm2).padStart(2,"0")}-${String(Math.min(venc,28)).padStart(2,"0")}`;
-      ensureMonth(d,mes).faturasPagas[cardId]={contaId:selConta,data:dtPag};return d;});
+      ensureMonth(d,mes).faturasPagas[cardId]={contaId:selConta,data:dtPag,ts:Date.now()};return d;});
     setPagando(null);setSelConta("");
   }
   function desfazerFatura(cardId){
@@ -996,7 +1005,7 @@ function PageAPagar({data,mutate,mes,setModal}){
       const f=mm.fixas.find(x=>x.id===fixaId); if(!f) return d;
       const gid=uid();
       const dtPag=`${mes}-${String(Math.min(f.dia||15,28)).padStart(2,"0")}`;
-      mm.gastos.unshift({id:gid,catId:f.catId||d.cats[d.cats.length-1].id,descricao:f.nome,valor:f.valor||0,
+      mm.gastos.unshift({id:gid,ts:Date.now(),catId:f.catId||d.cats[d.cats.length-1].id,descricao:f.nome,valor:f.valor||0,
         forma:selForma,accId:selConta,data:dtPag,parcela:null,fixaId:f.id});
       f.pago=true; f.gastoId=gid; return d;
     });
@@ -1013,7 +1022,7 @@ function PageAPagar({data,mutate,mes,setModal}){
       const mm=ensureMonth(d,mes);
       const idx=idxParcela(dv,mes);
       const dtPag=`${mes}-15`;
-      mm.gastos.unshift({id:uid(),catId:dv.catId,descricao:`Parcela: ${dv.nome} (${idx+1}/${dv.parcelas})`,
+      mm.gastos.unshift({id:uid(),ts:Date.now(),catId:dv.catId,descricao:`Parcela: ${dv.nome} (${idx+1}/${dv.parcelas})`,
         valor:dv.valorParcela,forma:selForma,accId:selConta,data:dtPag,parcela:null,dividaId:dv.id});
       dv.pagos.push(mes); return d;
     });
@@ -1239,7 +1248,7 @@ function PageCarteira({data,mutate,totalContas}){
   const [valor,setValor]=useState("");
   function salvar(accId){
     const v=parseVal(valor);
-    mutate(d=>{const a=d.accounts.find(x=>x.id===accId);if(a){a.saldoInicial=v;a.ancoraData=hoje();}return d;});
+    mutate(d=>{const a=d.accounts.find(x=>x.id===accId);if(a){a.saldoInicial=v;a.ancoraData=hoje();a.ancoraTs=Date.now();}return d;});
     setEditando(null);setValor("");
   }
   return (
@@ -1754,12 +1763,12 @@ function EntryModal({type,modal,data,mutate,mes,mem,onClose}){
     mutate(d=>{
       const mm=ensureMonth(d,mes);
       if(type==="entrada"){
-        const item={id:edit?edit.id:uid(),fonte:f.fonte||"Entrada",valor,data:f.data,accId:f.accId};
+        const item={id:edit?edit.id:uid(),fonte:f.fonte||"Entrada",valor,data:f.data,accId:f.accId,ts:edit?.ts||Date.now()};
         if(edit){const i=mm.entradas.findIndex(x=>x.id===edit.id);if(i>=0)mm.entradas[i]=item;}
         else mm.entradas.unshift(item);
       }
       if(type==="gasto"){
-        const item={id:edit?edit.id:uid(),catId:f.catId,descricao:f.descricao,valor,data:f.data,
+        const item={id:edit?edit.id:uid(),catId:f.catId,descricao:f.descricao,valor,data:f.data,ts:edit?.ts||Date.now(),
           forma:f.forma,accId:f.accId,parcela:edit?.parcela||null,
           fixaId:edit?.fixaId,dividaId:edit?.dividaId,
           transferParaId:f.isTransfer&&f.transferParaId?f.transferParaId:undefined};
@@ -1774,7 +1783,7 @@ function EntryModal({type,modal,data,mutate,mes,mem,onClose}){
         else mm.fixas.push(item);
       }
       if(type==="reserva"){
-        mm.reservas.unshift({id:uid(),tipo:f.tipo,nome:f.nome,valor,data:f.data,accId:f.accId,retirada:!!f.retirada});
+        mm.reservas.unshift({id:uid(),tipo:f.tipo,nome:f.nome,valor,data:f.data,accId:f.accId,retirada:!!f.retirada,ts:Date.now()});
       }
       return d;
     });
@@ -1919,7 +1928,7 @@ function CreditoModal({modal,data,mutate,mes,mem,onClose}){
         const mk=shiftKey(f.faturaMes,i);
         const mm=ensureMonth(d,mk);
         const v=i===np-1?r2(tv-base*(np-1)):base;   /* última parcela absorve o resto do arredondamento */
-        mm.gastos.unshift({id:uid(),catId:f.catId,descricao:f.descricao+(np>1?` (${i+1}/${np})`:""),
+        mm.gastos.unshift({id:uid(),ts:Date.now(),catId:f.catId,descricao:f.descricao+(np>1?` (${i+1}/${np})`:""),
           valor:v,forma:"credito",accId:f.cardId,data:i===0?f.data:"",
           parcela:np>1?{i:i+1,n:np,grupo}:null});
       }
@@ -1988,8 +1997,9 @@ function BulkPanel({destino,data,mutate,mes,mem,onClose,setToast}){
   function processar(){ setPreview(texto.split("\n").map(l=>l.trim()).filter(Boolean).map(parseLinha).filter(Boolean)); }
   function confirmar(){
     mutate(d=>{const mm=ensureMonth(d,mes);
-      if(destino==="entradas") mm.entradas=[...preview,...mm.entradas];
-      else mm.gastos=[...preview,...mm.gastos];
+      const stamped=preview.map(p=>({...p,ts:Date.now()}));
+      if(destino==="entradas") mm.entradas=[...stamped,...mm.entradas];
+      else mm.gastos=[...stamped,...mm.gastos];
       return d;});
     setToast(`✅ ${preview.length} lançamento(s) adicionado(s)`);
     onClose();
@@ -2197,7 +2207,7 @@ function ImportModal({destino,cardId,data,mutate,mes,onClose,setToast}){
     setPreview(all);setStep("preview");
   }
   function confirmar(){
-    const final=preview.map((p,i)=>({...p,catId:editCats[i]||p.catId}));
+    const final=preview.map((p,i)=>({...p,catId:editCats[i]||p.catId,ts:Date.now()}));
     mutate(d=>{const mm=ensureMonth(d,mes);
       if(ehEntrada) mm.entradas=[...final,...mm.entradas];
       else mm.gastos=[...final,...mm.gastos];
