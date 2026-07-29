@@ -868,10 +868,12 @@ function PageExtrato({data,mutate,mes,setModal,setToast}){
     return out;
   };
 
-  const gastos=aplicar((m.gastos||[]).filter(g=>g.forma!=="credito"),"descricao");
+  const gastos=aplicar((m.gastos||[]).filter(g=>g.forma!=="credito"&&!g.fixaId&&!g.dividaId),"descricao");
+  const fixos=aplicar((m.gastos||[]).filter(g=>g.forma!=="credito"&&(g.fixaId||g.dividaId)),"descricao");
   const creditos=aplicar((m.gastos||[]).filter(g=>g.forma==="credito"),"descricao");
   const entradas=aplicar(m.entradas||[],"fonte");
   const totG=gastos.filter(g=>!g.transferParaId).reduce((s,g)=>s+g.valor,0);
+  const totF=fixos.reduce((s,g)=>s+g.valor,0);
   const totE=entradas.reduce((s,e)=>s+e.valor,0);
   const totC=creditos.reduce((s,g)=>s+g.valor,0);
 
@@ -915,7 +917,7 @@ function PageExtrato({data,mutate,mes,setModal,setToast}){
   return (
     <div className="pg">
       <div style={{display:"flex",gap:6}}>
-        {[["gastos",`Gastos · ${fmt(totG)}`],["credito",`Crédito · ${fmt(totC)}`],["entradas",`Entradas · ${fmt(totE)}`]].map(([id,lb])=>(
+        {[["gastos",`Gastos · ${fmt(totG)}`],["fixas",`Fixas · ${fmt(totF)}`],["credito",`Crédito · ${fmt(totC)}`],["entradas",`Entradas · ${fmt(totE)}`]].map(([id,lb])=>(
           <button key={id} className={`tab${aba===id?" on":""}`} onClick={()=>setAba(id)}>{lb}</button>
         ))}
       </div>
@@ -937,11 +939,12 @@ function PageExtrato({data,mutate,mes,setModal,setToast}){
         </select>
       </div>
       <div style={{display:"flex",gap:8}}>
-        <button className="bulkbtn" onClick={()=>setModal({type:"bulk",destino:aba})}>📋 Colar em lote</button>
-        <button className="bulkbtn" style={{color:"var(--accent)",borderColor:"rgba(99,102,241,.3)"}} onClick={()=>setModal({type:"import",destino:aba})}>📂 Importar CSV/PDF</button>
+        <button className="bulkbtn" onClick={()=>setModal({type:"bulk",destino:aba==="fixas"?"gastos":aba})}>📋 Colar em lote</button>
+        <button className="bulkbtn" style={{color:"var(--accent)",borderColor:"rgba(99,102,241,.3)"}} onClick={()=>setModal({type:"import",destino:aba==="fixas"?"gastos":aba})}>📂 Importar CSV/PDF</button>
       </div>
       <div className="txlist">
         {aba==="gastos"&&(gastos.length?gastos.map(g=><Item key={g.id} g={g} tipo="gasto"/>):<div className="empty">Nenhum gasto em {labelKey(mes)}.<br/>Toque no <strong style={{color:"var(--accent)"}}>+</strong> para lançar.</div>)}
+        {aba==="fixas"&&(fixos.length?fixos.map(g=><Item key={g.id} g={g} tipo="gasto"/>):<div className="empty">Nenhuma fixa paga em {labelKey(mes)}.<br/>Cadastre e marque como paga na aba <strong style={{color:"var(--accent)"}}>A pagar</strong>.</div>)}
         {aba==="credito"&&(creditos.length?creditos.map(g=><Item key={g.id} g={g} tipo="gasto"/>):<div className="empty">Nenhuma compra de crédito na fatura de {labelKey(mes)}.</div>)}
         {aba==="entradas"&&(entradas.length?entradas.map(e=><Item key={e.id} g={e} tipo="entrada"/>):<div className="empty">Nenhuma entrada em {labelKey(mes)}.</div>)}
       </div>
