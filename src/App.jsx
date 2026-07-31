@@ -266,6 +266,15 @@ function idxParcela(dv, mk){
   const [iy,im]=dv.inicioMes.split("-").map(Number);
   return (y*12+m)-(iy*12+im);
 }
+function mesesDivida(dv){
+  const [iy,im]=dv.inicioMes.split("-").map(Number);
+  const out=[];
+  for(let i=0;i<dv.parcelas;i++){
+    const t=(iy*12+(im-1))+i;
+    out.push(`${Math.floor(t/12)}-${String((t%12)+1).padStart(2,"0")}`);
+  }
+  return out;
+}
 
 /* Sugerir categoria pela memória de descrições já lançadas */
 function memoriaCategorias(d){
@@ -629,7 +638,7 @@ function AppInner({session}){
       {menuOpen&&<div className="sidebar-overlay" onClick={()=>setMenuOpen(false)}/>}
       <div className={`sidebar${menuOpen?" open":""}`}>
         <div className="sidebar-header">
-          <div className="logo">Fin<em>Track</em> <span style={{fontSize:9,color:"var(--muted)",fontWeight:400}}>v2.1</span></div>
+          <div className="logo">Fin<em>Track</em> <span style={{fontSize:9,color:"var(--muted)",fontWeight:400}}>v2.2</span></div>
           <div className="sidebar-user">
             <div className="avatar">{(data.settings.name||"U").slice(0,2).toUpperCase()}</div>
             <div style={{minWidth:0}}>
@@ -658,7 +667,7 @@ function AppInner({session}){
         <div className="topbar">
           <div style={{display:"flex",alignItems:"center",gap:10}}>
             <button className="hamburger" onClick={()=>setMenuOpen(o=>!o)}><span/><span/><span/></button>
-            <div className="logo">Fin<em>Track</em> <span style={{fontSize:9,color:"var(--muted)",fontWeight:400}}>v2.1</span></div>
+            <div className="logo">Fin<em>Track</em> <span style={{fontSize:9,color:"var(--muted)",fontWeight:400}}>v2.2</span></div>
           </div>
           <div style={{display:"flex",alignItems:"center",gap:8}}>
             {saving&&<span title="Salvando…" style={{fontSize:13}}>☁️</span>}
@@ -1024,15 +1033,17 @@ function PageAPagar({data,mutate,mes,setModal}){
       const dtPag=`${mes}-15`;
       mm.gastos.unshift({id:uid(),ts:Date.now(),catId:dv.catId,descricao:`Parcela: ${dv.nome} (${idx+1}/${dv.parcelas})`,
         valor:dv.valorParcela,forma:selForma,accId:selConta,data:dtPag,parcela:null,dividaId:dv.id});
-      dv.pagos.push(mes); return d;
+      dv.pagos.push(mes);
+      if(dv.pagos.length>=dv.parcelas) dv.quitada=true;
+      return d;
     });
     setPagando(null);setSelConta("");
   }
   function desfazerDivida(dvId){
     mutate(d=>{const dv=d.dividas.find(x=>x.id===dvId);
-      if(dv)dv.pagos=dv.pagos.filter(k=>k!==mes);
+      if(dv){dv.pagos=dv.pagos.filter(k=>k!==mes);dv.quitada=false;}
       const mm=ensureMonth(d,mes);
-      mm.gastos=mm.gastos.filter(g=>g.dividaId!==dvId);
+      mm.gastos=mm.gastos.filter(g=>g.dividaId!==dvId||g.antecip);
       return d;});
   }
 
@@ -1359,16 +1370,42 @@ function PageReservas({data,mutate,mes,rt,setModal}){
 /* ════════════════════════════ Página: Dívidas ════════════════════════════ */
 function PageDividas({data,mutate,mes}){
   const [showForm,setShowForm]=useState(false);
-  const [f,setF]=useState({nome:"",total:"",parcelas:"",inicio:mes,catId:""});
+  const [f,setF]=useState({nome:"",total:"",parcelas:"",inicio:mes,catId:"",jaPagas:""});
+  const [antec,setAntec]=useState(null); // {dvId,qtd,valor,contaId,modo}
   const ativas=data.dividas.filter(d=>!d.quitada);
   const quitadas=data.dividas.filter(d=>d.quitada);
+  const contas=data.accounts.filter(a=>a.tipo!=="cartao");
   const tv=parseVal(f.total), np=parseInt(f.parcelas)||0, vp=np>0?r2(tv/np):0;
+  const mesesPassados=f.inicio&&f.inicio<mes?Math.min(idxParcela({inicioMes:f.inicio},mes),np||999):0;
+  const retroativo=mesesPassados>0;
 
   function add(){
     if(!f.nome||!tv||!np) return;
-    mutate(d=>{d.dividas.push({id:uid(),nome:f.nome,catId:f.catId||d.cats[d.cats.length-1].id,
-      total:tv,parcelas:np,valorParcela:vp,inicioMes:f.inicio,pagos:[],quitada:false});return d;});
-    setF({nome:"",total:"",parcelas:"",inicio:mes,catId:""});setShowForm(false);
+    const jaPagas=retroativo?Math.min(parseInt(f.jaPagas)||0,np):0;
+    mutate(d=>{
+      const nv={id:uid(),nome:f.nome,catId:f.catId||d.cats[d.cats.length-1].id,
+        total:tv,parcelas:np,valorParcela:vp,inicioMes:f.inicio,pagos:mesesDivida({inicioMes:f.inicio,parcelas:np}).slice(0,jaPagas),quitada:false};
+      if(nv.pagos.length>=np) nv.quitada=true;
+      d.dividas.push(nv);return d;});
+    setF({nome:"",total:"",parcelas:"",inicio:mes,catId:"",jaPagas:""});setShowForm(false);
+  }
+  function antecipar(){
+    if(!antec||!antec.contaId) return;
+    const qtd=parseInt(antec.qtd)||0, valor=parseVal(antec.valor);
+    if(qtd<1||!valor) return;
+    mutate(d=>{
+      const dv=d.dividas.find(x=>x.id===antec.dvId); if(!dv) return d;
+      const abertas=mesesDivida(dv).filter(k=>!dv.pagos.includes(k));
+      const alvo=antec.modo==="proximas"?abertas.slice(0,qtd):abertas.slice(-qtd);
+      dv.pagos.push(...alvo);
+      if(dv.pagos.length>=dv.parcelas) dv.quitada=true;
+      const mm=ensureMonth(d,mes);
+      mm.gastos.unshift({id:uid(),ts:Date.now(),catId:dv.catId,
+        descricao:`Antecipação: ${dv.nome} (${qtd} parcela${qtd>1?"s":""})`,
+        valor,forma:"pix",accId:antec.contaId,data:hoje(),parcela:null,dividaId:dv.id,antecip:true});
+      return d;
+    });
+    setAntec(null);
   }
   return (
     <div className="pg">
@@ -1389,7 +1426,14 @@ function PageDividas({data,mutate,mes}){
             <div className="fg"><label className="fl">Parcelas</label><input className="fi" type="number" inputMode="numeric" value={f.parcelas} onChange={e=>setF(p=>({...p,parcelas:e.target.value}))}/></div>
           </div>
           {vp>0&&<div className="hint" style={{marginBottom:10}}>Parcela mensal: <strong style={{color:"var(--accent)"}}>{fmt(vp)}</strong></div>}
-          <div className="fg"><label className="fl">Mês da 1ª parcela</label><input className="fi" type="month" value={f.inicio} onChange={e=>setF(p=>({...p,inicio:e.target.value}))}/></div>
+          <div className="fg"><label className="fl">Mês da 1ª parcela</label><input className="fi" type="month" value={f.inicio} onChange={e=>setF(p=>({...p,inicio:e.target.value,jaPagas:String(Math.min(Math.max(idxParcela({inicioMes:e.target.value},mes),0),parseInt(p.parcelas)||999))}))}/></div>
+          {retroativo&&(
+            <div className="fg">
+              <label className="fl">Parcelas já pagas antes do app</label>
+              <input className="fi" type="number" inputMode="numeric" min={0} max={np||undefined} value={f.jaPagas} onChange={e=>setF(p=>({...p,jaPagas:e.target.value}))}/>
+              <div className="hint" style={{marginTop:5}}>Início retroativo detectado. Essas parcelas entram como pagas no progresso e no saldo devedor, sem lançar nada no extrato.</div>
+            </div>
+          )}
           <button className="savebtn" onClick={add} disabled={!f.nome||!tv||!np}>Adicionar dívida</button>
         </div>
       )}
@@ -1401,12 +1445,16 @@ function PageDividas({data,mutate,mes}){
         const idx=idxParcela(dv,mes);
         const vigente=idx>=0&&idx<dv.parcelas;
         const pagaMes=dv.pagos.includes(mes);
+        const abertas=mesesDivida(dv).filter(k=>!dv.pagos.includes(k));
+        const termino=abertas.length?abertas[abertas.length-1]:null;
+        const emAntec=antec&&antec.dvId===dv.id;
         return (
           <div key={dv.id} className="card">
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
               <div>
                 <div style={{fontSize:13,fontWeight:700}}>{dv.nome}</div>
                 <div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>{dv.parcelas}x de {fmt(dv.valorParcela)} · Total {fmt(dv.total)} · início {labelKey(dv.inicioMes)}</div>
+                {vigente&&<div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>Parcela deste mês: <strong style={{color:"var(--text)"}}>{idx+1}/{dv.parcelas}</strong>{termino&&<> · termina em <strong style={{color:"var(--text)"}}>{labelKey(termino)}</strong></>}</div>}
               </div>
               <div style={{textAlign:"right"}}>
                 <div style={{fontSize:12,fontWeight:700,color:"var(--red)"}}>{fmt(Math.max(restante,0))}</div>
@@ -1420,7 +1468,36 @@ function PageDividas({data,mutate,mes}){
               <span>{pagas}/{dv.parcelas} pagas ({pct.toFixed(0)}%)</span>
               {vigente&&<span style={{color:pagaMes?"var(--green)":"var(--gold)",fontWeight:700}}>{pagaMes?"✓ Paga este mês":"⚡ Vence este mês — marque em A pagar"}</span>}
             </div>
+            {emAntec&&(
+              <div className="card" style={{background:"var(--bg)",margin:"4px 0 10px",padding:12}}>
+                <div style={{fontSize:11,fontWeight:700,marginBottom:8}}>⚡ Antecipar parcelas</div>
+                <div className="frow">
+                  <div className="fg"><label className="fl">Quantas ({abertas.length} em aberto)</label>
+                    <input className="fi" type="number" inputMode="numeric" min={1} max={abertas.length} value={antec.qtd}
+                      onChange={e=>{const q=e.target.value;setAntec(p=>({...p,qtd:q,valor:String(r2((parseInt(q)||0)*dv.valorParcela)).replace(".",",")}))}}/></div>
+                  <div className="fg"><label className="fl">Valor pago (R$)</label>
+                    <input className="fi" inputMode="decimal" value={antec.valor} onChange={e=>setAntec(p=>({...p,valor:e.target.value}))}/></div>
+                </div>
+                <div className="hint" style={{marginBottom:8}}>Se o banco deu desconto de juros, edite o valor: paga menos, mas abate {"o valor cheio das parcelas"} do saldo devedor.</div>
+                <div className="fg"><label className="fl">Abater quais parcelas</label>
+                  <select className="fi" value={antec.modo} onChange={e=>setAntec(p=>({...p,modo:e.target.value}))}>
+                    <option value="ultimas">Últimas (reduz o prazo, padrão de financiamento)</option>
+                    <option value="proximas">Próximas (adianta os meses)</option>
+                  </select></div>
+                <div className="fg"><label className="fl">Conta que pagou</label>
+                  <select className="fi" value={antec.contaId} onChange={e=>setAntec(p=>({...p,contaId:e.target.value}))}>
+                    <option value="">— Selecione —</option>
+                    {contas.map(a=><option key={a.id} value={a.id}>{a.nome}</option>)}
+                  </select></div>
+                <div style={{display:"flex",gap:7}}>
+                  <button className="savebtn" style={{flex:1,margin:0}} onClick={antecipar} disabled={!antec.contaId||!(parseInt(antec.qtd)>0)||!parseVal(antec.valor)}>Confirmar antecipação</button>
+                  <button className="btn-ghost" onClick={()=>setAntec(null)}>Cancelar</button>
+                </div>
+              </div>
+            )}
             <div style={{display:"flex",gap:7}}>
+              {!emAntec&&abertas.length>0&&<button className="btn-ghost" style={{flex:1,color:"var(--gold)",borderColor:"rgba(234,179,8,.3)"}}
+                onClick={()=>setAntec({dvId:dv.id,qtd:"1",valor:String(dv.valorParcela).replace(".",","),contaId:"",modo:"ultimas"})}>⚡ Antecipar</button>}
               <button className="btn-ghost" style={{flex:1,color:"var(--green)",borderColor:"rgba(34,197,94,.3)"}}
                 onClick={()=>mutate(d=>{const x=d.dividas.find(y=>y.id===dv.id);if(x)x.quitada=true;return d;})}>✓ Quitar tudo</button>
               <button className="btn-ghost" style={{color:"var(--red)",borderColor:"rgba(239,68,68,.3)"}}
