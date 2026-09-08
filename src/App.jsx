@@ -638,7 +638,7 @@ function AppInner({session}){
       {menuOpen&&<div className="sidebar-overlay" onClick={()=>setMenuOpen(false)}/>}
       <div className={`sidebar${menuOpen?" open":""}`}>
         <div className="sidebar-header">
-          <div className="logo">Fin<em>Track</em> <span style={{fontSize:9,color:"var(--muted)",fontWeight:400}}>v2.2</span></div>
+          <div className="logo">Fin<em>Track</em> <span style={{fontSize:9,color:"var(--muted)",fontWeight:400}}>v2.3</span></div>
           <div className="sidebar-user">
             <div className="avatar">{(data.settings.name||"U").slice(0,2).toUpperCase()}</div>
             <div style={{minWidth:0}}>
@@ -667,7 +667,7 @@ function AppInner({session}){
         <div className="topbar">
           <div style={{display:"flex",alignItems:"center",gap:10}}>
             <button className="hamburger" onClick={()=>setMenuOpen(o=>!o)}><span/><span/><span/></button>
-            <div className="logo">Fin<em>Track</em> <span style={{fontSize:9,color:"var(--muted)",fontWeight:400}}>v2.2</span></div>
+            <div className="logo">Fin<em>Track</em> <span style={{fontSize:9,color:"var(--muted)",fontWeight:400}}>v2.3</span></div>
           </div>
           <div style={{display:"flex",alignItems:"center",gap:8}}>
             {saving&&<span title="Salvando…" style={{fontSize:13}}>☁️</span>}
@@ -861,6 +861,14 @@ function PageResumo({data,mutate,mes,met,rt,totalContas,alerts,setModal,setPage}
         <div className="st" style={{marginBottom:8}}>Observações do mês</div>
         <textarea className="notesarea" placeholder="Ajustes, decisões pro próximo mês…" value={data.months[mes]?.notes||""}
           onChange={e=>{const v=e.target.value;mutate(d=>{ensureMonth(d,mes).notes=v;return d;});}}/>
+      </div>
+
+      <div className="card" style={{background:"rgba(99,102,241,.05)",borderColor:"rgba(99,102,241,.25)"}}>
+        <div className="st" style={{marginBottom:6}}>📄 Relatório para consultoria</div>
+        <div style={{fontSize:11,color:"var(--muted)",lineHeight:1.6,marginBottom:10}}>
+          Baixa um arquivo com tudo: posição geral (contas, reservas, dívidas), o mês de {labelKey(mes)} em detalhe (entradas, gastos, fixas, fatura de cada cartão) e o resumo do ano. Pronto para colar numa conversa de análise financeira.
+        </div>
+        <button className="btn-accent" style={{width:"100%"}} onClick={()=>baixarRelatorio(data,mes)}>📄 Baixar relatório completo (.md)</button>
       </div>
     </div>
   );
@@ -2375,6 +2383,167 @@ function criarMesComFixas(d, mk){
     });
     break;
   }
+}
+
+
+/* ════════════════════════════ Relatório completo (export .md) ════════════════════════════ */
+function gerarRelatorio(d, mes){
+  const L=[];
+  const push=(s="")=>L.push(s);
+  const pd=(iso)=>iso?dmy(iso):"—";
+  const hj=hoje();
+  const met=metricsMes(d,mes);
+  const rt=reservaTotais(d);
+  const cards=d.accounts.filter(a=>a.temCartao);
+  const m=d.months[mes]||novoMes();
+
+  push(`# FinTrack — Relatório completo`);
+  push(`Gerado em ${hj.split("-").reverse().join("/")} · Mês em foco: **${labelKey(mes)}**`);
+  push();
+  push(`> Como ler: transferências internas não contam como gasto. Fatura de cartão conta como saída no mês em que foi PAGA; fatura em aberto aparece como "comprometido". Saldo por conta = saldo ancorado + movimentações desde a âncora.`);
+  push();
+
+  /* 1. Posição geral */
+  push(`## 1. Posição geral (hoje)`);
+  push();
+  push(`### Contas`);
+  let tot=0;
+  d.accounts.forEach(a=>{
+    const s=saldoConta(d,a.id); tot+=s;
+    push(`- ${a.nome}: **${fmt(s)}**${a.ancoraData?` (âncora em ${pd(a.ancoraData)}: ${fmt(a.saldoInicial||0)})`:" (saldo nunca definido)"}`);
+  });
+  push(`- **Total nas contas: ${fmt(r2(tot))}**`);
+  push();
+  push(`### Reservas`);
+  push(`- 🛡️ Emergência: **${fmt(rt.emergencia)}** de ${fmt(d.settings.emergencyGoal||0)} (${d.settings.emergencyGoal>0?((rt.emergencia/d.settings.emergencyGoal)*100).toFixed(0):"0"}%)`);
+  push(`- 🎯 ${d.settings.personalGoalName}: **${fmt(rt.pessoal)}** de ${fmt(d.settings.personalGoalValue||0)}`);
+  push();
+  const ativas=d.dividas.filter(x=>!x.quitada);
+  push(`### Dívidas ativas (${ativas.length})`);
+  if(!ativas.length) push(`- Nenhuma. 🎉`);
+  ativas.forEach(dv=>{
+    const pagas=dv.pagos.length;
+    const restante=r2(dv.total-pagas*dv.valorParcela);
+    const abertas=mesesDivida(dv).filter(k=>!dv.pagos.includes(k));
+    const termino=abertas.length?labelKey(abertas[abertas.length-1]):"—";
+    const idx=idxParcela(dv,mes);
+    push(`- ${dv.nome}: ${dv.parcelas}x de ${fmt(dv.valorParcela)} · pagas ${pagas}/${dv.parcelas} · restante **${fmt(Math.max(restante,0))}** · ${idx>=0&&idx<dv.parcelas?`parcela do mês em foco: ${idx+1}/${dv.parcelas} (${dv.pagos.includes(mes)?"paga":"em aberto"})`:"sem parcela no mês em foco"} · término previsto: ${termino}`);
+  });
+  const quit=d.dividas.filter(x=>x.quitada);
+  if(quit.length){ push(); push(`Quitadas: ${quit.map(x=>x.nome).join(", ")}`); }
+  push();
+
+  /* 2. Mês em foco */
+  push(`## 2. ${labelKey(mes)} em detalhe`);
+  push();
+  push(`### Métricas do mês`);
+  push(`- Entradas: **${fmt(met.entradas)}**`);
+  push(`- Saídas: **${fmt(met.saidas)}** (débito/PIX ${fmt(met.gastosDeb)} + faturas pagas ${fmt(met.faturasPagas)} + aportes ${fmt(met.aportes)})`);
+  push(`- Sobra do mês (entrou − saiu): **${fmt(met.sobra)}**`);
+  push(`- Consumo no crédito lançado na fatura do mês: ${fmt(met.gastoCredito)}`);
+  push(`- Faturas em aberto (comprometido): ${fmt(met.comprometido)}`);
+  if(met.retiradas>0) push(`- Retiradas de reserva: ${fmt(met.retiradas)}`);
+  push();
+
+  const acc=(id)=>(contaById(d,id)||{}).nome||"—";
+  const cat=(id)=>{const c=catById(d,id);return `${c.icon} ${c.nome}`;};
+  const ord=(arr)=>arr.slice().sort((a,b)=>(a.data||"").localeCompare(b.data||""));
+
+  const entradas=m.entradas||[];
+  push(`### Entradas (${entradas.length}) — total ${fmt(entradas.reduce((s,e)=>s+e.valor,0))}`);
+  if(!entradas.length) push(`- Nenhuma.`);
+  ord(entradas).forEach(e=>push(`- ${pd(e.data)} · ${e.fonte} · ${acc(e.accId)} · **+${fmt(e.valor)}**`));
+  push();
+
+  const variaveis=(m.gastos||[]).filter(g=>g.forma!=="credito"&&!g.fixaId&&!g.dividaId&&!g.transferParaId);
+  push(`### Gastos variáveis (${variaveis.length}) — total ${fmt(variaveis.reduce((s,g)=>s+g.valor,0))}`);
+  if(!variaveis.length) push(`- Nenhum.`);
+  ord(variaveis).forEach(g=>push(`- ${pd(g.data)} · ${g.descricao||"—"} · ${cat(g.catId)} · ${acc(g.accId)} · ${FORMA_LABEL[g.forma]||g.forma} · **${fmt(g.valor)}**`));
+  push();
+
+  const fixos=(m.gastos||[]).filter(g=>g.forma!=="credito"&&(g.fixaId||g.dividaId));
+  push(`### Fixas e parcelas de dívida pagas (${fixos.length}) — total ${fmt(fixos.reduce((s,g)=>s+g.valor,0))}`);
+  if(!fixos.length) push(`- Nenhuma paga até agora.`);
+  ord(fixos).forEach(g=>push(`- ${pd(g.data)} · ${g.descricao} · ${acc(g.accId)} · **${fmt(g.valor)}**${g.antecip?" · (antecipação)":""}`));
+  const fixasPend=(m.fixas||[]).filter(f=>!f.pago);
+  if(fixasPend.length){
+    push();
+    push(`Fixas ainda pendentes: ${fixasPend.map(f=>`${f.nome} (${fmt(f.valor||0)}${f.dia?`, dia ${f.dia}`:""})`).join(" · ")}`);
+  }
+  push();
+
+  const transf=(m.gastos||[]).filter(g=>g.transferParaId);
+  if(transf.length){
+    push(`### Transferências internas (${transf.length}) — não contam como gasto`);
+    ord(transf).forEach(g=>push(`- ${pd(g.data)} · ${acc(g.accId)} → ${acc(g.transferParaId)} · ${fmt(g.valor)}`));
+    push();
+  }
+
+  push(`### Cartões — fatura de ${labelKey(mes)}`);
+  if(!cards.length) push(`- Nenhum cartão configurado.`);
+  cards.forEach(a=>{
+    const compras=gastosCartao(d,mes,a.id);
+    const fv=compras.reduce((s,g)=>s+g.valor,0);
+    const fp=(m.faturasPagas||{})[a.id]||null;
+    push();
+    push(`#### ${a.nome} — fatura ${fmt(fv)} ${fp?`(PAGA em ${pd(fp.data)} via ${acc(fp.contaId)})`:fv>0?`(EM ABERTO · fecha dia ${a.fechamento}, vence dia ${a.vencimento})`:""}`);
+    if(a.limite>0&&fv>0) push(`Limite: ${fmt(a.limite)} · uso ${((fv/a.limite)*100).toFixed(0)}%`);
+    if(!compras.length) push(`- Sem lançamentos.`);
+    ord(compras).forEach(g=>push(`- ${g.data?pd(g.data):"—"} · ${g.descricao} · ${cat(g.catId)} · **${fmt(g.valor)}**${g.parcela?` · parcela ${g.parcela.i}/${g.parcela.n}`:""}`));
+    const prox=faturaDe(d,shiftKey(mes,1),a.id);
+    if(prox>0) push(`Próxima fatura (${labelKey(shiftKey(mes,1))}): ${fmt(prox)} já comprometidos`);
+  });
+  push();
+
+  const reservasM=(m.reservas||[]);
+  if(reservasM.length){
+    push(`### Reservas no mês`);
+    ord(reservasM).forEach(r=>push(`- ${pd(r.data)} · ${r.retirada?"Retirada":"Aporte"} · ${({emergencia:"🛡️ Emergência",pessoal:"🎯 "+d.settings.personalGoalName,outro:"Outro"})[r.tipo]}${r.nome?` · ${r.nome}`:""} · ${acc(r.accId)} · ${r.retirada?"-":"+"}${fmt(r.valor)}`));
+    push();
+  }
+
+  const porCat=gastosPorCat(d,mes);
+  const catRows=Object.entries(porCat).map(([id,v])=>({id,v})).sort((a,b)=>b.v-a.v);
+  if(catRows.length){
+    push(`### Gastos por categoria (inclui crédito)`);
+    catRows.forEach(c=>{
+      const b=d.settings.catBudgets[c.id]||0;
+      push(`- ${cat(c.id)}: **${fmt(c.v)}**${b>0?` de ${fmt(b)} orçado (${((c.v/b)*100).toFixed(0)}%)${c.v>b?" ⚠ ESTOUROU":""}`:""}`);
+    });
+    push();
+  }
+
+  if(m.notes&&m.notes.trim()){
+    push(`### Observações do mês`);
+    push(m.notes.trim());
+    push();
+  }
+
+  /* 3. Ano */
+  const ano=mes.split("-")[0];
+  push(`## 3. Resumo do ano ${ano}`);
+  push();
+  push(`| Mês | Entradas | Débito/PIX | Faturas pagas | Aportes | Sobra |`);
+  push(`|---|---|---|---|---|---|`);
+  for(let i=1;i<=12;i++){
+    const k=`${ano}-${String(i).padStart(2,"0")}`;
+    const r=metricsMes(d,k);
+    if(!r.entradas&&!r.saidas&&!r.gastoCredito) continue;
+    push(`| ${MESES_C[i-1]}${k===mes?" ◀":""} | ${fmt(r.entradas)} | ${fmt(r.gastosDeb)} | ${fmt(r.faturasPagas)} | ${fmt(r.aportes)} | ${fmt(r.sobra)} |`);
+  }
+  push();
+  push(`---`);
+  push(`Relatório gerado pelo FinTrack. Valores derivados dos lançamentos; nada é digitado à mão.`);
+  return L.join("\n");
+}
+function baixarRelatorio(d, mes){
+  const txt=gerarRelatorio(d,mes);
+  const blob=new Blob([txt],{type:"text/markdown;charset=utf-8"});
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download=`FinTrack_Relatorio_${mes}.md`;
+  document.body.appendChild(a); a.click();
+  setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},400);
 }
 
 /* ════════════════════════════ Estilos ════════════════════════════ */
