@@ -297,6 +297,42 @@ function mesesDivida(dv){
   return out;
 }
 
+/* Parcelas efetivamente pagas de uma dívida.
+   Dívida na conta: o que está em dv.pagos.
+   Dívida no cartão: dv.pagos (parcelas antigas) + todo mês cuja FATURA já foi paga. */
+function pagasDivida(d, dv){
+  const set=new Set(dv.pagos||[]);
+  if(dv.cartaoId){
+    mesesDivida(dv).forEach(k=>{
+      const m=d.months[k];
+      if(m&&m.faturasPagas&&m.faturasPagas[dv.cartaoId]) set.add(k);
+    });
+  }
+  return [...set];
+}
+/* Coloca (ou reposiciona) as parcelas em aberto de uma dívida nas faturas do cartão.
+   Remove primeiro qualquer parcela dessa dívida já lançada como crédito, para não duplicar. */
+function sincronizarParcelasCartao(d, dvId){
+  const dv=d.dividas.find(x=>x.id===dvId); if(!dv) return;
+  /* limpa lançamentos de crédito antigos desta dívida (nunca mexe em antecipações) */
+  Object.values(d.months||{}).forEach(m=>{
+    m.gastos=(m.gastos||[]).filter(g=>!(g.dividaId===dvId&&g.forma==="credito"&&!g.antecip));
+  });
+  if(!dv.cartaoId||dv.quitada) return;
+  const meses=mesesDivida(dv);
+  const grupo=uid();
+  meses.forEach((k,i)=>{
+    if((dv.pagos||[]).includes(k)) return;       /* parcela antiga, antes do app: não relança */
+    const m=ensureMonth(d,k);
+    const venc=Math.min((d.accounts.find(a=>a.id===dv.cartaoId)||{}).vencimento||10,28);
+    m.gastos.unshift({id:uid(),ts:Date.now(),catId:dv.catId,
+      descricao:`${dv.nome} (${i+1}/${dv.parcelas})`,
+      valor:dv.valorParcela,forma:"credito",accId:dv.cartaoId,
+      data:`${k}-${String(venc).padStart(2,"0")}`,
+      parcela:{i:i+1,n:dv.parcelas,grupo},dividaId:dvId});
+  });
+}
+
 /* Sugerir categoria pela memória de descrições já lançadas */
 function memoriaCategorias(d){
   const mem={};
@@ -659,7 +695,7 @@ function AppInner({session}){
       {menuOpen&&<div className="sidebar-overlay" onClick={()=>setMenuOpen(false)}/>}
       <div className={`sidebar${menuOpen?" open":""}`}>
         <div className="sidebar-header">
-          <div className="logo">Fin<em>Track</em> <span style={{fontSize:9,color:"var(--muted)",fontWeight:400}}>v2.5</span></div>
+          <div className="logo">Fin<em>Track</em> <span style={{fontSize:9,color:"var(--muted)",fontWeight:400}}>v2.6</span></div>
           <div className="sidebar-user">
             <div className="avatar">{(data.settings.name||"U").slice(0,2).toUpperCase()}</div>
             <div style={{minWidth:0}}>
@@ -688,7 +724,7 @@ function AppInner({session}){
         <div className="topbar">
           <div style={{display:"flex",alignItems:"center",gap:10}}>
             <button className="hamburger" onClick={()=>setMenuOpen(o=>!o)}><span/><span/><span/></button>
-            <div className="logo">Fin<em>Track</em> <span style={{fontSize:9,color:"var(--muted)",fontWeight:400}}>v2.5</span></div>
+            <div className="logo">Fin<em>Track</em> <span style={{fontSize:9,color:"var(--muted)",fontWeight:400}}>v2.6</span></div>
           </div>
           <div style={{display:"flex",alignItems:"center",gap:8}}>
             {saving&&<span title="Salvando…" style={{fontSize:13}}>☁️</span>}
@@ -1012,15 +1048,17 @@ function PageAPagar({data,mutate,mes,setModal}){
     .filter(f=>f.valor>0);
   const fixasPend=(m.fixas||[]).filter(f=>!f.pago);
   const fixasPagas=(m.fixas||[]).filter(f=>f.pago);
-  const dividasMes=data.dividas.filter(dv=>!dv.quitada).map(dv=>{
+  const dividasTodas=data.dividas.filter(dv=>!dv.quitada).map(dv=>{
     const idx=idxParcela(dv,mes);
     if(idx<0||idx>=dv.parcelas) return null;
-    return {dv,idx,paga:dv.pagos.includes(mes)};
+    return {dv,idx,paga:pagasDivida(data,dv).includes(mes),noCartao:!!dv.cartaoId};
   }).filter(Boolean);
+  const dividasMes=dividasTodas.filter(x=>!x.noCartao);       /* precisam ser marcadas */
+  const dividasCartao=dividasTodas.filter(x=>x.noCartao);     /* já estão dentro da fatura */
 
   const totalPend=faturas.filter(f=>!f.paga).reduce((s,f)=>s+f.valor,0)
     +fixasPend.reduce((s,f)=>s+(f.valor||0),0)
-    +dividasMes.filter(x=>!x.paga).reduce((s,x)=>s+x.dv.valorParcela,0);
+    +dividasMes.filter(x=>!x.paga).reduce((s,x)=>s+x.dv.valorParcela,0);   /* cartão não soma: já está no valor da fatura */
 
   function pagarFatura(cardId){
     if(!selConta) return;
@@ -1160,29 +1198,38 @@ function PageAPagar({data,mutate,mes,setModal}){
       ))}
 
       {dividasMes.length>0&&<div className="sep">Parcelas de dívidas</div>}
-      {dividasMes.map(({dv,idx,paga})=>{
-        const cartao=dv.cartaoId?contaById(data,dv.cartaoId):null;
-        return (
+      {dividasMes.map(({dv,idx,paga})=>(
         <div key={dv.id} className="card" style={{padding:"11px 13px"}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-            <div style={{minWidth:0}}>
-              <div style={{fontSize:12,fontWeight:600,textDecoration:paga?"line-through":"none",color:paga?"var(--muted)":"var(--text)"}}>{dv.nome} ({idx+1}/{dv.parcelas})</div>
-              {cartao&&<div style={{fontSize:10,color:"var(--muted)",marginTop:2,display:"flex",alignItems:"center",gap:5}}>
-                <span className="chip" style={{background:(cartao.cor||"#888")+"30",color:cartao.cor}}>💳 {cartao.nome}</span>
-                <span>{paga?"na fatura deste mês":"entra na fatura ao marcar"}</span>
-              </div>}
-            </div>
+            <div style={{fontSize:12,fontWeight:600,textDecoration:paga?"line-through":"none",color:paga?"var(--muted)":"var(--text)"}}>{dv.nome} ({idx+1}/{dv.parcelas})</div>
             <span style={{fontSize:13,fontWeight:700,color:paga?"var(--green)":"var(--red)"}}>{fmt(dv.valorParcela)}</span>
           </div>
           {paga
             ?<button className="btn-ghost" style={{marginTop:8,width:"100%"}} onClick={()=>desfazerDivida(dv.id)}>Desmarcar</button>
-            :cartao
-              ?<button className="btn-green" style={{marginTop:8,width:"100%"}} onClick={()=>pagarDivida(dv.id)}>💳 Lançar parcela na fatura do {cartao.nome}</button>
-              :pagando?.tipo==="divida"&&pagando.id===dv.id
-                ?<SeletorPagto onConfirm={()=>pagarDivida(dv.id)}/>
-                :<button className="btn-green" style={{marginTop:8,width:"100%"}} onClick={()=>{setPagando({tipo:"divida",id:dv.id});setSelConta("");}}>✓ Marcar parcela como paga</button>}
+            :pagando?.tipo==="divida"&&pagando.id===dv.id
+              ?<SeletorPagto onConfirm={()=>pagarDivida(dv.id)}/>
+              :<button className="btn-green" style={{marginTop:8,width:"100%"}} onClick={()=>{setPagando({tipo:"divida",id:dv.id});setSelConta("");}}>✓ Marcar parcela como paga</button>}
         </div>
-      );})}
+      ))}
+
+      {dividasCartao.length>0&&<div className="sep">Parcelas que já estão nas faturas acima</div>}
+      {dividasCartao.map(({dv,idx,paga})=>{
+        const cartao=contaById(data,dv.cartaoId)||{};
+        return (
+          <div key={dv.id} className="card" style={{padding:"10px 13px",opacity:.8}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div style={{minWidth:0}}>
+                <div style={{fontSize:12,fontWeight:600}}>{dv.nome} ({idx+1}/{dv.parcelas})</div>
+                <div style={{fontSize:10,color:"var(--muted)",marginTop:2,display:"flex",alignItems:"center",gap:5,flexWrap:"wrap"}}>
+                  <span className="chip" style={{background:(cartao.cor||"#888")+"30",color:cartao.cor||"var(--muted)"}}>💳 {cartao.nome||"—"}</span>
+                  <span>{paga?"fatura paga":"cobrada dentro da fatura deste mês"}</span>
+                </div>
+              </div>
+              <span style={{fontSize:13,fontWeight:700,color:paga?"var(--green)":"var(--muted)"}}>{fmt(dv.valorParcela)}</span>
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -1514,7 +1561,9 @@ function PageDividas({data,mutate,mes}){
         total:tv,parcelas:np,valorParcela:vp,inicioMes:f.inicio,cartaoId:f.cartaoId||null,
         pagos:mesesDivida({inicioMes:f.inicio,parcelas:np}).slice(0,jaPagas),quitada:false};
       if(nv.pagos.length>=np) nv.quitada=true;
-      d.dividas.push(nv);return d;});
+      d.dividas.push(nv);
+      if(nv.cartaoId) sincronizarParcelasCartao(d,nv.id);
+      return d;});
     setF({nome:"",total:"",parcelas:"",inicio:mes,catId:"",jaPagas:"",cartaoId:""});setShowForm(false);
   }
   function antecipar(){
@@ -1523,10 +1572,14 @@ function PageDividas({data,mutate,mes}){
     if(qtd<1||!valor) return;
     mutate(d=>{
       const dv=d.dividas.find(x=>x.id===antec.dvId); if(!dv) return d;
-      const abertas=mesesDivida(dv).filter(k=>!dv.pagos.includes(k));
+      const jaPagasArr=pagasDivida(d,dv);
+      const abertas=mesesDivida(dv).filter(k=>!jaPagasArr.includes(k));
       const alvo=antec.modo==="proximas"?abertas.slice(0,qtd):abertas.slice(-qtd);
       dv.pagos.push(...alvo);
-      if(dv.pagos.length>=dv.parcelas) dv.quitada=true;
+      if(pagasDivida(d,dv).length>=dv.parcelas) dv.quitada=true;
+      /* tira das faturas futuras as parcelas que acabaram de ser antecipadas */
+      alvo.forEach(k=>{const mm2=d.months[k]; if(!mm2) return;
+        mm2.gastos=(mm2.gastos||[]).filter(g=>!(g.dividaId===dv.id&&g.forma==="credito"&&!g.antecip));});
       const mm=ensureMonth(d,mes);
       mm.gastos.unshift({id:uid(),ts:Date.now(),catId:dv.catId,
         descricao:`Antecipação: ${dv.nome} (${qtd} parcela${qtd>1?"s":""})`,
@@ -1576,13 +1629,14 @@ function PageDividas({data,mutate,mes}){
       )}
       {ativas.length===0&&!showForm&&<div className="empty">Nenhuma dívida ativa. 🎉</div>}
       {ativas.map(dv=>{
-        const pagas=dv.pagos.length;
+        const pagasArr=pagasDivida(data,dv);
+        const pagas=pagasArr.length;
         const pct=Math.min((pagas/dv.parcelas)*100,100);
         const restante=r2(dv.total-pagas*dv.valorParcela);
         const idx=idxParcela(dv,mes);
         const vigente=idx>=0&&idx<dv.parcelas;
-        const pagaMes=dv.pagos.includes(mes);
-        const abertas=mesesDivida(dv).filter(k=>!dv.pagos.includes(k));
+        const pagaMes=pagasArr.includes(mes);
+        const abertas=mesesDivida(dv).filter(k=>!pagasArr.includes(k));
         const termino=abertas.length?abertas[abertas.length-1]:null;
         const emAntec=antec&&antec.dvId===dv.id;
         return (
@@ -1594,7 +1648,7 @@ function PageDividas({data,mutate,mes}){
                 <div style={{marginTop:4}}>
                   <select className="fi" style={{fontSize:10,padding:"4px 7px",width:"auto",fontWeight:600,
                     color:dv.cartaoId?(contaById(data,dv.cartaoId)||{}).cor||"var(--accent)":"var(--muted)"}}
-                    value={dv.cartaoId||""} onChange={e=>{const v=e.target.value;mutate(d=>{const x=d.dividas.find(y=>y.id===dv.id);if(x)x.cartaoId=v||null;return d;});}}>
+                    value={dv.cartaoId||""} onChange={e=>{const v=e.target.value;mutate(d=>{const x=d.dividas.find(y=>y.id===dv.id);if(x){x.cartaoId=v||null;sincronizarParcelasCartao(d,dv.id);}return d;});}}>
                     <option value="">💰 Paga pela conta (débito/PIX)</option>
                     {cartoes.map(c=><option key={c.id} value={c.id}>💳 Cartão {c.nome}</option>)}
                   </select>
@@ -1611,7 +1665,11 @@ function PageDividas({data,mutate,mes}){
             </div>
             <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:"var(--muted)",marginBottom:8}}>
               <span>{pagas}/{dv.parcelas} pagas ({pct.toFixed(0)}%)</span>
-              {vigente&&<span style={{color:pagaMes?"var(--green)":"var(--gold)",fontWeight:700}}>{pagaMes?"✓ Paga este mês":"⚡ Vence este mês — marque em A pagar"}</span>}
+              {vigente&&<span style={{color:pagaMes?"var(--green)":"var(--gold)",fontWeight:700}}>
+                {dv.cartaoId
+                  ?(pagaMes?"✓ Fatura deste mês paga":"💳 Na fatura deste mês")
+                  :(pagaMes?"✓ Paga este mês":"⚡ Vence este mês — marque em A pagar")}
+              </span>}
             </div>
             {emAntec&&(
               <div className="card" style={{background:"var(--bg)",margin:"4px 0 10px",padding:12}}>
@@ -1644,9 +1702,12 @@ function PageDividas({data,mutate,mes}){
               {!emAntec&&abertas.length>0&&<button className="btn-ghost" style={{flex:1,color:"var(--gold)",borderColor:"rgba(234,179,8,.3)"}}
                 onClick={()=>setAntec({dvId:dv.id,qtd:"1",valor:String(dv.valorParcela).replace(".",","),contaId:"",modo:"ultimas"})}>⚡ Antecipar</button>}
               <button className="btn-ghost" style={{flex:1,color:"var(--green)",borderColor:"rgba(34,197,94,.3)"}}
-                onClick={()=>mutate(d=>{const x=d.dividas.find(y=>y.id===dv.id);if(x)x.quitada=true;return d;})}>✓ Quitar tudo</button>
+                onClick={()=>mutate(d=>{const x=d.dividas.find(y=>y.id===dv.id);if(x){x.quitada=true;sincronizarParcelasCartao(d,dv.id);}return d;})}>✓ Quitar tudo</button>
               <button className="btn-ghost" style={{color:"var(--red)",borderColor:"rgba(239,68,68,.3)"}}
-                onClick={()=>{if(confirm("Apagar esta dívida? (os pagamentos já lançados no extrato permanecem)"))mutate(d=>{d.dividas=d.dividas.filter(y=>y.id!==dv.id);return d;});}}>Apagar</button>
+                onClick={()=>{if(confirm("Apagar esta dívida? As parcelas futuras saem das faturas; pagamentos já feitos permanecem no extrato."))mutate(d=>{
+                  const alvo=d.dividas.find(y=>y.id===dv.id);
+                  if(alvo){alvo.cartaoId=null;sincronizarParcelasCartao(d,dv.id);}
+                  d.dividas=d.dividas.filter(y=>y.id!==dv.id);return d;});}}>Apagar</button>
             </div>
           </div>
         );
@@ -2562,13 +2623,14 @@ function gerarRelatorio(d, mes){
   push(`### Dívidas ativas (${ativas.length})`);
   if(!ativas.length) push(`- Nenhuma. 🎉`);
   ativas.forEach(dv=>{
-    const pagas=dv.pagos.length;
+    const pagasArr=pagasDivida(d,dv);
+    const pagas=pagasArr.length;
     const restante=r2(dv.total-pagas*dv.valorParcela);
-    const abertas=mesesDivida(dv).filter(k=>!dv.pagos.includes(k));
+    const abertas=mesesDivida(dv).filter(k=>!pagasArr.includes(k));
     const termino=abertas.length?labelKey(abertas[abertas.length-1]):"—";
     const idx=idxParcela(dv,mes);
     const formaDv=dv.cartaoId?`no cartão ${(contaById(d,dv.cartaoId)||{}).nome||"—"}`:"débito/PIX pela conta";
-    push(`- ${dv.nome}: ${dv.parcelas}x de ${fmt(dv.valorParcela)} · ${formaDv} · pagas ${pagas}/${dv.parcelas} · restante **${fmt(Math.max(restante,0))}** · ${idx>=0&&idx<dv.parcelas?`parcela do mês em foco: ${idx+1}/${dv.parcelas} (${dv.pagos.includes(mes)?"paga":"em aberto"})`:"sem parcela no mês em foco"} · término previsto: ${termino}`);
+    push(`- ${dv.nome}: ${dv.parcelas}x de ${fmt(dv.valorParcela)} · ${formaDv} · pagas ${pagas}/${dv.parcelas} · restante **${fmt(Math.max(restante,0))}** · ${idx>=0&&idx<dv.parcelas?`parcela do mês em foco: ${idx+1}/${dv.parcelas} (${pagasArr.includes(mes)?"paga":dv.cartaoId?"na fatura":"em aberto"})`:"sem parcela no mês em foco"} · término previsto: ${termino}`);
   });
   const quit=d.dividas.filter(x=>x.quitada);
   if(quit.length){ push(); push(`Quitadas: ${quit.map(x=>x.nome).join(", ")}`); }
