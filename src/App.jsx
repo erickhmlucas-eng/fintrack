@@ -177,7 +177,8 @@ function saldoConta(d, accId){
       if(g.transferParaId){ if(g.accId===accId)s-=g.valor; if(g.transferParaId===accId)s+=g.valor; return; }
       if(g.accId===accId) s-=g.valor;
     });
-    (m.reservas||[]).forEach(r=>{ if(r.accId!==accId||!conta(r.data,r.ts)) return; s+=r.retirada?r.valor:-r.valor; });
+    (m.reservas||[]).forEach(r=>{ if(r.rend) return;   /* rendimento não sai nem entra em conta */
+      if(r.accId!==accId||!conta(r.data,r.ts)) return; s+=r.retirada?r.valor:-r.valor; });
     Object.entries(m.faturasPagas||{}).forEach(([cardId,fp])=>{
       if(fp&&fp.contaId===accId&&conta(fp.data,fp.ts)) s-=faturaDe(d,mk,cardId);
     });
@@ -189,7 +190,7 @@ function saldoConta(d, accId){
    Saídas do mês = débito/pix + faturas pagas + aportes. Crédito não pago = "comprometido". */
 function metricsMes(d, mk){
   const m=d.months[mk];
-  if(!m) return {entradas:0,gastosDeb:0,faturasPagas:0,aportes:0,retiradas:0,saidas:0,sobra:0,comprometido:0,fixasPend:0,gastoCredito:0};
+  if(!m) return {entradas:0,gastosDeb:0,faturasPagas:0,aportes:0,retiradas:0,rendimentos:0,saidas:0,sobra:0,comprometido:0,fixasPend:0,gastoCredito:0};
   const entradas=(m.entradas||[]).reduce((s,e)=>s+e.valor,0);
   const gastosDeb=(m.gastos||[]).filter(g=>g.forma!=="credito"&&!g.transferParaId).reduce((s,g)=>s+g.valor,0);
   const gastoCredito=(m.gastos||[]).filter(g=>g.forma==="credito").reduce((s,g)=>s+g.valor,0);
@@ -199,11 +200,12 @@ function metricsMes(d, mk){
     if(!fv) return;
     if(m.faturasPagas&&m.faturasPagas[a.id]) faturasPagasV+=fv; else comprometido+=fv;
   });
-  const aportes=(m.reservas||[]).filter(r=>!r.retirada).reduce((s,r)=>s+r.valor,0);
-  const retiradas=(m.reservas||[]).filter(r=>r.retirada).reduce((s,r)=>s+r.valor,0);
+  const aportes=(m.reservas||[]).filter(r=>!r.retirada&&!r.rend).reduce((s,r)=>s+r.valor,0);
+  const retiradas=(m.reservas||[]).filter(r=>r.retirada&&!r.rend).reduce((s,r)=>s+r.valor,0);
+  const rendimentos=(m.reservas||[]).filter(r=>r.rend).reduce((s,r)=>s+(r.retirada?-r.valor:r.valor),0);
   const fixasPend=(m.fixas||[]).filter(f=>!f.pago).length;
   const saidas=gastosDeb+faturasPagasV+aportes;
-  return {entradas,gastosDeb,faturasPagas:faturasPagasV,aportes,retiradas,saidas,sobra:entradas-saidas,comprometido,fixasPend,gastoCredito};
+  return {entradas,gastosDeb,faturasPagas:faturasPagasV,aportes,retiradas,rendimentos,saidas,sobra:entradas-saidas,comprometido,fixasPend,gastoCredito};
 }
 
 /* Totais de reserva: âncora + aportes − retiradas depois da data da âncora */
@@ -220,6 +222,24 @@ function reservaTotais(d){
     return r2(t);
   };
   return {emergencia:calc("emergencia"), pessoal:calc("pessoal")};
+}
+
+/* Rendimento registrado de um tipo de reserva num mês */
+function rendimentoMes(d, mk, tipo){
+  const m=d.months[mk]; if(!m) return 0;
+  return r2((m.reservas||[]).filter(r=>r.rend&&r.tipo===tipo)
+    .reduce((s,r)=>s+(r.retirada?-r.valor:r.valor),0));
+}
+/* Rendimento total já registrado de um tipo (desde a âncora) */
+function rendimentoTotal(d, tipo){
+  const a=(d.settings.reservaAncora||{})[tipo]||{valor:0,data:null};
+  let t=0;
+  Object.values(d.months||{}).forEach(m=>(m.reservas||[]).forEach(r=>{
+    if(!r.rend||r.tipo!==tipo) return;
+    if(a.data&&r.data&&r.data<a.data) return;
+    t+=r.retirada?-r.valor:r.valor;
+  }));
+  return r2(t);
 }
 
 /* Gastos por categoria de um mês (inclui crédito — é consumo real) */
@@ -639,7 +659,7 @@ function AppInner({session}){
       {menuOpen&&<div className="sidebar-overlay" onClick={()=>setMenuOpen(false)}/>}
       <div className={`sidebar${menuOpen?" open":""}`}>
         <div className="sidebar-header">
-          <div className="logo">Fin<em>Track</em> <span style={{fontSize:9,color:"var(--muted)",fontWeight:400}}>v2.4</span></div>
+          <div className="logo">Fin<em>Track</em> <span style={{fontSize:9,color:"var(--muted)",fontWeight:400}}>v2.5</span></div>
           <div className="sidebar-user">
             <div className="avatar">{(data.settings.name||"U").slice(0,2).toUpperCase()}</div>
             <div style={{minWidth:0}}>
@@ -668,7 +688,7 @@ function AppInner({session}){
         <div className="topbar">
           <div style={{display:"flex",alignItems:"center",gap:10}}>
             <button className="hamburger" onClick={()=>setMenuOpen(o=>!o)}><span/><span/><span/></button>
-            <div className="logo">Fin<em>Track</em> <span style={{fontSize:9,color:"var(--muted)",fontWeight:400}}>v2.4</span></div>
+            <div className="logo">Fin<em>Track</em> <span style={{fontSize:9,color:"var(--muted)",fontWeight:400}}>v2.5</span></div>
           </div>
           <div style={{display:"flex",alignItems:"center",gap:8}}>
             {saving&&<span title="Salvando…" style={{fontSize:13}}>☁️</span>}
@@ -1335,6 +1355,32 @@ function PageReservas({data,mutate,mes,rt,setModal}){
   const m=data.months[mes]||novoMes();
   const [corrigindo,setCorrigindo]=useState(null); /* "emergencia"|"pessoal" */
   const [valor,setValor]=useState("");
+  const [fechando,setFechando]=useState(null);
+  const [saldoReal,setSaldoReal]=useState("");
+
+  const esperado=(tipo)=>tipo==="emergencia"?rt.emergencia:rt.pessoal;
+  const jaFechado=(tipo)=>(m.reservas||[]).some(r=>r.rend&&r.tipo===tipo);
+  const difRend=fechando?r2(parseVal(saldoReal)-esperado(fechando)):0;
+  function registrarRendimento(tipo){
+    const real=parseVal(saldoReal);
+    if(!real) return;
+    const dif=r2(real-esperado(tipo));
+    if(dif===0){setFechando(null);setSaldoReal("");return;}
+    mutate(d=>{
+      const mm=ensureMonth(d,mes);
+      mm.reservas.unshift({id:uid(),tipo,nome:dif>=0?"Rendimento do mês":"Ajuste (perda/taxa)",
+        valor:Math.abs(dif),data:hoje(),accId:"",retirada:dif<0,rend:true,ts:Date.now()});
+      return d;
+    });
+    setFechando(null);setSaldoReal("");
+  }
+  const rendMesE=rendimentoMes(data,mes,"emergencia");
+  const rendMesP=rendimentoMes(data,mes,"pessoal");
+  const rendTotE=rendimentoTotal(data,"emergencia");
+  const rendTotP=rendimentoTotal(data,"pessoal");
+  const histRend=Array.from({length:6},(_,i)=>{const k=shiftKey(mes,-(5-i));
+    return {k,e:rendimentoMes(data,k,"emergencia"),p:rendimentoMes(data,k,"pessoal")};})
+    .filter(x=>x.e!==0||x.p!==0);
   function corrigir(tipo){
     const v=parseVal(valor);
     mutate(d=>{d.settings.reservaAncora[tipo]={valor:v,data:hoje()};return d;});
@@ -1365,6 +1411,62 @@ function PageReservas({data,mutate,mes,rt,setModal}){
           </div>
         )}
       </div>
+      <div className="card" style={{background:"rgba(34,197,94,.05)",borderColor:"rgba(34,197,94,.25)"}}>
+        <div className="st" style={{marginBottom:6}}>📈 Rendimento de {labelKey(mes)}</div>
+        <div style={{fontSize:11,color:"var(--muted)",lineHeight:1.6,marginBottom:10}}>
+          Uma vez por mês, abra o app do banco, veja quanto tem na caixinha e digite aqui. O app calcula sozinho o que rendeu e guarda o histórico, sem misturar com os seus aportes.
+        </div>
+        {[["emergencia","🛡️ Reserva de emergência",rendMesE,rendTotE],["pessoal","🎯 "+data.settings.personalGoalName,rendMesP,rendTotP]].map(([tipo,lb,rMes,rTot])=>(
+          <div key={tipo} style={{marginBottom:10,paddingBottom:10,borderBottom:"1px solid var(--border)"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+              <span style={{fontSize:11,fontWeight:600}}>{lb}</span>
+              <span style={{fontSize:12,fontWeight:800,color:rMes>0?"var(--green)":rMes<0?"var(--red)":"var(--muted)"}}>
+                {rMes>0?"+":""}{rMes!==0?fmt(rMes):"— não registrado"}
+              </span>
+            </div>
+            {rTot!==0&&<div style={{fontSize:10,color:"var(--muted)",marginBottom:6}}>Rendimento acumulado: <strong style={{color:"var(--green)"}}>{fmt(rTot)}</strong></div>}
+            {fechando===tipo?(
+              <div>
+                <div style={{fontSize:10,color:"var(--muted)",marginBottom:5}}>
+                  O app calcula <strong style={{color:"var(--text)"}}>{fmt(esperado(tipo))}</strong>. Quanto tem de verdade hoje?
+                </div>
+                <div style={{display:"flex",gap:6}}>
+                  <input className="fi" inputMode="decimal" placeholder="Ex: 2.537,80" value={saldoReal} onChange={e=>setSaldoReal(e.target.value)} autoFocus style={{flex:1}}/>
+                  <button className="btn-green" onClick={()=>registrarRendimento(tipo)} disabled={!parseVal(saldoReal)}>Registrar</button>
+                  <button className="btn-ghost" onClick={()=>{setFechando(null);setSaldoReal("");}}>✕</button>
+                </div>
+                {!!parseVal(saldoReal)&&(
+                  <div className="hint" style={{marginTop:7}}>
+                    {difRend>0?<>Vai registrar <strong style={{color:"var(--green)"}}>+{fmt(difRend)}</strong> como rendimento do mês.</>
+                     :difRend<0?<>Diferença negativa de <strong style={{color:"var(--red)"}}>{fmt(Math.abs(difRend))}</strong>. Vai registrar como perda/taxa. Se na verdade foi uma retirada sua, cancele e lance como retirada.</>
+                     :<>Bate exatamente com o esperado. Nada a registrar.</>}
+                  </div>
+                )}
+              </div>
+            ):(
+              <button className="btn-ghost" style={{width:"100%",fontSize:10,color:"var(--green)",borderColor:"rgba(34,197,94,.3)"}}
+                onClick={()=>{setFechando(tipo);setSaldoReal("");}}>
+                {jaFechado(tipo)?"🔄 Registrar de novo":"📈 Informar saldo real e calcular rendimento"}
+              </button>
+            )}
+          </div>
+        ))}
+        {histRend.length>0&&(
+          <div>
+            <div className="st" style={{marginBottom:6}}>Histórico</div>
+            {histRend.map(h=>(
+              <div key={h.k} style={{display:"flex",justifyContent:"space-between",fontSize:10,marginBottom:3}}>
+                <span style={{color:"var(--muted)"}}>{labelKey(h.k)}</span>
+                <span style={{display:"flex",gap:8}}>
+                  {h.e!==0&&<span style={{color:h.e>0?"var(--green)":"var(--red)"}}>🛡️ {h.e>0?"+":""}{fmt(h.e)}</span>}
+                  {h.p!==0&&<span style={{color:h.p>0?"var(--green)":"var(--red)"}}>🎯 {h.p>0?"+":""}{fmt(h.p)}</span>}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
         <button className="btn-accent" onClick={()=>setModal({type:"reserva"})}>+ Aporte</button>
         <button className="btn-ghost" style={{color:"var(--gold)",borderColor:"rgba(245,158,11,.3)"}} onClick={()=>setModal({type:"reserva",retirada:true})}>📤 Retirada</button>
@@ -1375,18 +1477,18 @@ function PageReservas({data,mutate,mes,rt,setModal}){
             const acc=contaById(data,r.accId);
             return (
               <div key={r.id} className="txi" style={{cursor:"default"}}>
-                <div className="txicon" style={{background:r.retirada?"rgba(239,68,68,.15)":"rgba(245,158,11,.15)"}}>{r.retirada?"📤":"💰"}</div>
+                <div className="txicon" style={{background:r.rend?"rgba(34,197,94,.15)":r.retirada?"rgba(239,68,68,.15)":"rgba(245,158,11,.15)"}}>{r.rend?"📈":r.retirada?"📤":"💰"}</div>
                 <div className="txinfo">
                   <div className="txd">{r.nome||({emergencia:"Reserva de emergência",pessoal:data.settings.personalGoalName,outro:"Investimento"})[r.tipo]}</div>
-                  <div className="txm"><span>{dmy(r.data)}</span><span>{({emergencia:"🛡️ Emergência",pessoal:"🎯 Meta",outro:"Outro"})[r.tipo]}</span>{acc&&<span className="chip" style={{background:acc.cor+"30",color:acc.cor}}>{acc.nome}</span>}</div>
+                  <div className="txm"><span>{dmy(r.data)}</span><span>{({emergencia:"🛡️ Emergência",pessoal:"🎯 Meta",outro:"Outro"})[r.tipo]}</span>{r.rend&&<span className="chip" style={{background:"rgba(34,197,94,.15)",color:"var(--green)"}}>rendimento</span>}{acc&&<span className="chip" style={{background:acc.cor+"30",color:acc.cor}}>{acc.nome}</span>}</div>
                 </div>
-                <div className="txa" style={{color:r.retirada?"var(--red)":"var(--gold)"}}>{r.retirada?"-":"+"}{fmt(r.valor)}</div>
+                <div className="txa" style={{color:r.retirada?"var(--red)":r.rend?"var(--green)":"var(--gold)"}}>{r.retirada?"-":"+"}{fmt(r.valor)}</div>
                 <button className="tdel" onClick={()=>del(r.id)}>✕</button>
               </div>
             );
           })}
         </div>}
-      <div className="hint">Aporte sai do saldo da conta escolhida; retirada volta para ela. Sem lançamentos duplicados — o saldo da Carteira e o total da reserva são derivados do mesmo registro.</div>
+      <div className="hint">Aporte sai do saldo da conta escolhida; retirada volta para ela. <strong style={{color:"var(--green)"}}>Rendimento não mexe em conta nenhuma</strong>: ele só aumenta a reserva, porque o dinheiro já estava lá. Por isso também não entra como "saída" no seu mês.</div>
     </div>
   );
 }
@@ -2450,8 +2552,11 @@ function gerarRelatorio(d, mes){
   push(`- **Total nas contas: ${fmt(r2(tot))}**`);
   push();
   push(`### Reservas`);
-  push(`- 🛡️ Emergência: **${fmt(rt.emergencia)}** de ${fmt(d.settings.emergencyGoal||0)} (${d.settings.emergencyGoal>0?((rt.emergencia/d.settings.emergencyGoal)*100).toFixed(0):"0"}%)`);
-  push(`- 🎯 ${d.settings.personalGoalName}: **${fmt(rt.pessoal)}** de ${fmt(d.settings.personalGoalValue||0)}`);
+  const rtE=rendimentoTotal(d,"emergencia"), rtP=rendimentoTotal(d,"pessoal");
+  push(`- 🛡️ Emergência: **${fmt(rt.emergencia)}** de ${fmt(d.settings.emergencyGoal||0)} (${d.settings.emergencyGoal>0?((rt.emergencia/d.settings.emergencyGoal)*100).toFixed(0):"0"}%)${rtE!==0?` · rendimento acumulado ${fmt(rtE)}`:""}`);
+  push(`- 🎯 ${d.settings.personalGoalName}: **${fmt(rt.pessoal)}** de ${fmt(d.settings.personalGoalValue||0)}${rtP!==0?` · rendimento acumulado ${fmt(rtP)}`:""}`);
+  const rmE=rendimentoMes(d,mes,"emergencia"), rmP=rendimentoMes(d,mes,"pessoal");
+  if(rmE!==0||rmP!==0) push(`- Rendimento em ${labelKey(mes)}: ${rmE!==0?`🛡️ ${fmt(rmE)}`:""}${rmE!==0&&rmP!==0?" · ":""}${rmP!==0?`🎯 ${fmt(rmP)}`:""}`);
   push();
   const ativas=d.dividas.filter(x=>!x.quitada);
   push(`### Dívidas ativas (${ativas.length})`);
@@ -2534,7 +2639,7 @@ function gerarRelatorio(d, mes){
   const reservasM=(m.reservas||[]);
   if(reservasM.length){
     push(`### Reservas no mês`);
-    ord(reservasM).forEach(r=>push(`- ${pd(r.data)} · ${r.retirada?"Retirada":"Aporte"} · ${({emergencia:"🛡️ Emergência",pessoal:"🎯 "+d.settings.personalGoalName,outro:"Outro"})[r.tipo]}${r.nome?` · ${r.nome}`:""} · ${acc(r.accId)} · ${r.retirada?"-":"+"}${fmt(r.valor)}`));
+    ord(reservasM).forEach(r=>push(`- ${pd(r.data)} · ${r.rend?(r.retirada?"Perda/taxa":"Rendimento"):(r.retirada?"Retirada":"Aporte")} · ${({emergencia:"🛡️ Emergência",pessoal:"🎯 "+d.settings.personalGoalName,outro:"Outro"})[r.tipo]}${r.nome?` · ${r.nome}`:""} · ${acc(r.accId)} · ${r.retirada?"-":"+"}${fmt(r.valor)}`));
     push();
   }
 
@@ -2559,13 +2664,13 @@ function gerarRelatorio(d, mes){
   const ano=mes.split("-")[0];
   push(`## 3. Resumo do ano ${ano}`);
   push();
-  push(`| Mês | Entradas | Débito/PIX | Faturas pagas | Aportes | Sobra |`);
-  push(`|---|---|---|---|---|---|`);
+  push(`| Mês | Entradas | Débito/PIX | Faturas pagas | Aportes | Rendimento | Sobra |`);
+  push(`|---|---|---|---|---|---|---|`);
   for(let i=1;i<=12;i++){
     const k=`${ano}-${String(i).padStart(2,"0")}`;
     const r=metricsMes(d,k);
-    if(!r.entradas&&!r.saidas&&!r.gastoCredito) continue;
-    push(`| ${MESES_C[i-1]}${k===mes?" ◀":""} | ${fmt(r.entradas)} | ${fmt(r.gastosDeb)} | ${fmt(r.faturasPagas)} | ${fmt(r.aportes)} | ${fmt(r.sobra)} |`);
+    if(!r.entradas&&!r.saidas&&!r.gastoCredito&&!r.rendimentos) continue;
+    push(`| ${MESES_C[i-1]}${k===mes?" ◀":""} | ${fmt(r.entradas)} | ${fmt(r.gastosDeb)} | ${fmt(r.faturasPagas)} | ${fmt(r.aportes)} | ${r.rendimentos?fmt(r.rendimentos):"—"} | ${fmt(r.sobra)} |`);
   }
   push();
   push(`---`);
