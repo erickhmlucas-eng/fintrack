@@ -114,6 +114,7 @@ function migrate(d){
     const m=ensureMonth(d,mk);
     /* fixa paga sem gasto vinculado → cria o gasto (fonte única de verdade é o gasto) */
     m.fixas.forEach(f=>{
+      if(!f.serie) f.serie = (f.nome||"").trim().toLowerCase() || f.id;
       if(f.pago&&!f.gastoId){
         const gid=uid();
         m.gastos.unshift({id:gid,catId:f.catId||d.cats[d.cats.length-1].id,descricao:f.nome,valor:f.valor||0,forma:"pix",accId:f.accIdPago||"",data:f.dataPago||hoje(),parcela:null,fixaId:f.id});
@@ -137,6 +138,24 @@ const catById=(d,id)=>(d.cats||[]).find(c=>c.id===id)||{nome:"—",icon:"📌",c
 function faturaDe(d, mk, cardId){
   const m=d.months[mk]; if(!m) return 0;
   return (m.gastos||[]).filter(g=>g.forma==="credito"&&g.accId===cardId).reduce((s,g)=>s+g.valor,0);
+}
+function dataVencimento(acc, mk){
+  const venc=acc?.vencimento||15, fech=acc?.fechamento||1;
+  let [y,m]=mk.split("-").map(Number);
+  if(venc<fech){ m++; if(m>12){m=1;y++;} }
+  return `${y}-${String(m).padStart(2,"0")}-${String(Math.min(venc,28)).padStart(2,"0")}`;
+}
+function faturasAnterioresAbertas(d, mk, lookback=3){
+  const out=[];
+  d.accounts.filter(a=>a.temCartao).forEach(a=>{
+    for(let i=1;i<=lookback;i++){
+      const k=shiftKey(mk,-i), m=d.months[k]; if(!m) continue;
+      const v=faturaDe(d,k,a.id);
+      if(!v||(m.faturasPagas||{})[a.id]) continue;
+      out.push({mk:k,acc:a,valor:v});
+    }
+  });
+  return out;
 }
 function gastosCartao(d, mk, cardId){
   const m=d.months[mk]; if(!m) return [];
@@ -359,10 +378,11 @@ function sugerirCat(desc, mem, def){
    ajustes de saldo, entradas automáticas de retirada, marcadores de fatura. */
 async function migrarLegado(){
   const {data:{user}}=await supabase.auth.getUser();
-  if(!user) return null;
+  if(!user) throw new Error("Sem usuário");
   const {data:rows,error}=await supabase.from("user_data").select("key,value")
     .eq("user_id",user.id).like("key","fintrack:%:v9");
-  if(error||!rows||!rows.length) return null;
+  if(error) throw error;
+  if(!rows||!rows.length) return null;
 
   const old={months:{},credits:{},settings:null,debts:[]};
   rows.forEach(r=>{
@@ -483,11 +503,13 @@ async function migrarLegado(){
 /* ─── Persistência ────────────────────────────────────────────────────────── */
 async function dbLoad(){
   try{
-    const {data:{user}}=await supabase.auth.getUser();
-    if(!user) return null;
-    const {data}=await supabase.from("user_data").select("value").eq("key",DATA_KEY).eq("user_id",user.id).single();
-    return data?.value??null;
-  }catch(_){ return null; }
+    const {data:{user},error:ue}=await supabase.auth.getUser();
+    if(ue||!user) return {ok:false,erro:ue?.message||"Sem usuário"};
+    const {data,error}=await supabase.from("user_data").select("value")
+      .eq("key",DATA_KEY).eq("user_id",user.id).maybeSingle();
+    if(error) return {ok:false,erro:error.message};
+    return {ok:true,value:data?.value??null};
+  }catch(e){ return {ok:false,erro:e.message||"Falha de rede"}; }
 }
 async function dbSave(blob){
   try{
@@ -636,18 +658,26 @@ function AppInner({session}){
   const [saving,setSaving]=useState(false);
   const [toast,setToast]=useState(null);
   const [modal,setModal]=useState(null);
+  const [erroCarga,setErroCarga]=useState(null);
+  const [tentativa,setTentativa]=useState(0);
   const saveChain=useRef(Promise.resolve());
 
   /* Carga: blob novo; se não existir, tenta migrar do legado; senão seed */
   useEffect(()=>{(async()=>{
-    let d=await dbLoad();
-    if(d){ setData(migrate(d)); setLoading(false); return; }
+    setLoading(true); setErroCarga(null);
+    const r=await dbLoad();
+    if(!r.ok){ setErroCarga(r.erro); setLoading(false); return; }
+    if(r.value){ setData(migrate(r.value)); setLoading(false); return; }
     setMigrando(true);
-    d=await migrarLegado();
-    if(!d) d=seedData();
-    await dbSave(d);
-    setData(d); setMigrando(false); setLoading(false);
-  })();},[]);
+    try{
+      let d=await migrarLegado();
+      if(!d) d=seedData();
+      const ok=await dbSave(d);
+      if(!ok) throw new Error("Não consegui salvar os dados iniciais");
+      setData(d);
+    }catch(e){ setErroCarga(e.message||"Falha ao migrar"); }
+    setMigrando(false); setLoading(false);
+  })();},[tentativa]);
 
   /* mutate: ÚNICO caminho de alteração. Clona, altera, salva o bloco inteiro.
      Salvamentos encadeados em fila — nunca dois uploads simultâneos. */
@@ -663,9 +693,24 @@ function AppInner({session}){
     });
   }
 
-  useEffect(()=>{ if(data&&!data.months[mes]) mutate(d=>{criarMesComFixas(d,mes);return d;}); },[mes,data]);
+  useEffect(()=>{
+    if(!data) return;
+    if(!data.months[mes] || (mes>=mesAtualKey() && fixasFaltando(data,mes).length>0))
+      mutate(d=>{criarMesComFixas(d,mes);return d;});
+  },[mes,data]);
 
   const mem=useMemo(()=>data?memoriaCategorias(data):{},[data]);
+
+  if(erroCarga) return (
+    <div style={{minHeight:"100vh",background:"#09090f",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:12,padding:24,textAlign:"center",color:"#f0f0ff",fontFamily:"sans-serif"}}>
+      <div style={{fontSize:30}}>⚠️</div>
+      <div style={{fontSize:15,fontWeight:700}}>Não consegui carregar seus dados</div>
+      <div style={{fontSize:12,color:"#7070a0",maxWidth:320,lineHeight:1.6}}>
+        Seus dados não foram alterados. Pode ser conexão ou o projeto do Supabase pausado.<br/><span style={{opacity:.7}}>({erroCarga})</span>
+      </div>
+      <button onClick={()=>setTentativa(t=>t+1)} style={{background:"#6366f1",color:"#fff",border:"none",borderRadius:11,padding:"11px 22px",fontWeight:700,cursor:"pointer"}}>Tentar de novo</button>
+    </div>
+  );
 
   if(loading||!data) return (
     <div style={{minHeight:"100vh",background:"#09090f",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:10,color:"#7070a0",fontFamily:"sans-serif",fontSize:14}}>
@@ -762,6 +807,8 @@ function AppInner({session}){
 /* ════════════════════════════ Página: Resumo ════════════════════════════ */
 function PageResumo({data,mutate,mes,met,rt,totalContas,alerts,setModal,setPage}){
   const cards=data.accounts.filter(a=>a.temCartao);
+  const antAbertas=faturasAnterioresAbertas(data,mes).reduce((s,f)=>s+f.valor,0);
+  const emAberto=met.comprometido+antAbertas;
   const catTot=gastosPorCat(data,mes);
   const catData=Object.entries(catTot).map(([id,v])=>({cat:catById(data,id),id,v,budget:data.settings.catBudgets[id]||0}))
     .sort((a,b)=>b.v-a.v);
@@ -803,9 +850,9 @@ function PageResumo({data,mutate,mes,met,rt,totalContas,alerts,setModal,setPage}
           <div className="mc4-v" style={{color:totalContas>=0?"var(--green)":"var(--red)"}}>{fmt(totalContas)}</div>
           <div className="mc4-s">Saldo real · toque para ver</div>
         </div>
-        <div className="mc4" onClick={()=>setPage("apagar")} style={{cursor:"pointer",borderColor:met.comprometido>0?"rgba(239,68,68,.3)":"var(--border)"}}>
+        <div className="mc4" onClick={()=>setPage("apagar")} style={{cursor:"pointer",borderColor:emAberto>0?"rgba(239,68,68,.3)":"var(--border)"}}>
           <div className="mc4-l">💳 Faturas em aberto</div>
-          <div className="mc4-v" style={{color:met.comprometido>0?"var(--red)":"var(--muted)"}}>{fmt(met.comprometido)}</div>
+          <div className="mc4-v" style={{color:emAberto>0?"var(--red)":"var(--muted)"}}>{fmt(emAberto)}</div>
           <div className="mc4-s">Comprometido no crédito</div>
         </div>
         <div className="mc4">
@@ -1056,23 +1103,22 @@ function PageAPagar({data,mutate,mes,setModal}){
   const dividasMes=dividasTodas.filter(x=>!x.noCartao);       /* precisam ser marcadas */
   const dividasCartao=dividasTodas.filter(x=>x.noCartao);     /* já estão dentro da fatura */
 
+  const anteriores=faturasAnterioresAbertas(data,mes);
   const totalPend=faturas.filter(f=>!f.paga).reduce((s,f)=>s+f.valor,0)
     +fixasPend.reduce((s,f)=>s+(f.valor||0),0)
-    +dividasMes.filter(x=>!x.paga).reduce((s,x)=>s+x.dv.valorParcela,0);   /* cartão não soma: já está no valor da fatura */
+    +dividasMes.filter(x=>!x.paga).reduce((s,x)=>s+x.dv.valorParcela,0)
+    +anteriores.reduce((s,f)=>s+f.valor,0);   /* cartão não soma: já está no valor da fatura */
 
-  function pagarFatura(cardId){
+  function pagarFatura(cardId, mk=mes){
     if(!selConta) return;
     mutate(d=>{
       const acc2=d.accounts.find(a=>a.id===cardId);
-      const venc=acc2?.vencimento||15, fech=acc2?.fechamento||1;
-      let [yy,mm2]=mes.split("-").map(Number);
-      if(venc<fech){ mm2++; if(mm2>12){mm2=1;yy++;} }
-      const dtPag=`${yy}-${String(mm2).padStart(2,"0")}-${String(Math.min(venc,28)).padStart(2,"0")}`;
-      ensureMonth(d,mes).faturasPagas[cardId]={contaId:selConta,data:dtPag,ts:Date.now()};return d;});
+      ensureMonth(d,mk).faturasPagas[cardId]={contaId:selConta,data:dataVencimento(acc2,mk),ts:Date.now()};
+      return d;});
     setPagando(null);setSelConta("");
   }
-  function desfazerFatura(cardId){
-    mutate(d=>{delete ensureMonth(d,mes).faturasPagas[cardId];return d;});
+  function desfazerFatura(cardId, mk=mes){
+    mutate(d=>{delete ensureMonth(d,mk).faturasPagas[cardId];return d;});
   }
   function pagarFixa(fixaId){
     if(!selConta) return;
@@ -1143,6 +1189,26 @@ function PageAPagar({data,mutate,mes,setModal}){
         </div>
       )}
 
+{anteriores.length>0&&<div className="sep">⚠ Faturas de meses anteriores ainda em aberto</div>}
+{anteriores.map(({mk,acc,valor})=>{
+  const key=`${mk}|${acc.id}`;
+  return (
+    <div key={key} className="card" style={{borderColor:"rgba(239,68,68,.35)"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div>
+          <div style={{display:"flex",alignItems:"center",gap:7,fontSize:13,fontWeight:700}}>
+            <span style={{width:9,height:9,borderRadius:"50%",background:acc.cor}}/>Fatura {acc.nome} · {labelKey(mk)}
+          </div>
+          <div style={{fontSize:10,color:"var(--muted)",marginTop:3}}>Vence {dmy(dataVencimento(acc,mk))}</div>
+        </div>
+        <div style={{fontSize:16,fontWeight:800,color:"var(--red)"}}>{fmt(valor)}</div>
+      </div>
+      {pagando?.tipo==="faturaAnt"&&pagando.id===key
+        ?<SeletorPagto pedirForma={false} onConfirm={()=>pagarFatura(acc.id,mk)}/>
+        :<button className="btn-green" style={{marginTop:8,width:"100%"}} onClick={()=>{setPagando({tipo:"faturaAnt",id:key});setSelConta("");}}>✓ Marcar fatura como paga</button>}
+    </div>
+  );
+})}
       {faturas.length>0&&<div className="sep">Faturas de cartão</div>}
       {faturas.map(({acc,valor,paga})=>(
         <div key={acc.id} className="card">
@@ -1177,7 +1243,9 @@ function PageAPagar({data,mutate,mes,setModal}){
             <div style={{display:"flex",gap:8,alignItems:"center"}}>
               <span style={{fontSize:13,fontWeight:700,color:"var(--red)"}}>{fmt(f.valor)}</span>
               <button className="tdel" onClick={()=>setModal({type:"fixa",edit:f})}>✏️</button>
-              <button className="tdel" onClick={()=>mutate(d=>{const mm=ensureMonth(d,mes);mm.fixas=mm.fixas.filter(x=>x.id!==f.id);return d;})}>✕</button>
+              <button className="tdel" onClick={()=>mutate(d=>{const mm=ensureMonth(d,mes);
+    if(f.recorrente!==false) mm.fixasOcultas=[...(mm.fixasOcultas||[]),f.serie];
+    mm.fixas=mm.fixas.filter(x=>x.id!==f.id);return d;})}>✕</button>
             </div>
           </div>
           {pagando?.tipo==="fixa"&&pagando.id===f.id
@@ -2059,7 +2127,7 @@ function EntryModal({type,modal,data,mutate,mes,mem,onClose}){
         else mm.gastos.unshift(item);
       }
       if(type==="fixa"){
-        const item={id:edit?edit.id:uid(),nome:f.nome,valor,dia:f.dia?parseInt(f.dia):null,
+        const item={id:edit?edit.id:uid(),serie: edit?.serie || uid(),nome:f.nome,valor,dia:f.dia?parseInt(f.dia):null,
           catId:f.catId,recorrente:f.recorrente!==false,pago:edit?.pago||false,gastoId:edit?.gastoId||null};
         if(edit){const i=mm.fixas.findIndex(x=>x.id===edit.id);if(i>=0)mm.fixas[i]=item;
           if(item.gastoId){const g=mm.gastos.find(x=>x.id===item.gastoId);if(g){g.descricao=item.nome;g.valor=valor;}}}
@@ -2569,18 +2637,23 @@ function ImportModal({destino,cardId,data,mutate,mes,onClose,setToast}){
 
 /* ════════════════════════════ Fixas recorrentes ════════════════════════════ */
 /* Ao abrir um mês novo, copia as fixas recorrentes do mês anterior mais próximo */
-function criarMesComFixas(d, mk){
-  if(d.months[mk]) return;
-  const m=ensureMonth(d,mk);
+const chaveFixa = (f) => f.serie;
+function fixasFaltando(d, mk){
+  const m = d.months[mk];
+  const jaTem = new Set((m?.fixas||[]).map(chaveFixa));
+  const ocultas = new Set(m?.fixasOcultas||[]);
   for(let i=1;i<=12;i++){
-    const prev=d.months[shiftKey(mk,-i)];
-    if(!prev) continue;
-    if(shiftKey(mk,-i)>mk) break;
-    (prev.fixas||[]).filter(f=>f.recorrente!==false).forEach(f=>{
-      m.fixas.push({id:uid(),nome:f.nome,valor:f.valor,dia:f.dia||null,catId:f.catId,recorrente:true,pago:false,gastoId:null});
-    });
-    break;
+    const prev = d.months[shiftKey(mk,-i)];
+    if(!prev || !((prev.fixas||[]).length || (prev.fixasOcultas||[]).length)) continue;
+    return (prev.fixas||[]).filter(f => f.recorrente!==false && !jaTem.has(chaveFixa(f)) && !ocultas.has(chaveFixa(f)));
   }
+  return [];
+}
+function criarMesComFixas(d, mk){
+  const m = ensureMonth(d, mk);
+  fixasFaltando(d, mk).forEach(f => m.fixas.push({
+    id:uid(), serie:f.serie, nome:f.nome, valor:f.valor, dia:f.dia||null,
+    catId:f.catId, recorrente:true, pago:false, gastoId:null }));
 }
 
 
