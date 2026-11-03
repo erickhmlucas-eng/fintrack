@@ -230,9 +230,44 @@ const TOOLS = [
   { name: "fintrack_transferir", description: "Transferência entre contas do próprio Erick (não conta como gasto). SEMPRE mostre a tabelinha e espere confirmação.",
     inputSchema: { type: "object", required: ["de", "para", "valor", "confirmado"], properties: {
       de: { type: "string" }, para: { type: "string" }, valor: { type: "number" }, data: { type: "string" }, confirmado: CONF } } },
+  { name: "fintrack_editar_lancamento", description: "Edita um lançamento que já existe (gasto, compra no crédito, transferência ou entrada). Pegue o id em fintrack_extrato. Só muda os campos informados. SEMPRE mostre o antes e o depois ao Erick e espere confirmação.",
+    inputSchema: { type: "object", required: ["id", "confirmado"], properties: {
+      id: { type: "string", description: "id do lançamento, vindo de fintrack_extrato." },
+      descricao: { type: "string" }, fonte: { type: "string", description: "Só para entradas." }, valor: { type: "number", description: "Em reais. Numa compra parcelada vale só para aquela parcela." },
+      categoria: { type: "string" }, conta: { type: "string", description: "Conta de débito, entrada ou origem da transferência. O cartão de uma compra no crédito não muda." },
+      para: { type: "string", description: "Só para transferência: conta de destino." }, forma: { type: "string", enum: FORMAS_DEBITO, description: "Só para gasto de débito." },
+      data: { type: "string", description: "AAAA-MM-DD." }, fatura_mes: { type: "string", description: "AAAA-MM. Só para compra no crédito: muda a fatura em que ela cai." },
+      confirmado: CONF } } },
+  { name: "fintrack_apagar_lancamento", description: "Apaga um lançamento (gasto, crédito, transferência ou entrada). Pegue o id em fintrack_extrato. SEMPRE mostre exatamente o que vai sair e espere confirmação. Parcela de dívida e antecipação não podem ser apagadas por aqui.",
+    inputSchema: { type: "object", required: ["id", "confirmado"], properties: {
+      id: { type: "string" }, grupo: { type: "boolean", description: "true para apagar todas as parcelas da mesma compra parcelada." }, confirmado: CONF } } },
 ];
 
 function mesArg(a) { const mk = a.mes || hoje().slice(0, 7); if (!/^\d{4}-\d{2}$/.test(mk)) throw new Error("Mês inválido. Use AAAA-MM."); return mk; }
+
+/* ─── Editar / apagar ─────────────────────────────────────────────────────── */
+function acharLancamento(d, id) {
+  if (!id) throw new Error("Informe o id do lançamento (veja fintrack_extrato).");
+  for (const [mk, m] of Object.entries(d.months || {})) {
+    let i = (m.gastos || []).findIndex((g) => g.id === id);
+    if (i >= 0) return { mk, m, tipo: "gasto", arr: m.gastos, i, item: m.gastos[i] };
+    i = (m.entradas || []).findIndex((e) => e.id === id);
+    if (i >= 0) return { mk, m, tipo: "entrada", arr: m.entradas, i, item: m.entradas[i] };
+  }
+  throw new Error(`Não achei nenhum lançamento com id "${id}". Use fintrack_extrato para ver os ids.`);
+}
+function bloqueado(item) {
+  if (item.antecip) return "É uma antecipação de dívida. Desfaça pela aba Dívidas do app.";
+  if (item.dividaId && item.forma === "credito") return "Essa parcela é gerenciada pela dívida no cartão. Ajuste pela aba Dívidas do app.";
+  return null;
+}
+function descreverLancamento(d, tipo, it) {
+  const conta = contaById(d, it.accId)?.nome;
+  if (tipo === "entrada") return { fonte: it.fonte, valor: it.valor, conta, data: dmy(it.data) };
+  return { descricao: it.descricao, valor: it.valor, categoria: catById(d, it.catId).nome, conta, forma: it.forma, data: dmy(it.data),
+    parcela: it.parcela ? `${it.parcela.i}/${it.parcela.n}` : undefined, transferencia_para: it.transferParaId ? contaById(d, it.transferParaId)?.nome : undefined };
+}
+const CAMPOS_EDITAVEIS = ["valor", "data", "descricao", "fonte", "categoria", "conta", "para", "forma", "fatura_mes"];
 
 const HANDLERS = {
   async fintrack_cadastros() {
@@ -270,11 +305,11 @@ const HANDLERS = {
   async fintrack_extrato(a) {
     const d = await ler(); const mk = mesArg(a); const m = d.months?.[mk] || novoMes(); const tipo = a.tipo || "todos";
     const nomeConta = (id) => contaById(d, id)?.nome || "—";
-    const gasto = (g) => ({ data: dmy(g.data), descricao: g.descricao, valor: g.valor, categoria: catById(d, g.catId).nome, conta: nomeConta(g.accId), forma: g.forma, parcela: g.parcela ? `${g.parcela.i}/${g.parcela.n}` : undefined, transferencia_para: g.transferParaId ? nomeConta(g.transferParaId) : undefined });
+    const gasto = (g) => ({ id: g.id, data: dmy(g.data), descricao: g.descricao, valor: g.valor, categoria: catById(d, g.catId).nome, conta: nomeConta(g.accId), forma: g.forma, parcela: g.parcela ? `${g.parcela.i}/${g.parcela.n}` : undefined, transferencia_para: g.transferParaId ? nomeConta(g.transferParaId) : undefined });
     const out = { mes: labelKey(mk) };
     if (tipo === "todos" || tipo === "gastos") out.gastos = (m.gastos || []).filter((g) => g.forma !== "credito").map(gasto);
     if (tipo === "todos" || tipo === "credito") out.credito = (m.gastos || []).filter((g) => g.forma === "credito").map(gasto);
-    if (tipo === "todos" || tipo === "entradas") out.entradas = (m.entradas || []).map((e) => ({ data: dmy(e.data), fonte: e.fonte, valor: e.valor, conta: nomeConta(e.accId) }));
+    if (tipo === "todos" || tipo === "entradas") out.entradas = (m.entradas || []).map((e) => ({ id: e.id, data: dmy(e.data), fonte: e.fonte, valor: e.valor, conta: nomeConta(e.accId) }));
     return out;
   },
 
@@ -323,6 +358,83 @@ const HANDLERS = {
     });
   },
 
+  async fintrack_editar_lancamento(a) {
+    exigirConfirmacao(a);
+    if (!CAMPOS_EDITAVEIS.some((k) => a[k] !== undefined)) throw new Error("Informe o que mudar (valor, data, descricao, categoria, conta, forma...).");
+    return mutar((d) => {
+      const { mk, tipo, arr, i, item } = acharLancamento(d, a.id);
+      const bl = bloqueado(item); if (bl) throw new Error(bl);
+      const credito = tipo === "gasto" && item.forma === "credito";
+      const transf = tipo === "gasto" && !!item.transferParaId;
+      const antes = descreverLancamento(d, tipo, item);
+      const novo = { ...item };
+      if (a.valor !== undefined) novo.valor = valorValido(a.valor);
+      if (a.data !== undefined) novo.data = dataValida(a.data);
+      if (a.descricao !== undefined) { if (tipo === "entrada") throw new Error("Para entrada use o campo fonte."); novo.descricao = String(a.descricao).trim() || item.descricao; }
+      if (a.fonte !== undefined) { if (tipo !== "entrada") throw new Error("fonte só vale para entrada. Use descricao."); novo.fonte = String(a.fonte).trim() || item.fonte; }
+      if (a.categoria !== undefined) { if (tipo === "entrada") throw new Error("Entrada não tem categoria."); novo.catId = achar(d.cats, a.categoria, "a categoria").id; }
+      if (a.conta !== undefined) {
+        if (credito) throw new Error("O cartão de uma compra no crédito não muda. Apague e lance de novo no cartão certo.");
+        novo.accId = achar(d.accounts, a.conta, "a conta").id;
+      }
+      if (a.para !== undefined) { if (!transf) throw new Error("para só vale para transferência."); novo.transferParaId = achar(d.accounts, a.para, "a conta de destino").id; }
+      if (a.forma !== undefined) {
+        if (tipo === "entrada" || credito || transf) throw new Error("forma só vale para gasto de débito.");
+        if (!FORMAS_DEBITO.includes(a.forma)) throw new Error(`Forma inválida. Use: ${FORMAS_DEBITO.join(", ")}.`);
+        novo.forma = a.forma;
+      }
+      if (a.fatura_mes !== undefined && !credito) throw new Error("fatura_mes só vale para compra no crédito.");
+      if (transf && novo.transferParaId === novo.accId) throw new Error("Origem e destino são a mesma conta.");
+
+      let destino = mk;
+      if (credito && a.fatura_mes !== undefined) {
+        if (!/^\d{4}-\d{2}$/.test(a.fatura_mes)) throw new Error("fatura_mes inválido. Use AAAA-MM.");
+        destino = a.fatura_mes;
+      } else if (!credito && a.data !== undefined && novo.data.slice(0, 7) !== mk) destino = novo.data.slice(0, 7);
+
+      if (destino === mk) arr[i] = novo;
+      else { arr.splice(i, 1); const mm = ensureMonth(d, destino); (tipo === "entrada" ? mm.entradas : mm.gastos).unshift(novo); }
+
+      const depois = descreverLancamento(d, tipo, novo);
+      if (JSON.stringify(antes) === JSON.stringify(depois) && destino === mk) throw new Error("Nada mudou: os valores informados são iguais aos atuais.");
+      const out = { editado: a.id, antes, depois };
+      if (destino !== mk) out.movido_para = credito ? `fatura de ${labelKey(destino)}` : labelKey(destino);
+      if (credito) out.fatura_do_mes_agora = r2(faturaDe(d, destino, novo.accId));
+      else { out.saldo_da_conta_agora = saldoConta(d, novo.accId); if (transf) out.saldo_destino_agora = saldoConta(d, novo.transferParaId); }
+      return out;
+    });
+  },
+
+  async fintrack_apagar_lancamento(a) {
+    exigirConfirmacao(a);
+    return mutar((d) => {
+      const { mk, m, tipo, arr, i, item } = acharLancamento(d, a.id);
+      const bl = bloqueado(item); if (bl) throw new Error(bl);
+      const credito = tipo === "gasto" && item.forma === "credito";
+      const removidos = [];
+      const grupo = item.parcela?.grupo;
+      if (tipo === "gasto" && a.grupo && grupo) {
+        Object.values(d.months || {}).forEach((mm) => {
+          mm.gastos = (mm.gastos || []).filter((g) => {
+            if (g.parcela?.grupo === grupo && g.accId === item.accId) { removidos.push(g); return false; }
+            return true;
+          });
+        });
+      } else {
+        arr.splice(i, 1); removidos.push(item);
+        if (tipo === "gasto" && item.fixaId) { const f = (m.fixas || []).find((x) => x.id === item.fixaId); if (f) { f.pago = false; f.gastoId = null; } }
+        if (tipo === "gasto" && item.dividaId) { const dv = (d.dividas || []).find((x) => x.id === item.dividaId); if (dv) { dv.pagos = (dv.pagos || []).filter((k) => k !== mk); dv.quitada = false; } }
+      }
+      const out = { apagado: removidos.map((r) => ({ id: r.id, ...descreverLancamento(d, tipo, r) })) };
+      if (credito) out.fatura_do_mes_agora = r2(faturaDe(d, mk, item.accId));
+      else out.saldo_da_conta_agora = saldoConta(d, item.accId);
+      if (tipo === "gasto" && grupo && !a.grupo) out.aviso = "Essa compra é parcelada e as outras parcelas continuam lançadas. Use grupo=true para apagar todas.";
+      if (tipo === "gasto" && item.fixaId) out.aviso = "A despesa fixa ligada a esse pagamento voltou para pendente.";
+      if (tipo === "gasto" && item.dividaId) out.aviso = "A parcela da dívida voltou para em aberto.";
+      return out;
+    });
+  },
+
   async fintrack_transferir(a) {
     exigirConfirmacao(a);
     const valor = valorValido(a.valor); const data = dataValida(a.data);
@@ -349,7 +461,7 @@ async function tratar(msg) {
     const pedido = params?.protocolVersion;
     return ok({ protocolVersion: PROTOCOLOS.includes(pedido) ? pedido : PROTOCOLOS[0], capabilities: { tools: {} },
       serverInfo: { name: "fintrack", version: "1.0.0" },
-      instructions: "Antes de qualquer lançamento, mostre uma tabela (Campo | Valor) e pergunte \"posso gravar assim?\". Só grave com confirmado=true depois do \"pode lançar\"." });
+      instructions: "Antes de qualquer lançamento, edição ou exclusão, mostre uma tabela (Campo | Valor) e pergunte \"posso gravar assim?\". Só grave com confirmado=true depois do \"pode lançar\"." });
   }
   if (method === "ping") return ok({});
   if (method === "tools/list") return ok({ tools: TOOLS });

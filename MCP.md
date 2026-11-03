@@ -12,6 +12,10 @@ Deixa o Claude (conversa de consultoria) ler seus números e lançar no app, **s
 | `fintrack_lancar_credito` | compra no cartão, com parcelas; cai na fatura certa |
 | `fintrack_lancar_entrada` | salário, freela, reembolso |
 | `fintrack_transferir` | entre suas contas |
+| `fintrack_editar_lancamento` | muda valor, data, categoria, conta, forma ou fatura de um lançamento (id vem do extrato) |
+| `fintrack_apagar_lancamento` | apaga um lançamento (ou todas as parcelas de uma compra parcelada) |
+
+Editar e apagar mostram o antes/depois e exigem confirmação. Parcela de dívida no cartão e antecipação não são alteradas por aqui (use a aba Dívidas). Apagar um pagamento de fixa ou de dívida reabre a fixa/parcela, como no app.
 
 Toda ferramenta de escrita exige `confirmado=true`, e o Claude só manda isso depois de mostrar a tabelinha e você confirmar. Lançamentos idênticos são barrados (`forcar=true` libera).
 

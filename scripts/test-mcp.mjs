@@ -19,6 +19,7 @@ globalThis.__FINTRACK_TEST_STORE = {
 };
 const { default: handler } = await import("../api/mcp.js");
 
+const r2 = (v) => Math.round(v * 100) / 100;
 const chamar = async (corpo, k = process.env.MCP_SECRET, via = "query") => {
   const r = { code: 0, body: undefined, headers: {} };
   const res = { setHeader(n, v) { r.headers[n] = v; }, status(c) { r.code = c; return res; }, json(b) { r.body = b; return res; }, end() { return res; } };
@@ -34,7 +35,7 @@ const tool = async (name, args) => {
 // protocolo
 assert.equal((await chamar({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18" } })).body.result.protocolVersion, "2025-06-18");
 assert.equal((await chamar({ jsonrpc: "2.0", method: "notifications/initialized" })).code, 202);
-assert.equal((await chamar({ jsonrpc: "2.0", id: 2, method: "tools/list" })).body.result.tools.length, 7);
+assert.equal((await chamar({ jsonrpc: "2.0", id: 2, method: "tools/list" })).body.result.tools.length, 9);
 // autenticação
 assert.equal((await chamar({ jsonrpc: "2.0", id: 1, method: "ping" }, "errado")).code, 401);
 assert.equal((await chamar({ jsonrpc: "2.0", id: 1, method: "ping" }, process.env.MCP_SECRET, "header")).code, 200);
@@ -83,4 +84,68 @@ const store = globalThis.__FINTRACK_TEST_STORE; const orig = store.load; let pri
 store.load = async function () { const r = await orig(); if (primeira) { primeira = false; versao++; } return r; };
 t = await tool("fintrack_lancar_entrada", { fonte: "Teste", valor: 10, conta: "C6", data: "2026-10-31", confirmado: true });
 assert.ok(!t.erro, t.texto);
+// ─── editar e apagar ───
+const saldoC6 = async () => JSON.parse((await tool("fintrack_resumo", { mes: "2026-10" })).texto).contas.find((c) => c.nome === "C6").saldo;
+t = await tool("fintrack_extrato", { mes: "2026-10", tipo: "gastos" });
+const gMercado = JSON.parse(t.texto).gastos.find((g) => g.descricao === "Mercado");
+assert.ok(gMercado.id);
+// sem confirmação / sem campos / id inexistente
+assert.ok((await tool("fintrack_editar_lancamento", { id: gMercado.id, valor: 90 })).texto.includes("confirmação"));
+assert.ok((await tool("fintrack_editar_lancamento", { id: gMercado.id, confirmado: true })).texto.includes("Informe o que mudar"));
+assert.ok((await tool("fintrack_editar_lancamento", { id: "nao-existe", valor: 1, confirmado: true })).texto.includes("Não achei"));
+// editar valor e categoria
+let s0 = await saldoC6();
+t = await tool("fintrack_editar_lancamento", { id: gMercado.id, valor: 90.01, categoria: "gasolina", confirmado: true });
+assert.ok(!t.erro, t.texto); j = JSON.parse(t.texto);
+assert.equal(j.antes.valor, 85.01); assert.equal(j.depois.valor, 90.01); assert.equal(j.depois.categoria, "Gasolina");
+assert.equal(r2(s0 - (await saldoC6())), 5);
+// mesma coisa de novo: nada mudou
+assert.ok((await tool("fintrack_editar_lancamento", { id: gMercado.id, valor: 90.01, confirmado: true })).texto.includes("Nada mudou"));
+// mudar a data para outro mês move o lançamento
+t = await tool("fintrack_editar_lancamento", { id: gMercado.id, data: "2026-11-02", confirmado: true });
+j = JSON.parse(t.texto); assert.ok(j.movido_para.includes("Novembro"));
+assert.ok(blob.months["2026-11"].gastos.some((g) => g.id === gMercado.id));
+assert.ok(!blob.months["2026-10"].gastos.some((g) => g.id === gMercado.id));
+// crédito: cartão não muda; fatura_mes move
+t = await tool("fintrack_extrato", { mes: "2026-11", tipo: "credito" });
+const cred = JSON.parse(t.texto).credito;
+const tenis = cred.find((g) => g.descricao === "Tênis");
+assert.ok((await tool("fintrack_editar_lancamento", { id: tenis.id, conta: "C6", confirmado: true })).texto.includes("cartão"));
+t = await tool("fintrack_editar_lancamento", { id: tenis.id, fatura_mes: "2026-12", valor: 249, confirmado: true });
+assert.ok(!t.erro, t.texto);
+assert.ok(blob.months["2026-12"].gastos.some((g) => g.id === tenis.id && g.valor === 249));
+// apagar sem confirmação; apagar uma parcela; apagar o grupo
+assert.ok((await tool("fintrack_apagar_lancamento", { id: tenis.id })).texto.includes("confirmação"));
+const ing = cred.find((g) => g.descricao.startsWith("Ingresso (1/2)"));
+t = await tool("fintrack_apagar_lancamento", { id: ing.id, confirmado: true });
+j = JSON.parse(t.texto); assert.equal(j.apagado.length, 1); assert.ok(j.aviso.includes("parcelada"));
+t = await tool("fintrack_extrato", { mes: "2026-12", tipo: "credito" });
+const ing2 = JSON.parse(t.texto).credito.find((g) => g.descricao.startsWith("Ingresso (2/2)"));
+assert.ok(ing2);
+t = await tool("fintrack_apagar_lancamento", { id: ing2.id, grupo: true, confirmado: true });
+assert.equal(JSON.parse(t.texto).apagado.length, 1);
+// apagar o tênis
+t = await tool("fintrack_apagar_lancamento", { id: tenis.id, confirmado: true });
+assert.ok(!t.erro); assert.ok(!Object.values(blob.months).some((mm) => mm.gastos.some((g) => g.id === tenis.id)));
+// vínculos: parcela de dívida desmarca, fixa volta a pendente, antecipação e dívida no cartão são bloqueadas
+blob.dividas = [{ id: "dv1", nome: "Carro", parcelas: 48, valorParcela: 100, total: 4800, inicioMes: "2026-01", pagos: ["2026-11"], quitada: false }];
+const m11 = blob.months["2026-11"];
+m11.fixas = [{ id: "f1", nome: "Luz", valor: 350, pago: true, gastoId: "gfix" }];
+m11.gastos.unshift({ id: "gdv", catId: "ou", descricao: "Parcela Carro", valor: 100, forma: "pix", accId: "c6", data: "2026-11-01", dividaId: "dv1", ts: 1 });
+m11.gastos.unshift({ id: "gfix", catId: "ou", descricao: "Luz", valor: 350, forma: "pix", accId: "c6", data: "2026-11-06", fixaId: "f1", ts: 1 });
+m11.gastos.unshift({ id: "gdc", catId: "ou", descricao: "Carro no cartão", valor: 100, forma: "credito", accId: "nu", data: "", dividaId: "dv1", ts: 1 });
+m11.gastos.unshift({ id: "gan", catId: "ou", descricao: "Antecipação", valor: 500, forma: "pix", accId: "c6", data: "2026-11-02", dividaId: "dv1", antecip: true, ts: 1 });
+assert.ok((await tool("fintrack_apagar_lancamento", { id: "gdc", confirmado: true })).texto.includes("Dívidas"));
+assert.ok((await tool("fintrack_editar_lancamento", { id: "gan", valor: 1, confirmado: true })).texto.includes("antecipação"));
+t = await tool("fintrack_apagar_lancamento", { id: "gdv", confirmado: true });
+assert.ok(JSON.parse(t.texto).aviso.includes("dívida")); assert.deepEqual(blob.dividas[0].pagos, []);
+t = await tool("fintrack_apagar_lancamento", { id: "gfix", confirmado: true });
+assert.equal(blob.months["2026-11"].fixas[0].pago, false);
+// entrada: editar e apagar
+t = await tool("fintrack_extrato", { mes: "2026-10", tipo: "entradas" });
+const ent = JSON.parse(t.texto).entradas.find((e) => e.fonte === "Teste");
+t = await tool("fintrack_editar_lancamento", { id: ent.id, fonte: "Teste 2", valor: 12, confirmado: true });
+assert.equal(JSON.parse(t.texto).depois.fonte, "Teste 2");
+t = await tool("fintrack_apagar_lancamento", { id: ent.id, confirmado: true });
+assert.equal(JSON.parse(t.texto).apagado[0].fonte, "Teste 2");
 console.log("OK: todos os testes passaram");
