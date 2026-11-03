@@ -693,6 +693,23 @@ function AppInner({session}){
     });
   }
 
+  /* Lançamentos feitos de fora (MCP/Claude): ao voltar para a aba, recarrega do servidor.
+     Só recarrega se não há salvamento em andamento, para nunca perder o que você acabou de digitar. */
+  const savingRef=useRef(false);
+  useEffect(()=>{ savingRef.current=saving; },[saving]);
+  useEffect(()=>{
+    const recarregar=async()=>{
+      if(document.visibilityState==="hidden"||savingRef.current) return;
+      const r=await dbLoad();
+      if(!r.ok||!r.value||savingRef.current) return;
+      const novo=migrate(r.value);
+      setData(prev=>prev&&JSON.stringify(prev)===JSON.stringify(novo)?prev:novo);
+    };
+    document.addEventListener("visibilitychange",recarregar);
+    window.addEventListener("focus",recarregar);
+    return()=>{document.removeEventListener("visibilitychange",recarregar);window.removeEventListener("focus",recarregar);};
+  },[]);
+
   useEffect(()=>{
     if(!data) return;
     if(!data.months[mes] || (mes>=mesAtualKey() && fixasFaltando(data,mes).length>0))
