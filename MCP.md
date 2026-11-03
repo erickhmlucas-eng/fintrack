@@ -27,6 +27,7 @@ Toda ferramenta de escrita exige `confirmado=true`, e o Claude só manda isso de
 
 ## Segurança
 - A URL com `?k=` é a senha do MCP: quem tiver a URL consegue ler e lançar. Não compartilhe; para trocar, mude `MCP_SECRET` na Vercel e atualize o conector.
+- O segredo na URL pode aparecer em logs da Vercel e no histórico do navegador. O conector do claude.ai não envia cabeçalho fixo, então ele precisa da URL. Para qualquer outro cliente (testes, scripts), use `Authorization: Bearer <segredo>`, que o servidor também aceita e não deixa rastro na URL. Se achar que vazou, troque o `MCP_SECRET`.
 - A chave `service_role` ignora o RLS do Supabase. O código só mexe no usuário de `FINTRACK_USER_ID`.
 - Confira que o RLS está ligado em `user_data` (Supabase → Authentication → Policies), porque o repositório é público e a chave `publishable` está nele.
 

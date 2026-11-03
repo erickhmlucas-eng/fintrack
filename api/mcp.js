@@ -377,7 +377,10 @@ export default async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
   if (req.method === "GET" || req.method === "DELETE") return res.status(405).json({ error: "Method not allowed" });
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
-  const auth = segredoOk(req.query?.k);
+  /* Aceita Authorization: Bearer <segredo> (preferido: não aparece em URL/logs) ou ?k=<segredo>
+     (necessário no conector do claude.ai, que não envia cabeçalho fixo). */
+  const bearer = String(req.headers?.authorization || "").replace(/^Bearer\s+/i, "");
+  const auth = segredoOk(bearer || req.query?.k);
   if (auth === null) return res.status(500).json({ error: "MCP_SECRET não configurado (mínimo 24 caracteres)." });
   if (!auth) return res.status(401).json({ error: "Não autorizado" });
 

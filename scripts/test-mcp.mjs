@@ -19,10 +19,11 @@ globalThis.__FINTRACK_TEST_STORE = {
 };
 const { default: handler } = await import("../api/mcp.js");
 
-const chamar = async (corpo, k = process.env.MCP_SECRET) => {
+const chamar = async (corpo, k = process.env.MCP_SECRET, via = "query") => {
   const r = { code: 0, body: undefined, headers: {} };
   const res = { setHeader(n, v) { r.headers[n] = v; }, status(c) { r.code = c; return res; }, json(b) { r.body = b; return res; }, end() { return res; } };
-  await handler({ method: "POST", query: { k }, body: corpo }, res);
+  const req = via === "header" ? { method: "POST", query: {}, headers: { authorization: `Bearer ${k}` }, body: corpo } : { method: "POST", query: { k }, headers: {}, body: corpo };
+  await handler(req, res);
   return r;
 };
 const tool = async (name, args) => {
@@ -36,6 +37,8 @@ assert.equal((await chamar({ jsonrpc: "2.0", method: "notifications/initialized"
 assert.equal((await chamar({ jsonrpc: "2.0", id: 2, method: "tools/list" })).body.result.tools.length, 7);
 // autenticação
 assert.equal((await chamar({ jsonrpc: "2.0", id: 1, method: "ping" }, "errado")).code, 401);
+assert.equal((await chamar({ jsonrpc: "2.0", id: 1, method: "ping" }, process.env.MCP_SECRET, "header")).code, 200);
+assert.equal((await chamar({ jsonrpc: "2.0", id: 1, method: "ping" }, "errado", "header")).code, 401);
 
 // confirmação obrigatória
 let t = await tool("fintrack_lancar_gasto", { descricao: "Cortineiro", valor: 20, categoria: "outros", conta: "c6" });
