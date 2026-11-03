@@ -35,7 +35,7 @@ const tool = async (name, args) => {
 // protocolo
 assert.equal((await chamar({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18" } })).body.result.protocolVersion, "2025-06-18");
 assert.equal((await chamar({ jsonrpc: "2.0", method: "notifications/initialized" })).code, 202);
-assert.equal((await chamar({ jsonrpc: "2.0", id: 2, method: "tools/list" })).body.result.tools.length, 9);
+assert.equal((await chamar({ jsonrpc: "2.0", id: 2, method: "tools/list" })).body.result.tools.length, 11);
 // autenticação
 assert.equal((await chamar({ jsonrpc: "2.0", id: 1, method: "ping" }, "errado")).code, 401);
 assert.equal((await chamar({ jsonrpc: "2.0", id: 1, method: "ping" }, process.env.MCP_SECRET, "header")).code, 200);
@@ -148,4 +148,47 @@ t = await tool("fintrack_editar_lancamento", { id: ent.id, fonte: "Teste 2", val
 assert.equal(JSON.parse(t.texto).depois.fonte, "Teste 2");
 t = await tool("fintrack_apagar_lancamento", { id: ent.id, confirmado: true });
 assert.equal(JSON.parse(t.texto).apagado[0].fonte, "Teste 2");
+// ─── a pagar / marcar como pago ───
+t = await tool("fintrack_a_pagar", { mes: "2026-11" }); j = JSON.parse(t.texto);
+const fNu = j.faturas.find((f) => f.cartao === "Nubank");
+assert.equal(fNu.paga, false); assert.equal(fNu.vence_em, "10/11"); assert.equal(j.fixas[0].paga, false); assert.equal(j.dividas[0].parcela, "11/48");
+const marcar = (args) => tool("fintrack_marcar_pago", { confirmado: true, ...args });
+assert.ok((await tool("fintrack_marcar_pago", { tipo: "fatura", item: "Nubank", mes: "2026-11", conta: "C6" })).texto.includes("confirmação"));
+const saldoGeral = async () => JSON.parse((await tool("fintrack_resumo", { mes: "2026-11" })).texto).contas.find((c) => c.nome === "C6").saldo;
+let sa = await saldoGeral();
+t = await marcar({ tipo: "fatura", item: "Nubank", mes: "2026-11", conta: "C6" });
+assert.ok(!t.erro, t.texto); assert.equal(r2(sa - (await saldoGeral())), fNu.valor);
+assert.equal(blob.months["2026-11"].faturasPagas.nu.data, "2026-11-10");
+assert.ok((await marcar({ tipo: "fatura", item: "Nubank", mes: "2026-11", conta: "C6" })).texto.includes("já está"));
+t = await marcar({ tipo: "fatura", item: "Nubank", mes: "2026-11", desfazer: true });
+assert.ok(!t.erro, t.texto); assert.equal(blob.months["2026-11"].faturasPagas.nu, undefined);
+assert.ok((await marcar({ tipo: "fatura", item: "Nubank", mes: "2026-11", desfazer: true })).texto.includes("não está marcada"));
+// fatura do Porto (fecha 30, vence 5): vence no mês seguinte
+assert.ok((await marcar({ tipo: "fatura", item: "Porto", mes: "2026-11", conta: "C6" })).texto.includes("Não há fatura"));
+await tool("fintrack_lancar_credito", { descricao: "Gasolina Porto", valor: 100, categoria: "Gasolina", cartao: "Porto", data: "2026-11-02", confirmado: true });
+t = await marcar({ tipo: "fatura", item: "Porto", mes: "2026-11", conta: "C6" });
+assert.equal(blob.months["2026-11"].faturasPagas.pt.data, "2026-12-05");
+// fixa
+sa = await saldoGeral();
+t = await marcar({ tipo: "fixa", item: "luz", mes: "2026-11", conta: "C6" });
+assert.ok(!t.erro, t.texto); assert.equal(r2(sa - (await saldoGeral())), 350);
+assert.equal(blob.months["2026-11"].fixas[0].pago, true);
+assert.ok((await marcar({ tipo: "fixa", item: "luz", mes: "2026-11", conta: "C6" })).texto.includes("já está"));
+t = await marcar({ tipo: "fixa", item: "luz", mes: "2026-11", desfazer: true });
+assert.equal(blob.months["2026-11"].fixas[0].pago, false); assert.equal(r2(await saldoGeral()), sa);
+assert.ok((await marcar({ tipo: "fixa", item: "xyz", mes: "2026-11", conta: "C6" })).texto.includes("Opções"));
+// dívida na conta, quitação e dívida no cartão
+blob.dividas.push({ id: "dv3", nome: "Celular", catId: "ou", parcelas: 1, valorParcela: 50, total: 50, inicioMes: "2026-11", pagos: [], quitada: false });
+blob.dividas.push({ id: "dv2", nome: "Viagem cartão", catId: "ou", parcelas: 2, valorParcela: 80, total: 160, inicioMes: "2026-11", pagos: [], quitada: false, cartaoId: "nu" });
+t = await marcar({ tipo: "divida", item: "Carro", mes: "2026-11", conta: "C6" });
+assert.ok(!t.erro, t.texto); assert.ok(blob.dividas[0].pagos.includes("2026-11"));
+assert.ok(blob.months["2026-11"].gastos.some((g) => g.dividaId === "dv1" && g.descricao === "Parcela: Carro (11/48)" && g.forma === "pix"));
+assert.ok((await marcar({ tipo: "divida", item: "Carro", mes: "2026-11", conta: "C6" })).texto.includes("já está"));
+assert.ok((await marcar({ tipo: "divida", item: "Viagem", mes: "2026-11", conta: "C6" })).texto.includes("fatura"));
+t = await marcar({ tipo: "divida", item: "Celular", mes: "2026-11", conta: "C6" });
+assert.equal(JSON.parse(t.texto).paga["dívida_quitada"], true); assert.equal(blob.dividas.find((x) => x.id === "dv3").quitada, true);
+t = await marcar({ tipo: "divida", item: "Celular", mes: "2026-11", desfazer: true });
+assert.equal(blob.dividas.find((x) => x.id === "dv3").quitada, false);
+t = await marcar({ tipo: "divida", item: "Carro", mes: "2026-11", desfazer: true });
+assert.deepEqual(blob.dividas[0].pagos, []);
 console.log("OK: todos os testes passaram");

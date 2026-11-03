@@ -52,6 +52,12 @@ function faturaDe(d, mk, cardId) {
   const m = d.months?.[mk]; if (!m) return 0;
   return (m.gastos || []).filter((g) => g.forma === "credito" && g.accId === cardId).reduce((s, g) => s + g.valor, 0);
 }
+function dataVencimento(acc, mk) {
+  const venc = acc?.vencimento || 15, fech = acc?.fechamento || 1;
+  let [y, m] = mk.split("-").map(Number);
+  if (venc < fech) { m++; if (m > 12) { m = 1; y++; } }
+  return `${y}-${pad(m)}-${pad(Math.min(venc, 28))}`;
+}
 function mesFaturaDe(dataCompra, fechamento) {
   const dt = new Date((dataCompra || hoje()) + "T12:00");
   let m = dt.getMonth(), y = dt.getFullYear();
@@ -241,6 +247,17 @@ const TOOLS = [
   { name: "fintrack_apagar_lancamento", description: "Apaga um lançamento (gasto, crédito, transferência ou entrada). Pegue o id em fintrack_extrato. SEMPRE mostre exatamente o que vai sair e espere confirmação. Parcela de dívida e antecipação não podem ser apagadas por aqui.",
     inputSchema: { type: "object", required: ["id", "confirmado"], properties: {
       id: { type: "string" }, grupo: { type: "boolean", description: "true para apagar todas as parcelas da mesma compra parcelada." }, confirmado: CONF } } },
+  { name: "fintrack_a_pagar", description: "O que está a pagar (e o que já foi pago) num mês: faturas de cartão, despesas fixas e parcelas de dívida. É a aba A pagar do app.",
+    inputSchema: { type: "object", properties: { mes: MES_PROP } }, annotations: T_LEITURA },
+  { name: "fintrack_marcar_pago", description: "Marca como paga (ou desfaz) uma fatura de cartão, uma despesa fixa ou uma parcela de dívida, como o botão da aba A pagar. Para marcar é preciso dizer a conta que pagou. Para fatura, mes é o mês da fatura. Parcela de dívida que está no cartão não se marca: marque a fatura. SEMPRE mostre a tabelinha e espere confirmação.",
+    inputSchema: { type: "object", required: ["tipo", "item", "confirmado"], properties: {
+      tipo: { type: "string", enum: ["fatura", "fixa", "divida"] },
+      item: { type: "string", description: "Nome do cartão (fatura), da despesa fixa ou da dívida." },
+      mes: MES_PROP, conta: { type: "string", description: "Conta que pagou (obrigatória para marcar como paga)." },
+      forma: { type: "string", enum: FORMAS_DEBITO, description: "Fixa e dívida. Padrão: pix." },
+      valor: { type: "number", description: "Fixa e dívida: só se o valor pago for diferente do cadastrado." },
+      data: { type: "string", description: "AAAA-MM-DD do pagamento, se diferente do padrão." },
+      desfazer: { type: "boolean", description: "true para desmarcar um pagamento." }, confirmado: CONF } } },
 ];
 
 function mesArg(a) { const mk = a.mes || hoje().slice(0, 7); if (!/^\d{4}-\d{2}$/.test(mk)) throw new Error("Mês inválido. Use AAAA-MM."); return mk; }
@@ -432,6 +449,87 @@ const HANDLERS = {
       if (tipo === "gasto" && item.fixaId) out.aviso = "A despesa fixa ligada a esse pagamento voltou para pendente.";
       if (tipo === "gasto" && item.dividaId) out.aviso = "A parcela da dívida voltou para em aberto.";
       return out;
+    });
+  },
+
+  async fintrack_a_pagar(a) {
+    const d = await ler(); const mk = mesArg(a); const m = d.months?.[mk] || novoMes();
+    const nomeConta = (id) => contaById(d, id)?.nome;
+    return {
+      mes: labelKey(mk),
+      faturas: d.accounts.filter((c) => c.temCartao).map((c) => {
+        const fp = m.faturasPagas?.[c.id];
+        return { cartao: c.nome, valor: r2(faturaDe(d, mk, c.id)), vence_em: dmy(dataVencimento(c, mk)), paga: fp ? { conta: nomeConta(fp.contaId), data: dmy(fp.data) } : false };
+      }).filter((f) => f.valor > 0),
+      fixas: (m.fixas || []).map((f) => ({ nome: f.nome, valor: f.valor, dia: f.dia || undefined, paga: !!f.pago })),
+      dividas: (d.dividas || []).filter((x) => !x.quitada).map((dv) => {
+        const idx = idxParcela(dv, mk); if (idx < 0 || idx >= dv.parcelas) return null;
+        return { nome: dv.nome, parcela: `${idx + 1}/${dv.parcelas}`, valor: dv.valorParcela, paga: pagasDivida(d, dv).includes(mk), no_cartao: dv.cartaoId ? nomeConta(dv.cartaoId) : undefined };
+      }).filter(Boolean),
+    };
+  },
+
+  async fintrack_marcar_pago(a) {
+    exigirConfirmacao(a);
+    if (!["fatura", "fixa", "divida"].includes(a.tipo)) throw new Error("tipo deve ser fatura, fixa ou divida.");
+    const mk = mesArg(a); const desfazer = a.desfazer === true;
+    const forma = a.forma || "pix"; if (!FORMAS_DEBITO.includes(forma)) throw new Error(`Forma inválida. Use: ${FORMAS_DEBITO.join(", ")}.`);
+    const valorOpc = a.valor !== undefined ? valorValido(a.valor) : null;
+    const dataOpc = a.data !== undefined ? dataValida(a.data) : null;
+    return mutar((d) => {
+      const mm = ensureMonth(d, mk);
+      const nomeConta = (id) => contaById(d, id)?.nome;
+
+      if (a.tipo === "fatura") {
+        const card = achar(d.accounts.filter((c) => c.temCartao), a.item, "o cartão");
+        const fp = mm.faturasPagas[card.id]; const valor = r2(faturaDe(d, mk, card.id));
+        if (desfazer) {
+          if (!fp) throw new Error("Essa fatura não está marcada como paga.");
+          delete mm.faturasPagas[card.id];
+          return { desmarcada: { cartao: card.nome, fatura: labelKey(mk), valor }, saldo_da_conta_agora: saldoConta(d, fp.contaId) };
+        }
+        if (!(valor > 0)) throw new Error(`Não há fatura do ${card.nome} em ${labelKey(mk)}.`);
+        if (fp) throw new Error("Essa fatura já está marcada como paga.");
+        const conta = achar(d.accounts, a.conta, "a conta que pagou");
+        const data = dataOpc || dataVencimento(card, mk);
+        mm.faturasPagas[card.id] = { contaId: conta.id, data, ts: Date.now() };
+        return { paga: { cartao: card.nome, fatura: labelKey(mk), valor, conta: conta.nome, data: dmy(data) }, saldo_da_conta_agora: saldoConta(d, conta.id) };
+      }
+
+      if (a.tipo === "fixa") {
+        const f = achar(mm.fixas || [], a.item, "a despesa fixa");
+        if (desfazer) {
+          if (!f.pago) throw new Error("Essa fixa não está marcada como paga.");
+          const contaId = mm.gastos.find((g) => g.id === f.gastoId)?.accId;
+          mm.gastos = mm.gastos.filter((g) => g.id !== f.gastoId); f.pago = false; f.gastoId = null;
+          return { desmarcada: { fixa: f.nome, mes: labelKey(mk) }, saldo_da_conta_agora: contaId ? saldoConta(d, contaId) : undefined };
+        }
+        if (f.pago) throw new Error("Essa fixa já está marcada como paga.");
+        const conta = achar(d.accounts, a.conta, "a conta que pagou");
+        const valor = valorOpc ?? f.valor; if (!(valor > 0)) throw new Error("Essa fixa não tem valor cadastrado. Informe o valor.");
+        const data = dataOpc || `${mk}-${pad(Math.min(f.dia || 15, 28))}`; const gid = uid();
+        mm.gastos.unshift({ id: gid, ts: Date.now(), catId: f.catId || d.cats[d.cats.length - 1].id, descricao: f.nome, valor, forma, accId: conta.id, data, parcela: null, fixaId: f.id });
+        f.pago = true; f.gastoId = gid;
+        return { paga: { fixa: f.nome, valor, conta: conta.nome, forma, data: dmy(data) }, saldo_da_conta_agora: saldoConta(d, conta.id) };
+      }
+
+      const dv = achar(desfazer ? d.dividas : d.dividas.filter((x) => !x.quitada), a.item, "a dívida");
+      const idx = idxParcela(dv, mk);
+      if (idx < 0 || idx >= dv.parcelas) throw new Error(`${dv.nome} não tem parcela em ${labelKey(mk)}.`);
+      if (dv.cartaoId) throw new Error(`${dv.nome} está no cartão ${nomeConta(dv.cartaoId)}: a parcela já entra na fatura. Marque a fatura como paga (tipo=fatura).`);
+      if (desfazer) {
+        if (!(dv.pagos || []).includes(mk)) throw new Error("Essa parcela não está marcada como paga.");
+        const contaId = mm.gastos.find((g) => g.dividaId === dv.id && !g.antecip)?.accId;
+        dv.pagos = dv.pagos.filter((k) => k !== mk); dv.quitada = false;
+        mm.gastos = mm.gastos.filter((g) => g.dividaId !== dv.id || g.antecip);
+        return { desmarcada: { divida: dv.nome, parcela: `${idx + 1}/${dv.parcelas}`, mes: labelKey(mk) }, saldo_da_conta_agora: contaId ? saldoConta(d, contaId) : undefined };
+      }
+      if ((dv.pagos || []).includes(mk)) throw new Error("Essa parcela já está marcada como paga.");
+      const conta = achar(d.accounts, a.conta, "a conta que pagou");
+      const valor = valorOpc ?? dv.valorParcela; const data = dataOpc || `${mk}-15`;
+      mm.gastos.unshift({ id: uid(), ts: Date.now(), catId: dv.catId, descricao: `Parcela: ${dv.nome} (${idx + 1}/${dv.parcelas})`, valor, forma, accId: conta.id, data, parcela: null, dividaId: dv.id });
+      dv.pagos = [...(dv.pagos || []), mk]; if (dv.pagos.length >= dv.parcelas) dv.quitada = true;
+      return { paga: { divida: dv.nome, parcela: `${idx + 1}/${dv.parcelas}`, valor, conta: conta.nome, forma, data: dmy(data), dívida_quitada: dv.quitada || undefined }, saldo_da_conta_agora: saldoConta(d, conta.id) };
     });
   },
 
