@@ -139,6 +139,56 @@ const pagasDivida = (d, dv) => {
   return [...set];
 };
 
+/* ─── Assinaturas recorrentes no crédito (mesma lógica do app) ───────────────
+   d.assinaturas: [{id,nome,valor,cartaoId,dia,catId,ativa,inicio:"AAAA-MM"}]  (inicio = 1ª fatura)
+   Cada mês de fatura (de `inicio` até 3 meses à frente) ganha a compra: gasto forma:"credito" com assinaturaId. */
+const mesAtualKey = () => hoje().slice(0, 7);
+const diasNoMes = (y, m) => new Date(y, m, 0).getDate();
+function dataCompraAssinatura(a, card, mk) {
+  const fech = card?.fechamento || 1, dia = Math.max(1, Math.min(a.dia || 1, 31));
+  let [y, m] = mk.split("-").map(Number);
+  if (fech > 1 && dia >= fech) { m--; if (m < 1) { m = 12; y--; } }
+  return `${y}-${pad(m)}-${pad(Math.min(dia, diasNoMes(y, m)))}`;
+}
+function primeiraFaturaAssinatura(card, dia) {
+  let [y, m, dd] = hoje().split("-").map(Number);
+  if (Math.min(dia, diasNoMes(y, m)) < dd) { m++; if (m > 12) { m = 1; y++; } }
+  return mesFaturaDe(`${y}-${pad(m)}-${pad(Math.min(dia, diasNoMes(y, m)))}`, card?.fechamento || 1);
+}
+function aplicarAssinaturas(d) {
+  if (!Array.isArray(d.assinaturas) || !d.assinaturas.length) return;
+  const fim = shiftKey(mesAtualKey(), 3);
+  d.assinaturas.forEach((a) => {
+    if (a.ativa === false || !/^\d{4}-\d{2}$/.test(a.inicio || "")) return;
+    const card = (d.accounts || []).find((x) => x.id === a.cartaoId); if (!card) return;
+    let mk = a.inicio;
+    for (let n = 0; mk <= fim && n < 60; n++, mk = shiftKey(mk, 1)) {
+      const m = ensureMonth(d, mk);
+      if (m.faturasPagas[a.cartaoId]) continue;
+      if (m.gastos.some((g) => g.assinaturaId === a.id) || (m.assinaturasPuladas || []).includes(a.id)) continue;
+      m.gastos.unshift({ id: uid(), ts: Date.now(), catId: a.catId, descricao: a.nome, valor: a.valor, forma: "credito",
+        accId: a.cartaoId, data: dataCompraAssinatura(a, card, mk), parcela: null, assinaturaId: a.id });
+    }
+  });
+}
+function sincronizarAssinatura(d, a) {
+  const card = (d.accounts || []).find((x) => x.id === a.cartaoId);
+  Object.entries(d.months || {}).forEach(([mk, m]) => (m.gastos || []).forEach((g) => {
+    if (g.assinaturaId !== a.id || m.faturasPagas?.[g.accId] || (g.data || "") <= hoje()) return;
+    g.valor = a.valor; g.descricao = a.nome; g.catId = a.catId; g.data = dataCompraAssinatura(a, card, mk);
+  }));
+}
+function removerOcorrenciasFuturas(d, id) {
+  let n = 0;
+  Object.values(d.months || {}).forEach((m) => {
+    m.gastos = (m.gastos || []).filter((g) => {
+      if (g.assinaturaId === id && !m.faturasPagas?.[g.accId] && (g.data || "") > hoje()) { n++; return false; }
+      return true;
+    });
+  });
+  return n;
+}
+
 /* ─── Persistência (checagem de versão) ───────────────────────────────────── */
 function getStore() {
   if (globalThis.__FINTRACK_TEST_STORE) return globalThis.__FINTRACK_TEST_STORE;
@@ -164,12 +214,13 @@ function getStore() {
     },
   };
 }
-async function ler() { return (await getStore().load()).value; }
+async function ler() { const d = JSON.parse(JSON.stringify((await getStore().load()).value)); aplicarAssinaturas(d); return d; }
 async function mutar(fn) {
   const store = getStore();
   for (let t = 0; t < 4; t++) {
     const { value, updatedAt } = await store.load();
     const d = JSON.parse(JSON.stringify(value));
+    aplicarAssinaturas(d);
     const out = fn(d);                       /* pode lançar erro de validação: nada é salvo */
     if (await store.save(d, updatedAt)) return out;
   }
@@ -258,6 +309,20 @@ const TOOLS = [
       valor: { type: "number", description: "Fixa e dívida: só se o valor pago for diferente do cadastrado." },
       data: { type: "string", description: "AAAA-MM-DD do pagamento, se diferente do padrão." },
       desfazer: { type: "boolean", description: "true para desmarcar um pagamento." }, confirmado: CONF } } },
+  { name: "fintrack_assinaturas", description: "Lista as assinaturas recorrentes no cartão de crédito (Apple, Prime, Spotify...). Elas entram sozinhas, todo mês, na fatura certa.",
+    inputSchema: { type: "object", properties: {} }, annotations: T_LEITURA },
+  { name: "fintrack_criar_assinatura", description: "Cria uma assinatura recorrente no cartão: a cobrança passa a entrar sozinha todo mês na fatura certa (3 meses à frente). A 1ª fatura é a da próxima cobrança, a menos que primeira_fatura seja informada. SEMPRE mostre a tabelinha e espere confirmação.",
+    inputSchema: { type: "object", required: ["nome", "valor", "cartao", "dia", "confirmado"], properties: {
+      nome: { type: "string" }, valor: { type: "number", description: "Valor mensal em reais." }, cartao: { type: "string" },
+      dia: { type: "integer", minimum: 1, maximum: 31, description: "Dia do mês da cobrança." }, categoria: { type: "string", description: "Padrão: Assinaturas." },
+      primeira_fatura: { type: "string", description: "AAAA-MM da primeira fatura, se quiser forçar (ex.: incluir a deste mês)." }, confirmado: CONF } } },
+  { name: "fintrack_editar_assinatura", description: "Edita uma assinatura recorrente (valor, dia, categoria, nome) ou a pausa/reativa. Mudanças valem só para cobranças futuras de faturas ainda não pagas. SEMPRE mostre o antes e o depois e espere confirmação.",
+    inputSchema: { type: "object", required: ["nome", "confirmado"], properties: {
+      nome: { type: "string", description: "Nome da assinatura a editar." }, novo_nome: { type: "string" }, valor: { type: "number" },
+      dia: { type: "integer", minimum: 1, maximum: 31 }, categoria: { type: "string" },
+      pausar: { type: "boolean", description: "true pausa (remove cobranças futuras); false reativa." }, confirmado: CONF } } },
+  { name: "fintrack_apagar_assinatura", description: "Apaga uma assinatura recorrente e as cobranças futuras de faturas ainda não pagas (o histórico fica). SEMPRE mostre o que vai sair e espere confirmação.",
+    inputSchema: { type: "object", required: ["nome", "confirmado"], properties: { nome: { type: "string" }, confirmado: CONF } } },
 ];
 
 function mesArg(a) { const mk = a.mes || hoje().slice(0, 7); if (!/^\d{4}-\d{2}$/.test(mk)) throw new Error("Mês inválido. Use AAAA-MM."); return mk; }
@@ -441,6 +506,7 @@ const HANDLERS = {
         arr.splice(i, 1); removidos.push(item);
         if (tipo === "gasto" && item.fixaId) { const f = (m.fixas || []).find((x) => x.id === item.fixaId); if (f) { f.pago = false; f.gastoId = null; } }
         if (tipo === "gasto" && item.dividaId) { const dv = (d.dividas || []).find((x) => x.id === item.dividaId); if (dv) { dv.pagos = (dv.pagos || []).filter((k) => k !== mk); dv.quitada = false; } }
+        if (tipo === "gasto" && item.assinaturaId) m.assinaturasPuladas = [...(m.assinaturasPuladas || []), item.assinaturaId];
       }
       const out = { apagado: removidos.map((r) => ({ id: r.id, ...descreverLancamento(d, tipo, r) })) };
       if (credito) out.fatura_do_mes_agora = r2(faturaDe(d, mk, item.accId));
@@ -448,6 +514,7 @@ const HANDLERS = {
       if (tipo === "gasto" && grupo && !a.grupo) out.aviso = "Essa compra é parcelada e as outras parcelas continuam lançadas. Use grupo=true para apagar todas.";
       if (tipo === "gasto" && item.fixaId) out.aviso = "A despesa fixa ligada a esse pagamento voltou para pendente.";
       if (tipo === "gasto" && item.dividaId) out.aviso = "A parcela da dívida voltou para em aberto.";
+      if (tipo === "gasto" && item.assinaturaId) out.aviso = "Só essa cobrança da assinatura foi apagada; as próximas continuam. Para parar, pause ou apague a assinatura.";
       return out;
     });
   },
@@ -530,6 +597,63 @@ const HANDLERS = {
       mm.gastos.unshift({ id: uid(), ts: Date.now(), catId: dv.catId, descricao: `Parcela: ${dv.nome} (${idx + 1}/${dv.parcelas})`, valor, forma, accId: conta.id, data, parcela: null, dividaId: dv.id });
       dv.pagos = [...(dv.pagos || []), mk]; if (dv.pagos.length >= dv.parcelas) dv.quitada = true;
       return { paga: { divida: dv.nome, parcela: `${idx + 1}/${dv.parcelas}`, valor, conta: conta.nome, forma, data: dmy(data), dívida_quitada: dv.quitada || undefined }, saldo_da_conta_agora: saldoConta(d, conta.id) };
+    });
+  },
+
+  async fintrack_assinaturas() {
+    const d = await ler();
+    const lista = d.assinaturas || [];
+    return {
+      assinaturas: lista.map((a) => ({ nome: a.nome, valor: a.valor, cartao: contaById(d, a.cartaoId)?.nome, dia: a.dia,
+        categoria: catById(d, a.catId).nome, ativa: a.ativa !== false, desde_a_fatura: a.inicio ? labelKey(a.inicio) : undefined })),
+      total_mensal_ativas: r2(lista.filter((a) => a.ativa !== false).reduce((s, a) => s + a.valor, 0)),
+    };
+  },
+
+  async fintrack_criar_assinatura(a) {
+    exigirConfirmacao(a);
+    const nome = String(a.nome || "").trim(); if (!nome) throw new Error("Informe o nome da assinatura.");
+    const valor = valorValido(a.valor); const dia = parseInt(a.dia);
+    if (!(dia >= 1 && dia <= 31)) throw new Error("dia deve ser de 1 a 31.");
+    if (a.primeira_fatura !== undefined && !/^\d{4}-\d{2}$/.test(a.primeira_fatura)) throw new Error("primeira_fatura inválida. Use AAAA-MM.");
+    return mutar((d) => {
+      const card = achar(d.accounts.filter((c) => c.temCartao), a.cartao, "o cartão");
+      const cat = a.categoria ? achar(d.cats, a.categoria, "a categoria") : (d.cats.find((c) => norm(c.nome) === "assinaturas") || d.cats[d.cats.length - 1]);
+      if (!Array.isArray(d.assinaturas)) d.assinaturas = [];
+      if (d.assinaturas.some((x) => norm(x.nome) === norm(nome) && x.cartaoId === card.id)) throw new Error(`Já existe a assinatura "${nome}" no ${card.nome}. Use editar.`);
+      const sub = { id: uid(), nome, valor, cartaoId: card.id, dia, catId: cat.id, ativa: true, inicio: a.primeira_fatura || primeiraFaturaAssinatura(card, dia) };
+      d.assinaturas.push(sub); aplicarAssinaturas(d);
+      const geradas = Object.entries(d.months).filter(([, m]) => m.gastos.some((g) => g.assinaturaId === sub.id)).map(([mk]) => mk).sort()
+        .map((mk) => ({ fatura: labelKey(mk), data_da_cobranca: dmy(d.months[mk].gastos.find((g) => g.assinaturaId === sub.id).data) }));
+      return { criada: { nome, valor, cartao: card.nome, dia, categoria: cat.nome, primeira_fatura: labelKey(sub.inicio) }, cobrancas_geradas: geradas };
+    });
+  },
+
+  async fintrack_editar_assinatura(a) {
+    exigirConfirmacao(a);
+    if (!["novo_nome", "valor", "dia", "categoria", "pausar"].some((k) => a[k] !== undefined)) throw new Error("Informe o que mudar (valor, dia, categoria, novo_nome ou pausar).");
+    return mutar((d) => {
+      const sub = achar(d.assinaturas || [], a.nome, "a assinatura");
+      const card = contaById(d, sub.cartaoId);
+      const antes = { nome: sub.nome, valor: sub.valor, dia: sub.dia, categoria: catById(d, sub.catId).nome, ativa: sub.ativa !== false };
+      if (a.novo_nome !== undefined) sub.nome = String(a.novo_nome).trim() || sub.nome;
+      if (a.valor !== undefined) sub.valor = valorValido(a.valor);
+      if (a.dia !== undefined) { const dia = parseInt(a.dia); if (!(dia >= 1 && dia <= 31)) throw new Error("dia deve ser de 1 a 31."); sub.dia = dia; }
+      if (a.categoria !== undefined) sub.catId = achar(d.cats, a.categoria, "a categoria").id;
+      if (a.pausar === true && sub.ativa !== false) { sub.ativa = false; removerOcorrenciasFuturas(d, sub.id); }
+      else if (a.pausar === false && sub.ativa === false) { sub.ativa = true; sub.inicio = primeiraFaturaAssinatura(card, sub.dia); }
+      sincronizarAssinatura(d, sub); aplicarAssinaturas(d);
+      return { editada: { antes, depois: { nome: sub.nome, valor: sub.valor, dia: sub.dia, categoria: catById(d, sub.catId).nome, ativa: sub.ativa !== false } } };
+    });
+  },
+
+  async fintrack_apagar_assinatura(a) {
+    exigirConfirmacao(a);
+    return mutar((d) => {
+      const sub = achar(d.assinaturas || [], a.nome, "a assinatura");
+      const removidas = removerOcorrenciasFuturas(d, sub.id);
+      d.assinaturas = d.assinaturas.filter((x) => x.id !== sub.id);
+      return { apagada: { nome: sub.nome, valor: sub.valor, cartao: contaById(d, sub.cartaoId)?.nome }, cobrancas_futuras_removidas: removidas };
     });
   },
 

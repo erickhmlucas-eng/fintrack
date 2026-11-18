@@ -35,7 +35,7 @@ const tool = async (name, args) => {
 // protocolo
 assert.equal((await chamar({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18" } })).body.result.protocolVersion, "2025-06-18");
 assert.equal((await chamar({ jsonrpc: "2.0", method: "notifications/initialized" })).code, 202);
-assert.equal((await chamar({ jsonrpc: "2.0", id: 2, method: "tools/list" })).body.result.tools.length, 11);
+assert.equal((await chamar({ jsonrpc: "2.0", id: 2, method: "tools/list" })).body.result.tools.length, 15);
 // autenticação
 assert.equal((await chamar({ jsonrpc: "2.0", id: 1, method: "ping" }, "errado")).code, 401);
 assert.equal((await chamar({ jsonrpc: "2.0", id: 1, method: "ping" }, process.env.MCP_SECRET, "header")).code, 200);
@@ -191,4 +191,52 @@ t = await marcar({ tipo: "divida", item: "Celular", mes: "2026-11", desfazer: tr
 assert.equal(blob.dividas.find((x) => x.id === "dv3").quitada, false);
 t = await marcar({ tipo: "divida", item: "Carro", mes: "2026-11", desfazer: true });
 assert.deepEqual(blob.dividas[0].pagos, []);
+// ─── assinaturas recorrentes ───
+const brt = () => new Date(Date.now() - 3 * 3600e3);
+const mkSoma = (n) => { const x = brt(); const dt = new Date(x.getUTCFullYear(), x.getUTCMonth() + n, 1); return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}`; };
+const ass = (args) => tool("fintrack_criar_assinatura", { confirmado: true, ...args });
+assert.ok((await tool("fintrack_criar_assinatura", { nome: "apple", valor: 19.9, cartao: "Nubank", dia: 11 })).texto.includes("confirmação"));
+t = await ass({ nome: "apple", valor: 19.9, cartao: "Nubank", dia: 11, primeira_fatura: mkSoma(1) });
+assert.ok(!t.erro, t.texto); j = JSON.parse(t.texto);
+assert.equal(j.criada.categoria, "Outros");                                  // sem 'Assinaturas' na base de teste: usa a última categoria
+assert.equal(j.cobrancas_geradas.length, 3);                                 // da 1ª fatura até 3 meses à frente
+const entradasAss = () => Object.entries(blob.months).flatMap(([mk, m]) => m.gastos.filter((g) => g.assinaturaId).map((g) => ({ mk, g })));
+assert.equal(entradasAss().length, 3);
+assert.ok(entradasAss().every(({ g }) => g.forma === "credito" && g.accId === "nu" && g.valor === 19.9));
+assert.ok((await ass({ nome: "Apple", valor: 20, cartao: "Nubank", dia: 11 })).texto.includes("Já existe"));
+assert.ok((await ass({ nome: "x", valor: 1, cartao: "Nubank", dia: 40 })).texto.includes("dia"));
+// leitura aplica sem gravar; não duplica ao mutar
+t = await tool("fintrack_assinaturas", {}); j = JSON.parse(t.texto);
+assert.equal(j.assinaturas.length, 1); assert.equal(j.total_mensal_ativas, 19.9);
+await tool("fintrack_lancar_entrada", { fonte: "t", valor: 1, conta: "C6", confirmado: true });
+assert.equal(entradasAss().length, 3);
+// editar valor: só cobranças futuras de fatura não paga
+t = await tool("fintrack_editar_assinatura", { nome: "apple", valor: 21.9, confirmado: true });
+assert.ok(!t.erro, t.texto); assert.equal(JSON.parse(t.texto).editada.depois.valor, 21.9);
+assert.ok(entradasAss().filter(({ g }) => g.data > brt().toISOString().slice(0, 10)).every(({ g }) => g.valor === 21.9));
+assert.ok((await tool("fintrack_editar_assinatura", { nome: "apple", confirmado: true })).texto.includes("Informe o que mudar"));
+// apagar uma ocorrência: não volta; as outras ficam
+const um = entradasAss().sort((x, y) => x.mk.localeCompare(y.mk))[1];
+t = await tool("fintrack_apagar_lancamento", { id: um.g.id, confirmado: true });
+assert.ok(JSON.parse(t.texto).aviso.includes("assinatura"));
+await tool("fintrack_lancar_entrada", { fonte: "t2", valor: 1, conta: "C6", confirmado: true });
+assert.equal(entradasAss().length, 2); assert.ok(!entradasAss().some(({ g }) => g.id === um.g.id));
+// pausar remove futuras; reativar volta (a partir da próxima cobrança)
+t = await tool("fintrack_editar_assinatura", { nome: "apple", pausar: true, confirmado: true });
+assert.ok(!t.erro, t.texto); assert.equal(blob.assinaturas[0].ativa, false);
+assert.ok(entradasAss().every(({ g }) => g.data <= brt().toISOString().slice(0, 10)));
+t = await tool("fintrack_editar_assinatura", { nome: "apple", pausar: false, confirmado: true });
+assert.equal(blob.assinaturas[0].ativa, true);
+assert.ok(entradasAss().length >= 1);
+// fatura paga não ganha cobrança nova
+await ass({ nome: "spotify", valor: 23.9, cartao: "Nubank", dia: 29, primeira_fatura: mkSoma(1) });
+const mkPaga = mkSoma(2); blob.months[mkPaga] = blob.months[mkPaga] || { entradas: [], gastos: [], fixas: [], reservas: [], faturasPagas: {}, notes: "" };
+blob.months[mkPaga].faturasPagas.nu = { contaId: "c6", data: mkPaga + "-10", ts: 1 };
+blob.months[mkPaga].gastos = blob.months[mkPaga].gastos.filter((g) => g.assinaturaId !== blob.assinaturas[1].id);
+await tool("fintrack_lancar_entrada", { fonte: "t3", valor: 1, conta: "C6", confirmado: true });
+assert.ok(!blob.months[mkPaga].gastos.some((g) => g.assinaturaId === blob.assinaturas[1].id));
+// apagar assinatura
+t = await tool("fintrack_apagar_assinatura", { nome: "spotify", confirmado: true });
+assert.ok(!t.erro, t.texto); assert.equal(blob.assinaturas.length, 1);
+assert.ok((await tool("fintrack_apagar_assinatura", { nome: "spotify", confirmado: true })).texto.includes("Opções"));
 console.log("OK: todos os testes passaram");
