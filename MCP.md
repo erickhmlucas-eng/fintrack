@@ -16,6 +16,12 @@ Deixa o Claude (conversa de consultoria) ler seus números e lançar no app, **s
 | `fintrack_apagar_lancamento` | apaga um lançamento (ou todas as parcelas de uma compra parcelada) |
 | `fintrack_a_pagar` | o que está a pagar e o que já foi pago no mês (faturas, fixas, parcelas de dívida) |
 | `fintrack_marcar_pago` | marca como paga (ou desfaz) uma fatura, uma fixa ou uma parcela de dívida, como a aba A pagar |
+| `fintrack_assinaturas` | lista as assinaturas recorrentes no cartão (Apple, Prime, Spotify...) |
+| `fintrack_criar_assinatura` | cria uma assinatura: a cobrança entra sozinha todo mês na fatura certa |
+| `fintrack_editar_assinatura` | muda valor, dia, categoria, nome, ou pausa/reativa |
+| `fintrack_apagar_assinatura` | apaga a assinatura e as cobranças futuras de faturas ainda não pagas |
+
+**Assinaturas recorrentes** (também em Config → Assinaturas no cartão, no app): cada assinatura gera, para cada mês de fatura (da primeira até 3 meses à frente), uma compra no crédito com o dia certo pelo fechamento do cartão. Mudar o valor só afeta cobranças futuras de faturas não pagas. Apagar uma única cobrança não recria; faturas já pagas não ganham cobrança retroativa.
 
 Marcar como pago segue as regras do app: a fatura vence na data do cartão, a fixa vira um gasto ligado a ela e a parcela de dívida soma no progresso do financiamento. Dívida que está no cartão não se marca (marque a fatura).
 

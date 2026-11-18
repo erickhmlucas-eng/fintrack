@@ -86,11 +86,60 @@ const seedData = () => ({
   cats: CATS_SEED.map(c=>({id:uid(),...c})),
   months: { [mesAtualKey()]: novoMes() },
   dividas: [],
+  assinaturas: [],
 });
 
 function ensureMonth(d, mk){ if(!d.months[mk]) d.months[mk]=novoMes(); const m=d.months[mk];
   if(!m.entradas)m.entradas=[]; if(!m.gastos)m.gastos=[]; if(!m.fixas)m.fixas=[];
   if(!m.reservas)m.reservas=[]; if(!m.faturasPagas)m.faturasPagas={}; return m; }
+
+/* ─── Assinaturas recorrentes no crédito ───────────────────────────────────────
+   d.assinaturas: [{id,nome,valor,cartaoId,dia,catId,ativa,inicio:"AAAA-MM"}]  (inicio = 1ª fatura)
+   Cada mês de fatura (de `inicio` até 3 meses à frente) ganha a compra sozinho:
+   gasto forma:"credito" com assinaturaId. Apagar uma ocorrência a marca em m.assinaturasPuladas. */
+const diasNoMes=(y,m)=>new Date(y,m,0).getDate();
+function dataCompraAssinatura(a,card,mk){
+  const fech=card?.fechamento||1, dia=Math.max(1,Math.min(a.dia||1,31));
+  let [y,m]=mk.split("-").map(Number);
+  if(fech>1&&dia>=fech){ m--; if(m<1){m=12;y--;} }
+  return `${y}-${String(m).padStart(2,"0")}-${String(Math.min(dia,diasNoMes(y,m))).padStart(2,"0")}`;
+}
+/* fatura da próxima cobrança, contando a partir de hoje */
+function primeiraFaturaAssinatura(card,dia){
+  let [y,m,dd]=hoje().split("-").map(Number);
+  if(Math.min(dia,diasNoMes(y,m))<dd){ m++; if(m>12){m=1;y++;} }
+  const dataCob=`${y}-${String(m).padStart(2,"0")}-${String(Math.min(dia,diasNoMes(y,m))).padStart(2,"0")}`;
+  return mesFaturaDe(dataCob,card?.fechamento||1);
+}
+function aplicarAssinaturas(d){
+  if(!Array.isArray(d.assinaturas)||!d.assinaturas.length) return;
+  const fim=shiftKey(mesAtualKey(),3);
+  d.assinaturas.forEach(a=>{
+    if(a.ativa===false||!/^\d{4}-\d{2}$/.test(a.inicio||"")) return;
+    const card=(d.accounts||[]).find(x=>x.id===a.cartaoId); if(!card) return;
+    let mk=a.inicio;
+    for(let n=0;mk<=fim&&n<60;n++,mk=shiftKey(mk,1)){
+      const m=ensureMonth(d,mk);
+      if(m.faturasPagas[a.cartaoId]) continue;                       /* fatura já paga: não mexe */
+      if(m.gastos.some(g=>g.assinaturaId===a.id)||(m.assinaturasPuladas||[]).includes(a.id)) continue;
+      m.gastos.unshift({id:uid(),ts:Date.now(),catId:a.catId,descricao:a.nome,valor:a.valor,forma:"credito",
+        accId:a.cartaoId,data:dataCompraAssinatura(a,card,mk),parcela:null,assinaturaId:a.id});
+    }
+  });
+}
+/* propaga mudança de valor/nome/categoria/dia só para cobranças futuras de faturas ainda não pagas */
+function sincronizarAssinatura(d,a){
+  const card=(d.accounts||[]).find(x=>x.id===a.cartaoId);
+  Object.entries(d.months||{}).forEach(([mk,m])=>(m.gastos||[]).forEach(g=>{
+    if(g.assinaturaId!==a.id||m.faturasPagas?.[g.accId]||(g.data||"")<=hoje()) return;
+    g.valor=a.valor; g.descricao=a.nome; g.catId=a.catId; g.data=dataCompraAssinatura(a,card,mk);
+  }));
+}
+function removerOcorrenciasFuturas(d,id){
+  Object.values(d.months||{}).forEach(m=>{
+    m.gastos=(m.gastos||[]).filter(g=>!(g.assinaturaId===id&&!m.faturasPagas?.[g.accId]&&(g.data||"")>hoje()));
+  });
+}
 
 /* migrate(): TODA evolução de schema acontece só aqui, na carga. */
 function migrate(d){
@@ -125,6 +174,8 @@ function migrate(d){
   });
   if(!Array.isArray(d.dividas)) d.dividas=[];
   d.dividas.forEach(dv=>{ if(dv.cartaoId===undefined) dv.cartaoId=null; });
+  if(!Array.isArray(d.assinaturas)) d.assinaturas=[];
+  aplicarAssinaturas(d);
   d.version=2;
   return d;
 }
@@ -1029,6 +1080,7 @@ function PageExtrato({data,mutate,mes,setModal,setToast}){
       const g=mm.gastos.find(x=>x.id===id);
       if(g?.fixaId){const f=mm.fixas.find(x=>x.id===g.fixaId);if(f){f.pago=false;f.gastoId=null;}}
       if(g?.dividaId){const dv=d.dividas.find(x=>x.id===g.dividaId);if(dv){dv.pagos=dv.pagos.filter(k=>k!==mes);}}
+      if(g?.assinaturaId){mm.assinaturasPuladas=[...(mm.assinaturasPuladas||[]),g.assinaturaId];}
       mm.gastos=mm.gastos.filter(x=>x.id!==id);return d;});
   }
   function delEntrada(id){ mutate(d=>{const mm=ensureMonth(d,mes);mm.entradas=mm.entradas.filter(x=>x.id!==id);return d;}); }
@@ -1050,6 +1102,7 @@ function PageExtrato({data,mutate,mes,setModal,setToast}){
             {tipo!=="entrada"&&<span>{g.transferParaId?"Transferência":FORMA_LABEL[g.forma]}</span>}
             {g.parcela&&<span>parcela {g.parcela.i}/{g.parcela.n}</span>}
             {g.fixaId&&<span className="chip" style={{background:"rgba(59,130,246,.15)",color:"var(--blue)"}}>fixa</span>}
+            {g.assinaturaId&&<span className="chip" style={{background:"rgba(99,102,241,.15)",color:"var(--accent)"}}>assinatura</span>}
             {g.dividaId&&<span className="chip" style={{background:"rgba(99,102,241,.15)",color:"var(--accent)"}}>dívida</span>}
           </div>
         </div>
@@ -1335,7 +1388,9 @@ function PageCartoes({data,mutate,mes,setModal}){
   const catBreak=Object.entries(compras.reduce((o,g)=>{o[g.catId]=(o[g.catId]||0)+g.valor;return o;},{}))
     .map(([id,v])=>({cat:catById(data,id),v})).sort((a,b)=>b.v-a.v);
 
-  function delCompra(id){ mutate(d=>{const mm=ensureMonth(d,mes);mm.gastos=mm.gastos.filter(g=>g.id!==id);return d;}); }
+  function delCompra(id){ mutate(d=>{const mm=ensureMonth(d,mes);const g=mm.gastos.find(x=>x.id===id);
+    if(g?.assinaturaId){mm.assinaturasPuladas=[...(mm.assinaturasPuladas||[]),g.assinaturaId];}
+    mm.gastos=mm.gastos.filter(x=>x.id!==id);return d;}); }
 
   return (
     <div className="pg">
@@ -1416,7 +1471,7 @@ function PageCartoes({data,mutate,mes,setModal}){
                 <div className="txicon" style={{background:cat.cor+"30"}}>{cat.icon}</div>
                 <div className="txinfo">
                   <div className="txd">{g.descricao}</div>
-                  <div className="txm"><span>{dmy(g.data)}</span><span>{cat.nome}</span>{g.parcela&&<span>parcela {g.parcela.i}/{g.parcela.n}</span>}</div>
+                  <div className="txm"><span>{dmy(g.data)}</span><span>{cat.nome}</span>{g.parcela&&<span>parcela {g.parcela.i}/{g.parcela.n}</span>}{g.assinaturaId&&<span className="chip" style={{background:"rgba(99,102,241,.15)",color:"var(--accent)"}}>assinatura</span>}</div>
                 </div>
                 <div className="txa" style={{color:"var(--red)"}}>-{fmt(g.valor)}</div>
                 <button className="tdel" onClick={ev=>{ev.stopPropagation();delCompra(g.id);}}>✕</button>
@@ -1977,6 +2032,23 @@ function PageConfig({data,mutate,userEmail,setToast}){
   const [novaCat,setNovaCat]=useState({nome:"",icon:"📌",cor:"#64748b"});
   const [showCat,setShowCat]=useState(false);
   const [remigrando,setRemigrando]=useState(false);
+  const [showAss,setShowAss]=useState(false);
+  const [novaAss,setNovaAss]=useState({nome:"",valor:"",dia:"",cartaoId:"",catId:""});
+  const cartoes=data.accounts.filter(a=>a.temCartao);
+  const assinaturas=data.assinaturas||[];
+  function addAssinatura(){
+    const card=data.accounts.find(c=>c.id===(novaAss.cartaoId||cartoes[0]?.id)); if(!card) return;
+    const dia=Math.max(1,Math.min(parseInt(novaAss.dia)||1,31)), valor=parseVal(novaAss.valor);
+    if(!novaAss.nome.trim()||!valor) return;
+    mutate(d=>{
+      if(!Array.isArray(d.assinaturas)) d.assinaturas=[];
+      d.assinaturas.push({id:uid(),nome:novaAss.nome.trim(),valor,cartaoId:card.id,dia,
+        catId:novaAss.catId||d.cats.find(c=>c.nome==="Assinaturas")?.id||d.cats[d.cats.length-1].id,
+        ativa:true,inicio:primeiraFaturaAssinatura(card,dia)});
+      return d;
+    });
+    setNovaAss({nome:"",valor:"",dia:"",cartaoId:"",catId:""}); setShowAss(false);
+  }
   return (
     <div className="pg">
       <div className="st">Conta</div>
@@ -2039,6 +2111,60 @@ function PageConfig({data,mutate,userEmail,setToast}){
           </div>
         ))}
         <div className="hint">Compra feita no dia do fechamento ou depois cai automaticamente na fatura do mês seguinte. Renomear uma conta não afeta o histórico (tudo é vinculado por ID).</div>
+      </div>
+
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div className="st">Assinaturas no cartão ♻️</div>
+        <button className="btn-mini" onClick={()=>setShowAss(s=>!s)}>{showAss?"Cancelar":"+ Nova"}</button>
+      </div>
+      {showAss&&(
+        <div className="card">
+          <div className="fg"><label className="fl">Nome</label><input className="fi" placeholder="Ex: Spotify, Apple…" value={novaAss.nome} onChange={e=>setNovaAss(a=>({...a,nome:e.target.value}))}/></div>
+          <div className="frow">
+            <div className="fg"><label className="fl">Valor mensal (R$)</label><input className="fi" inputMode="decimal" placeholder="0,00" value={novaAss.valor} onChange={e=>setNovaAss(a=>({...a,valor:e.target.value}))}/></div>
+            <div className="fg"><label className="fl">Dia da cobrança</label><input className="fi" type="number" min="1" max="31" value={novaAss.dia} onChange={e=>setNovaAss(a=>({...a,dia:e.target.value}))}/></div>
+          </div>
+          <div className="frow">
+            <div className="fg"><label className="fl">Cartão</label>
+              <select className="fi" value={novaAss.cartaoId||cartoes[0]?.id||""} onChange={e=>setNovaAss(a=>({...a,cartaoId:e.target.value}))}>
+                {cartoes.map(c=><option key={c.id} value={c.id}>{c.nome}</option>)}
+              </select></div>
+            <div className="fg"><label className="fl">Categoria</label>
+              <select className="fi" value={novaAss.catId||data.cats.find(c=>c.nome==="Assinaturas")?.id||""} onChange={e=>setNovaAss(a=>({...a,catId:e.target.value}))}>
+                {data.cats.map(c=><option key={c.id} value={c.id}>{c.icon} {c.nome}</option>)}
+              </select></div>
+          </div>
+          <button className="savebtn" disabled={!novaAss.nome.trim()||!parseVal(novaAss.valor)||!novaAss.dia||!cartoes.length} onClick={addAssinatura}>Adicionar assinatura</button>
+          <div className="hint" style={{marginTop:10}}>A cobrança entra sozinha, todo mês, na fatura certa (3 meses à frente). A 1ª fatura é a da próxima cobrança; se a deste mês já passou, lance à mão.</div>
+        </div>
+      )}
+      <div className="card">
+        {assinaturas.length===0&&<div className="empty" style={{padding:"10px 0"}}>Nenhuma assinatura cadastrada.</div>}
+        {assinaturas.map(a=>{
+          const card=data.accounts.find(c=>c.id===a.cartaoId)||{nome:"—",cor:"#888"};
+          return (
+            <div key={a.id} style={{padding:"10px 0",borderBottom:"1px solid var(--border)",opacity:a.ativa===false?.55:1}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+                <div style={{minWidth:0}}>
+                  <div style={{fontSize:13,fontWeight:700}}>{a.nome}{a.ativa===false&&<span className="chip" style={{marginLeft:6,background:"rgba(245,158,11,.15)",color:"var(--gold)"}}>pausada</span>}</div>
+                  <div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>dia {a.dia} · <span style={{color:card.cor,fontWeight:700}}>{card.nome}</span> · desde a fatura de {labelKey(a.inicio||mesAtualKey())}</div>
+                </div>
+                <input className="fi" inputMode="decimal" style={{width:92,textAlign:"right"}} value={a.valor||""}
+                  onChange={e=>{const v=parseVal(e.target.value);mutate(d=>{const x=(d.assinaturas||[]).find(y=>y.id===a.id);if(x){x.valor=v;sincronizarAssinatura(d,x);}return d;});}}/>
+              </div>
+              <div style={{display:"flex",gap:8,marginTop:8}}>
+                <button className="btn-ghost" style={{fontSize:10,padding:"5px 9px"}}
+                  onClick={()=>mutate(d=>{const x=(d.assinaturas||[]).find(y=>y.id===a.id);if(!x)return d;
+                    const c=d.accounts.find(k=>k.id===x.cartaoId);
+                    x.ativa=x.ativa===false;                       /* alterna */
+                    if(x.ativa) x.inicio=primeiraFaturaAssinatura(c,x.dia); else removerOcorrenciasFuturas(d,x.id);
+                    return d;})}>{a.ativa===false?"Reativar":"Pausar"}</button>
+                <button className="btn-ghost" style={{fontSize:10,padding:"5px 9px",color:"var(--red)",borderColor:"rgba(239,68,68,.3)"}}
+                  onClick={()=>{if(confirm(`Remover ${a.nome}? As cobranças futuras saem das faturas ainda não pagas; o histórico fica.`))mutate(d=>{removerOcorrenciasFuturas(d,a.id);d.assinaturas=(d.assinaturas||[]).filter(y=>y.id!==a.id);return d;});}}>Remover</button>
+              </div>
+            </div>
+          );
+        })}
       </div>
 
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
